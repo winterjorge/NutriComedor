@@ -1,0 +1,59 @@
+services:
+  # Capa de Datos
+  db:
+    image: postgres:16-alpine
+    container_name: nutricomedor_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-nutri_admin}
+      POSTGRES_PASSWORD: ${DB_PASS:-Nutri2026Secure!}
+      POSTGRES_DB: ${DB_NAME:-nutricomedor}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Inyección del script de llenado de datos al iniciar por primera vez
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - nutri_net
+
+  # Capa Lógica (Backend + IA)
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: nutricomedor_api
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql://${DB_USER:-nutri_admin}:${DB_PASS:-Nutri2026Secure!}@db:5432/${DB_NAME:-nutricomedor}
+      - TZ=America/Lima
+    #ports:
+    #  - "8000:8000"
+    depends_on:
+      - db
+    networks:
+      - nutri_net
+
+  # Capa de Presentación (Frontend Web)
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: nutricomedor_web
+    restart: unless-stopped
+    environment:
+      - TZ=America/Lima
+    ports:
+      - "80:80"
+      - "443:443" # Puerto seguro habilitado
+    depends_on:
+      - api
+    networks:
+      - nutri_net
+
+volumes:
+  pgdata:
+
+networks:
+  nutri_net:
+    driver: bridge
