@@ -1,0 +1,11 @@
+beautifulsoup4
+requests
+fastapi
+uvicorn
+pandas
+numpy
+scikit-learn
+psycopg2-binary
+pydantic
+python-multipart
+python-dotenv
