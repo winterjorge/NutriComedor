@@ -2,18 +2,11 @@
 db_bootstrap.py
 Objetivo: Asegurar que el esquema dinámico del sistema exista en la base de datos al
           arrancar la API, sin importar si el volumen de PostgreSQL fue creado antes de
-          que existieran los scripts actuales (el docker-entrypoint-initdb.d solo se
-          ejecuta en la PRIMERA inicialización del volumen).
+          que existieran los scripts parametros.sql / planificacion_dia, o si dichos
+          scripts no fueron montados en el docker-entrypoint-initdb.d.
 Uso: Importar en main.py y ejecutar `asegurar_esquema()` durante el startup (lifespan).
 Nota: Todas las sentencias son idempotentes (IF NOT EXISTS / ON CONFLICT DO NOTHING),
       por lo que pueden ejecutarse en cada arranque sin efectos secundarios.
-
-Historial de correcciones:
- - FIX (error 500 en /parametros y /planificar): creación de parametros_sistema (+seed),
-   planificacion_dia y columnas de planificación en presupuesto_semanal.
- - FIX COM-17 (costo de receta devuelve "column raciones does not exist" y el modal
-   Evaluar muestra S/ 0.00 sin detalle): se agrega la columna recetas_almuerzo.raciones
-   con valor por defecto 4, requerida por optimizador.py y planificacion.py.
 """
 import time
 import psycopg2
@@ -93,24 +86,11 @@ CREATE INDEX IF NOT EXISTS idx_planificacion_dia_presupuesto
 ON planificacion_dia(presupuesto_semanal_id);
 """
 
-# =========================================================================
-# DDL: FIX COM-17 - Columna 'raciones' en recetas_almuerzo.
-# El motor de costos (optimizador.py) y la lista de compras (planificacion.py)
-# consultan esta columna; en volúmenes antiguos no existe y todo el flujo de
-# evaluación de costos fallaba con "column raciones does not exist".
-# ADD COLUMN ... NOT NULL DEFAULT rellena automáticamente las filas existentes.
-# =========================================================================
-DDL_RECETAS_RACIONES = """
-ALTER TABLE recetas_almuerzo
-ADD COLUMN IF NOT EXISTS raciones INT NOT NULL DEFAULT 4;
-"""
-
 
 def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
     """
     Verifica/crea el esquema dinámico con reintentos, para tolerar el arranque
     en frío del contenedor PostgreSQL (que puede estar ejecutando init.sql).
-    Retorna True si el esquema quedó asegurado, False en caso contrario.
     """
     conn = None
     for intento in range(1, reintentos + 1):
@@ -124,11 +104,9 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
             cur.execute(DDL_PRESUPUESTO_COLUMNAS)
             # 3. Tabla de días planificados + índice
             cur.execute(DDL_PLANIFICACION_DIA)
-            # 4. FIX COM-17: columna raciones en recetas_almuerzo
-            cur.execute(DDL_RECETAS_RACIONES)
             conn.commit()
             cur.close()
-            print("[BOOTSTRAP] Esquema dinámico verificado/creado correctamente (incluye raciones COM-17).")
+            print("[BOOTSTRAP] Esquema dinámico verificado/creado correctamente.")
             return True
         except Exception as e:
             print(f"[BOOTSTRAP] Intento {intento}/{reintentos} fallido: {e}")
@@ -138,6 +116,5 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
                 conn = None
             if intento < reintentos:
                 time.sleep(espera_segundos)
-    # FIX: print() no acepta el argumento 'nivel' (causaba TypeError en la versión anterior)
-    print("[BOOTSTRAP] [ERROR] No se pudo asegurar el esquema tras los reintentos.")
+    print("[BOOTSTRAP] No se pudo asegurar el esquema tras los reintentos.", nivel="ERROR")
     return False
