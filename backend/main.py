@@ -3,13 +3,25 @@ main.py
 Objetivo: Punto de entrada de la aplicación FastAPI. Orquesta los routers, configuraciones globales y middleware.
 Uso: Ejecutar con `uvicorn main:app --host 0.0.0.0 --port 8000`.
 """
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # Importación de Routers Modulares
 from routers import health, presupuesto, recetas, ingredientes, padron, parametros, planificacion
+# FIX (error 500 en /parametros y /planificar): asegurado de esquema dinámico al arrancar
+from db_bootstrap import asegurar_esquema
 
-app = FastAPI(title="API - NutriComedor", version="2.2.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Verificar/crear tablas dinámicas (parametros_sistema, planificacion_dia,
+    # columnas de planificación) antes de atender peticiones.
+    asegurar_esquema()
+    yield
+
+
+app = FastAPI(title="API - NutriComedor", version="2.2.1", lifespan=lifespan)
 
 # Configuración de CORS (Mantiene compatibilidad con tu Frontend)
 app.add_middleware(
@@ -27,7 +39,7 @@ app.include_router(presupuesto.router, prefix="/api/v1")
 app.include_router(recetas.router, prefix="/api/v1")
 app.include_router(ingredientes.router, prefix="/api/v1")
 app.include_router(padron.router, prefix="/api/v1")
-app.include_router(planificacion.router, prefix="/api/v1")  # <-- NUEVO
+app.include_router(planificacion.router, prefix="/api/v1")
 
 if __name__ == "__main__":
     import uvicorn

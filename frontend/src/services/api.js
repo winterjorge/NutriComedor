@@ -1,4 +1,23 @@
+/**
+ * services/api.js
+ * Objetivo: Servicio centralizado de comunicación HTTP con la API del backend.
+ * Uso: Importar `api` en hooks y componentes para consumir los endpoints del sistema.
+ * FIX: Se agrega `leerErrorSeguro` para parsear errores del servidor de forma segura.
+ *      Antes, una respuesta 500 en texto plano ("Internal Server Error") rompía el
+ *      JSON.parse del frontend con "Unexpected token 'I'".
+ */
 const API_BASE = '/api/v1';
+
+// Parser defensivo de errores: si el cuerpo no es JSON, devuelve un mensaje legible
+const leerErrorSeguro = async (response, mensajePorDefecto) => {
+    try {
+        const data = await response.json();
+        return data.detail || mensajePorDefecto;
+    } catch (e) {
+        // El servidor respondió con texto plano o cuerpo vacío
+        return `${mensajePorDefecto} (HTTP ${response.status})`;
+    }
+};
 
 export const api = {
     // ==========================================
@@ -31,8 +50,7 @@ export const api = {
             body: JSON.stringify(data)
         });
         if (!response.ok) {
-            const err = await response.json();
-            throw new Error(err.detail || 'Error al crear receta');
+            throw new Error(await leerErrorSeguro(response, 'Error al crear receta'));
         }
         return response.json();
     },
@@ -43,8 +61,7 @@ export const api = {
             body: JSON.stringify(data)
         });
         if (!response.ok) {
-            const err = await response.json();
-            throw new Error(err.detail || 'Error al actualizar receta');
+            throw new Error(await leerErrorSeguro(response, 'Error al actualizar receta'));
         }
         return response.json();
     },
@@ -129,8 +146,7 @@ export const api = {
             body: JSON.stringify(data)
         });
         if (!response.ok) {
-            const err = await response.json();
-            throw new Error(err.detail || 'Error al planificar semana');
+            throw new Error(await leerErrorSeguro(response, 'Error al planificar semana'));
         }
         return response.json();
     },
@@ -141,8 +157,7 @@ export const api = {
             body: JSON.stringify(data)
         });
         if (!response.ok) {
-            const err = await response.json();
-            throw new Error(err.detail || 'Error al guardar planificación');
+            throw new Error(await leerErrorSeguro(response, 'Error al guardar planificación'));
         }
         return response.json();
     },
@@ -162,7 +177,7 @@ export const api = {
     },
 
     // ==========================================
-    // PLANIFICACIONES GUARDADAS (NUEVO)
+    // PLANIFICACIONES GUARDADAS
     // ==========================================
     getPlanificaciones: async () => {
         const response = await fetch(`${API_BASE}/planificaciones`);
@@ -175,7 +190,7 @@ export const api = {
         return response.json();
     },
     getListaCompras: async (planificacionId, dia = null) => {
-        const url = dia 
+        const url = dia
             ? `${API_BASE}/planificaciones/${planificacionId}/lista-compras?dia=${dia}`
             : `${API_BASE}/planificaciones/${planificacionId}/lista-compras`;
         const response = await fetch(url);
