@@ -8,20 +8,19 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # Importación de Routers Modulares
-from routers import health, presupuesto, recetas, ingredientes, padron, parametros, planificacion
-# FIX (error 500 en /parametros y /planificar): asegurado de esquema dinámico al arrancar
+from routers import health, presupuesto, recetas, ingredientes, padron, parametros, planificacion, auth
+# Asegurado de esquema dinámico (parámetros, planificación, raciones, seguridad) al arrancar
 from db_bootstrap import asegurar_esquema
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Verificar/crear tablas dinámicas (parametros_sistema, planificacion_dia,
-    # columnas de planificación) antes de atender peticiones.
+    # Verificar/crear tablas dinámicas antes de atender peticiones.
     asegurar_esquema()
     yield
 
 
-app = FastAPI(title="API - NutriComedor", version="2.2.1", lifespan=lifespan)
+app = FastAPI(title="API - NutriComedor", version="2.3.0", lifespan=lifespan)
 
 # Configuración de CORS (Mantiene compatibilidad con tu Frontend)
 app.add_middleware(
@@ -34,6 +33,7 @@ app.add_middleware(
 
 # Registro de Routers con el prefijo global de la API
 app.include_router(health.router, prefix="/api/v1")
+app.include_router(auth.router, prefix="/api/v1")
 app.include_router(parametros.router, prefix="/api/v1")
 app.include_router(presupuesto.router, prefix="/api/v1")
 app.include_router(recetas.router, prefix="/api/v1")
