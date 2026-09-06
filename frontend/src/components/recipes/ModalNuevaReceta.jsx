@@ -10,16 +10,22 @@
  *  - Causa original: el contenedor externo combinaba `items-center` con `overflow-y-auto`
  *    y la caja interna crecía sin altura máxima; con listas largas de ingredientes la parte
  *    superior (encabezado e "Información General") quedaba recortada e inaccesible.
- *  - Solución: el modal ahora tiene altura máxima (max-h-[90vh]) con layout de columna:
+ *  - Solución: el modal tiene altura máxima (max-h-[90vh]) con layout de columna:
  *    encabezado fijo, cuerpo con scroll interno y pie de acciones fijo.
- *  - La lista de ingredientes posee su propia área de scroll (max-h-72), manteniendo la
- *    sección de Información General siempre visible y editable.
- *  - Lista de ingredientes rediseñada como cuadrícula compacta tipo tabla: encabezados de
- *    columna únicos, filas numeradas y fondos alternados para facilitar su lectura.
+ *  - Lista de ingredientes como cuadrícula compacta tipo tabla: encabezados de columna
+ *    únicos, filas numeradas y fondos alternados para facilitar su lectura.
+ *
+ * MEJORA UX (Ticket Jira COM-18):
+ *  - Confirmación modal antes de Guardar, Cancelar (o cerrar con X) y Eliminar ingrediente,
+ *    para evitar pérdidas de trabajo por clics accidentales (reutiliza ModalConfirmacion).
+ *  - El mensaje de éxito deja de ser un alert() nativo y pasa a un ModalExito con el
+ *    mismo diseño de la web.
  */
 import React, { useState, useEffect, useRef } from 'react';
 import { X, Plus, Trash2 } from 'lucide-react';
 import { api } from '../../services/api';
+import { ModalConfirmacion } from '../common/ModalConfirmacion';
+import { ModalExito } from '../common/ModalExito';
 
 export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) => {
     // Indica si el modal opera en modo edición (true) o creación (false)
@@ -49,8 +55,14 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
 
-    // COM-16: referencia al cuerpo scrolleable del modal para poder
-    // llevar el scroll al inicio cuando se muestra un error de validación
+    // UX (COM-18): modal de confirmación para acciones sensibles.
+    // Estructura: { tipo: 'guardar' | 'cancelar' | 'eliminar', index?: number }
+    const [modalConf, setModalConf] = useState(null);
+
+    // UX (COM-18): mensaje del modal de éxito (string vacío = cerrado)
+    const [mensajeExito, setMensajeExito] = useState('');
+
+    // Referencia al cuerpo scrolleable para subir el scroll al mostrar errores
     const cuerpoRef = useRef(null);
 
     // Al abrir el modal: cargar catálogos y preparar modo edición o creación
@@ -125,7 +137,7 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
         setError('');
     };
 
-    // COM-16: fija el error y sube el scroll del cuerpo para que el mensaje sea visible
+    // Fija el error y sube el scroll del cuerpo para que el mensaje sea visible
     const mostrarError = (mensaje) => {
         setError(mensaje);
         if (cuerpoRef.current) {
@@ -182,13 +194,59 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
         return true;
     };
 
-    // Envía el formulario: crea o actualiza la receta y sincroniza sus ingredientes
-    const handleSubmit = async (e) => {
+    // ===== UX (COM-18): SOLICITUDES DE CONFIRMACIÓN (no ejecutan la acción directamente) =====
+
+    // Submit del formulario: valida y, si todo es correcto, pide confirmación de guardado
+    const solicitarGuardado = (e) => {
         e.preventDefault();
         setError('');
-        if (!validarFormulario()) {
-            return;
+        if (!validarFormulario()) return;
+        setModalConf({ tipo: 'guardar' });
+    };
+
+    // Cancelar (botón o X del encabezado): pide confirmación antes de descartar cambios
+    const solicitarCancelacion = () => {
+        setModalConf({ tipo: 'cancelar' });
+    };
+
+    // Eliminar ingrediente: pide confirmación antes de quitar la fila
+    const solicitarEliminacion = (index) => {
+        setModalConf({ tipo: 'eliminar', index });
+    };
+
+    // Ejecuta la acción confirmada según el tipo pendiente en modalConf
+    const confirmarAccion = () => {
+        if (!modalConf) return;
+        const { tipo, index } = modalConf;
+        setModalConf(null); // cierra el modal de confirmación antes de ejecutar
+        if (tipo === 'guardar') {
+            ejecutarGuardado();
+        } else if (tipo === 'cancelar') {
+            handleClose();
+        } else if (tipo === 'eliminar') {
+            eliminarIngrediente(index);
         }
+    };
+
+    // Construye el mensaje del modal de confirmación según la acción pendiente
+    const obtenerMensajeConfirmacion = () => {
+        if (!modalConf) return '';
+        if (modalConf.tipo === 'guardar') {
+            return `¿Estás seguro de que deseas ${esEdicion ? 'actualizar' : 'guardar'} la receta "${formData.nombre}"?`;
+        }
+        if (modalConf.tipo === 'cancelar') {
+            return '¿Estás seguro de que deseas cancelar? Los cambios no guardados se perderán.';
+        }
+        if (modalConf.tipo === 'eliminar') {
+            const ing = ingredientes[modalConf.index];
+            const nombreIng = ingredientesDisponibles.find(i => i.id === parseInt(ing?.ingrediente_id))?.nombre;
+            return `¿Estás seguro de eliminar el ingrediente ${nombreIng ? `"${nombreIng}"` : `#${modalConf.index + 1}`}? Esta acción no se puede deshacer.`;
+        }
+        return '';
+    };
+
+    // ===== GUARDADO REAL (se ejecuta solo tras confirmación) =====
+    const ejecutarGuardado = async () => {
         setLoading(true);
         try {
             const recetaData = {
@@ -235,11 +293,9 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
                     }
                 }
             }
-            handleClose();
-            if (onSuccess) {
-                onSuccess();
-            }
-            alert(esEdicion ? 'Receta actualizada exitosamente' : 'Receta creada exitosamente');
+            // UX (COM-18): mostrar modal de éxito (reemplaza al alert nativo).
+            // El cierre real y el refresco de la lista ocurren al aceptar el modal de éxito.
+            setMensajeExito(esEdicion ? 'Receta actualizada exitosamente' : 'Receta creada exitosamente');
         } catch (err) {
             console.error('Error guardando receta:', err);
             mostrarError('Error al guardar la receta: ' + err.message);
@@ -254,283 +310,312 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
         onClose();
     };
 
+    // Al aceptar el modal de éxito: cierra todo, limpia y notifica al padre para refrescar
+    const cerrarExito = () => {
+        setMensajeExito('');
+        resetearFormulario();
+        onClose();
+        if (onSuccess) {
+            onSuccess();
+        }
+    };
+
     if (!isOpen) return null;
 
     return (
-        /* COM-16: contenedor externo SIN overflow propio; el scroll vive dentro del modal */
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
-            {/* COM-16: altura máxima 90vh + layout de columna => encabezado y pie fijos, cuerpo scrolleable */}
-            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden">
+        <>
+            {/* Contenedor externo SIN overflow propio; el scroll vive dentro del modal */}
+            <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+                {/* Altura máxima 90vh + layout de columna => encabezado y pie fijos, cuerpo scrolleable */}
+                <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden">
 
-                {/* ===== Encabezado fijo (siempre visible) ===== */}
-                <div className="flex justify-between items-center px-6 py-4 border-b border-slate-200 bg-white shrink-0">
-                    <h3 className="font-bold text-xl text-slate-800">
-                        {esEdicion ? 'Editar Receta' : 'Nueva Receta'}
-                    </h3>
-                    <button
-                        onClick={handleClose}
-                        className="text-slate-400 hover:text-slate-600 transition-colors"
-                        aria-label="Cerrar modal"
-                    >
-                        <X size={24} />
-                    </button>
-                </div>
+                    {/* ===== Encabezado fijo (siempre visible) ===== */}
+                    <div className="flex justify-between items-center px-6 py-4 border-b border-slate-200 bg-white shrink-0">
+                        <h3 className="font-bold text-xl text-slate-800">
+                            {esEdicion ? 'Editar Receta' : 'Nueva Receta'}
+                        </h3>
+                        {/* UX (COM-18): la X también pide confirmación para no perder cambios por accidente */}
+                        <button
+                            onClick={solicitarCancelacion}
+                            className="text-slate-400 hover:text-slate-600 transition-colors"
+                            aria-label="Cerrar modal"
+                        >
+                            <X size={24} />
+                        </button>
+                    </div>
 
-                {/* El form envuelve cuerpo scrolleable + pie fijo para que el submit funcione desde el pie */}
-                <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
+                    {/* El form envuelve cuerpo scrolleable + pie fijo para que el submit funcione desde el pie */}
+                    <form onSubmit={solicitarGuardado} className="flex flex-col flex-1 min-h-0">
 
-                    {/* ===== Cuerpo con scroll interno (COM-16) ===== */}
-                    <div ref={cuerpoRef} className="flex-1 overflow-y-auto p-6">
+                        {/* ===== Cuerpo con scroll interno ===== */}
+                        <div ref={cuerpoRef} className="flex-1 overflow-y-auto p-6">
 
-                        {/* Mensaje de error de validación */}
-                        {error && (
-                            <div className="mb-4 p-4 bg-red-50 border border-red-200 text-red-700 rounded-lg">
-                                {error}
-                            </div>
-                        )}
-
-                        {/* ===== Sección: Información General ===== */}
-                        <div className="mb-6">
-                            <h4 className="text-lg font-semibold text-slate-700 mb-4">Información General</h4>
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                <div className="md:col-span-2">
-                                    <label className="block text-sm font-medium text-slate-700 mb-1">
-                                        Nombre de la Receta *
-                                    </label>
-                                    <input
-                                        type="text"
-                                        name="nombre"
-                                        value={formData.nombre}
-                                        onChange={handleInputChange}
-                                        className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
-                                        placeholder="Ej: Arroz con Pollo"
-                                        required
-                                    />
+                            {/* Mensaje de error de validación */}
+                            {error && (
+                                <div className="mb-4 p-4 bg-red-50 border border-red-200 text-red-700 rounded-lg">
+                                    {error}
                                 </div>
-                                <div className="md:col-span-2">
-                                    <label className="block text-sm font-medium text-slate-700 mb-1">
-                                        Descripción
-                                    </label>
-                                    <textarea
-                                        name="descripcion"
-                                        value={formData.descripcion}
-                                        onChange={handleInputChange}
-                                        rows="2"
-                                        className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                                        placeholder="Descripción de la receta..."
-                                    />
-                                </div>
-                                <div>
-                                    <label className="block text-sm font-medium text-slate-700 mb-1">
-                                        Energía (kcal)
-                                    </label>
-                                    <input
-                                        type="number"
-                                        name="energia_kcal"
-                                        value={formData.energia_kcal}
-                                        onChange={handleInputChange}
-                                        step="0.01"
-                                        className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                                    />
-                                </div>
-                                <div>
-                                    <label className="block text-sm font-medium text-slate-700 mb-1">
-                                        Proteína (g)
-                                    </label>
-                                    <input
-                                        type="number"
-                                        name="proteina_g"
-                                        value={formData.proteina_g}
-                                        onChange={handleInputChange}
-                                        step="0.01"
-                                        className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                                    />
-                                </div>
-                                <div>
-                                    <label className="block text-sm font-medium text-slate-700 mb-1">
-                                        Hierro (mg)
-                                    </label>
-                                    <input
-                                        type="number"
-                                        name="hierro_mg"
-                                        value={formData.hierro_mg}
-                                        onChange={handleInputChange}
-                                        step="0.01"
-                                        className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                                    />
-                                </div>
-                                <div>
-                                    <label className="block text-sm font-medium text-slate-700 mb-1">
-                                        Vitamina A (μg)
-                                    </label>
-                                    <input
-                                        type="number"
-                                        name="vitamina_a_ug"
-                                        value={formData.vitamina_a_ug}
-                                        onChange={handleInputChange}
-                                        step="0.01"
-                                        className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                                    />
-                                </div>
-                                <div>
-                                    <label className="block text-sm font-medium text-slate-700 mb-1">
-                                        Zinc (mg)
-                                    </label>
-                                    <input
-                                        type="number"
-                                        name="zinc_mg"
-                                        value={formData.zinc_mg}
-                                        onChange={handleInputChange}
-                                        step="0.01"
-                                        className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                                    />
-                                </div>
-                                <div>
-                                    <label className="block text-sm font-medium text-slate-700 mb-1">
-                                        Carbohidratos (g)
-                                    </label>
-                                    <input
-                                        type="number"
-                                        name="carbohidratos_g"
-                                        value={formData.carbohidratos_g}
-                                        onChange={handleInputChange}
-                                        step="0.01"
-                                        className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                                    />
-                                </div>
-                            </div>
-                        </div>
+                            )}
 
-                        {/* ===== Sección: Ingredientes (rediseñada COM-16) ===== */}
-                        <div className="mb-2">
-                            {/* Encabezado de sección con contador y botón de agregar */}
-                            <div className="flex justify-between items-center mb-3">
-                                <h4 className="text-lg font-semibold text-slate-700">
-                                    Ingredientes *{' '}
-                                    <span className="text-sm font-normal text-slate-400">
-                                        ({ingredientes.length} {ingredientes.length === 1 ? 'ítem' : 'ítems'})
-                                    </span>
-                                </h4>
-                                <button
-                                    type="button"
-                                    onClick={agregarIngrediente}
-                                    className="flex items-center gap-2 px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors text-sm"
-                                >
-                                    <Plus size={16} />
-                                    Agregar Ingrediente
-                                </button>
-                            </div>
-
-                            {/* COM-16: encabezados de columna ÚNICOS para toda la lista (evita repetir
-                                etiquetas en cada fila y mejora la lectura) */}
-                            <div className="grid grid-cols-12 gap-2 px-3 pb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                                <span className="col-span-6">Ingrediente</span>
-                                <span className="col-span-2">Cantidad *</span>
-                                <span className="col-span-3">Unidad *</span>
-                                <span className="col-span-1 text-center">Acción</span>
-                            </div>
-
-                            {/* COM-16: área de scroll propia para la lista; así la Información General
-                                permanece visible aunque existan muchos ingredientes */}
-                            <div className="space-y-2 overflow-y-auto max-h-72 pr-1">
-                                {ingredientes.map((ing, index) => (
-                                    <div
-                                        key={index}
-                                        className={`grid grid-cols-12 gap-2 items-center border border-slate-200 rounded-lg px-3 py-2 ${
-                                            index % 2 === 1 ? 'bg-slate-50' : 'bg-white'
-                                        }`}
-                                    >
-                                        {/* Número de fila + select de ingrediente */}
-                                        <div className="col-span-6 flex items-center gap-2">
-                                            <span className="text-xs font-bold text-slate-400 w-6 text-right shrink-0">
-                                                {index + 1}.
-                                            </span>
-                                            <select
-                                        value={ing.ingrediente_id}
-                                        onChange={(e) => handleIngredienteChange(index, 'ingrediente_id', e.target.value)}
-                                        className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-sm bg-white"
-                                        aria-label={`Ingrediente ${index + 1}`}
-                                        required
-                                    >
-                                        <option value="">Seleccionar...</option>
-                                        {ingredientesDisponibles.map(item => (
-                                            <option key={item.id} value={item.id}>
-                                                {item.nombre}
-                                            </option>
-                                        ))}
-                                    </select>
-                                        </div>
-
-                                        {/* Cantidad requerida */}
-                                        <div className="col-span-2">
-                                            <input
-                                                type="number"
-                                                value={ing.cantidad_requerida}
-                                                onChange={(e) => handleIngredienteChange(index, 'cantidad_requerida', e.target.value)}
-                                                step="0.01"
-                                                min="0.01"
-                                                className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-sm"
-                                                placeholder="Ej: 100"
-                                                aria-label={`Cantidad del ingrediente ${index + 1}`}
-                                                required
-                                            />
-                                        </div>
-
-                                        {/* Unidad de medida */}
-                                        <div className="col-span-3">
-                                            <select
-                                                value={ing.unidad_medida_id}
-                                                onChange={(e) => handleIngredienteChange(index, 'unidad_medida_id', e.target.value)}
-                                                className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-sm bg-white"
-                                                aria-label={`Unidad del ingrediente ${index + 1}`}
-                                                required
-                                            >
-                                                <option value="">Seleccionar...</option>
-                                                {unidadesMedida.map(um => (
-                                                    <option key={um.id} value={um.id}>
-                                                        {um.nombre}
-                                                    </option>
-                                                ))}
-                                            </select>
-                                        </div>
-
-                                        {/* Botón eliminar fila */}
-                                        <div className="col-span-1 flex justify-center">
-                                            <button
-                                                type="button"
-                                                onClick={() => eliminarIngrediente(index)}
-                                                className="p-1.5 text-red-600 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                                                disabled={ingredientes.length === 1}
-                                                aria-label={`Eliminar ingrediente ${index + 1}`}
-                                            >
-                                                <Trash2 size={16} />
-                                            </button>
-                                        </div>
+                            {/* ===== Sección: Información General ===== */}
+                            <div className="mb-6">
+                                <h4 className="text-lg font-semibold text-slate-700 mb-4">Información General</h4>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div className="md:col-span-2">
+                                        <label className="block text-sm font-medium text-slate-700 mb-1">
+                                            Nombre de la Receta *
+                                        </label>
+                                        <input
+                                            type="text"
+                                            name="nombre"
+                                            value={formData.nombre}
+                                            onChange={handleInputChange}
+                                            className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                                            placeholder="Ej: Arroz con Pollo"
+                                            required
+                                        />
                                     </div>
-                                ))}
+                                    <div className="md:col-span-2">
+                                        <label className="block text-sm font-medium text-slate-700 mb-1">
+                                            Descripción
+                                        </label>
+                                        <textarea
+                                            name="descripcion"
+                                            value={formData.descripcion}
+                                            onChange={handleInputChange}
+                                            rows="2"
+                                            className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                                            placeholder="Descripción de la receta..."
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-slate-700 mb-1">
+                                            Energía (kcal)
+                                        </label>
+                                        <input
+                                            type="number"
+                                            name="energia_kcal"
+                                            value={formData.energia_kcal}
+                                            onChange={handleInputChange}
+                                            step="0.01"
+                                            className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-slate-700 mb-1">
+                                            Proteína (g)
+                                        </label>
+                                        <input
+                                            type="number"
+                                            name="proteina_g"
+                                            value={formData.proteina_g}
+                                            onChange={handleInputChange}
+                                            step="0.01"
+                                            className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-slate-700 mb-1">
+                                            Hierro (mg)
+                                        </label>
+                                        <input
+                                            type="number"
+                                            name="hierro_mg"
+                                            value={formData.hierro_mg}
+                                            onChange={handleInputChange}
+                                            step="0.01"
+                                            className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-slate-700 mb-1">
+                                            Vitamina A (μg)
+                                        </label>
+                                        <input
+                                            type="number"
+                                            name="vitamina_a_ug"
+                                            value={formData.vitamina_a_ug}
+                                            onChange={handleInputChange}
+                                            step="0.01"
+                                            className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-slate-700 mb-1">
+                                            Zinc (mg)
+                                        </label>
+                                        <input
+                                            type="number"
+                                            name="zinc_mg"
+                                            value={formData.zinc_mg}
+                                            onChange={handleInputChange}
+                                            step="0.01"
+                                            className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-slate-700 mb-1">
+                                            Carbohidratos (g)
+                                        </label>
+                                        <input
+                                            type="number"
+                                            name="carbohidratos_g"
+                                            value={formData.carbohidratos_g}
+                                            onChange={handleInputChange}
+                                            step="0.01"
+                                            className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* ===== Sección: Ingredientes (cuadrícula tipo tabla) ===== */}
+                            <div className="mb-2">
+                                {/* Encabezado de sección con contador y botón de agregar */}
+                                <div className="flex justify-between items-center mb-3">
+                                    <h4 className="text-lg font-semibold text-slate-700">
+                                        Ingredientes *{' '}
+                                        <span className="text-sm font-normal text-slate-400">
+                                            ({ingredientes.length} {ingredientes.length === 1 ? 'ítem' : 'ítems'})
+                                        </span>
+                                    </h4>
+                                    <button
+                                        type="button"
+                                        onClick={agregarIngrediente}
+                                        className="flex items-center gap-2 px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors text-sm"
+                                    >
+                                        <Plus size={16} />
+                                        Agregar Ingrediente
+                                    </button>
+                                </div>
+
+                                {/* Encabezados de columna ÚNICOS para toda la lista */}
+                                <div className="grid grid-cols-12 gap-2 px-3 pb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                    <span className="col-span-6">Ingrediente</span>
+                                    <span className="col-span-2">Cantidad *</span>
+                                    <span className="col-span-3">Unidad *</span>
+                                    <span className="col-span-1 text-center">Acción</span>
+                                </div>
+
+                                {/* Área de scroll propia para la lista de ingredientes */}
+                                <div className="space-y-2 overflow-y-auto max-h-72 pr-1">
+                                    {ingredientes.map((ing, index) => (
+                                        <div
+                                            key={index}
+                                            className={`grid grid-cols-12 gap-2 items-center border border-slate-200 rounded-lg px-3 py-2 ${
+                                                index % 2 === 1 ? 'bg-slate-50' : 'bg-white'
+                                            }`}
+                                        >
+                                            {/* Número de fila + select de ingrediente */}
+                                            <div className="col-span-6 flex items-center gap-2">
+                                                <span className="text-xs font-bold text-slate-400 w-6 text-right shrink-0">
+                                                    {index + 1}.
+                                                </span>
+                                                <select
+                                                    value={ing.ingrediente_id}
+                                                    onChange={(e) => handleIngredienteChange(index, 'ingrediente_id', e.target.value)}
+                                                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-sm bg-white"
+                                                    aria-label={`Ingrediente ${index + 1}`}
+                                                    required
+                                                >
+                                                    <option value="">Seleccionar...</option>
+                                                    {ingredientesDisponibles.map(item => (
+                                                        <option key={item.id} value={item.id}>
+                                                            {item.nombre}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                            </div>
+
+                                            {/* Cantidad requerida */}
+                                            <div className="col-span-2">
+                                                <input
+                                                    type="number"
+                                                    value={ing.cantidad_requerida}
+                                                    onChange={(e) => handleIngredienteChange(index, 'cantidad_requerida', e.target.value)}
+                                                    step="0.01"
+                                                    min="0.01"
+                                                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-sm"
+                                                    placeholder="Ej: 100"
+                                                    aria-label={`Cantidad del ingrediente ${index + 1}`}
+                                                    required
+                                                />
+                                            </div>
+
+                                            {/* Unidad de medida */}
+                                            <div className="col-span-3">
+                                                <select
+                                                    value={ing.unidad_medida_id}
+                                                    onChange={(e) => handleIngredienteChange(index, 'unidad_medida_id', e.target.value)}
+                                                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-sm bg-white"
+                                                    aria-label={`Unidad del ingrediente ${index + 1}`}
+                                                    required
+                                                >
+                                                    <option value="">Seleccionar...</option>
+                                                    {unidadesMedida.map(um => (
+                                                        <option key={um.id} value={um.id}>
+                                                            {um.nombre}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                            </div>
+
+                                            {/* Botón eliminar fila (pide confirmación COM-18) */}
+                                            <div className="col-span-1 flex justify-center">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => solicitarEliminacion(index)}
+                                                    className="p-1.5 text-red-600 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                                    disabled={ingredientes.length === 1}
+                                                    aria-label={`Eliminar ingrediente ${index + 1}`}
+                                                >
+                                                    <Trash2 size={16} />
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
                             </div>
                         </div>
-                    </div>
 
-                    {/* ===== Pie fijo con acciones (siempre visible, COM-16) ===== */}
-                    <div className="flex justify-end gap-3 px-6 py-4 border-t border-slate-200 bg-slate-50 shrink-0">
-                        <button
-                            type="button"
-                            onClick={handleClose}
-                            className="px-6 py-2 border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-100 transition-colors"
-                        >
-                            Cancelar
-                        </button>
-                        <button
-                            type="submit"
-                            disabled={loading}
-                            className="px-6 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                            {loading ? 'Guardando...' : (esEdicion ? 'Actualizar Receta' : 'Guardar Receta')}
-                        </button>
-                    </div>
-                </form>
+                        {/* ===== Pie fijo con acciones (siempre visible) ===== */}
+                        <div className="flex justify-end gap-3 px-6 py-4 border-t border-slate-200 bg-slate-50 shrink-0">
+                            {/* UX (COM-18): Cancelar pide confirmación antes de descartar cambios */}
+                            <button
+                                type="button"
+                                onClick={solicitarCancelacion}
+                                className="px-6 py-2 border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-100 transition-colors"
+                            >
+                                Cancelar
+                            </button>
+                            {/* UX (COM-18): Guardar valida y pide confirmación antes de ejecutar */}
+                            <button
+                                type="submit"
+                                disabled={loading}
+                                className="px-6 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                {loading ? 'Guardando...' : (esEdicion ? 'Actualizar Receta' : 'Guardar Receta')}
+                            </button>
+                        </div>
+                    </form>
+                </div>
             </div>
-        </div>
+
+            {/* Modal de confirmación para acciones sensibles (guardar/cancelar/eliminar) */}
+            <ModalConfirmacion
+                isOpen={!!modalConf}
+                onClose={() => setModalConf(null)}
+                onConfirm={confirmarAccion}
+                mensaje={obtenerMensajeConfirmacion()}
+                tipo={modalConf?.tipo === 'eliminar' ? 'danger' : 'warning'}
+            />
+
+            {/* Modal de éxito con el diseño de la web (reemplaza al alert nativo) */}
+            <ModalExito
+                isOpen={!!mensajeExito}
+                onClose={cerrarExito}
+                mensaje={mensajeExito}
+            />
+        </>
     );
 };
