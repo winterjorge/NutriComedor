@@ -1,0 +1,23 @@
+# Archivos comprimidos
+*.rar
+*.zip
+
+# Archivos de texto generados localmente
+backend/backend_structure.txt
+folder-file_estructure.txt
+
+# Logs
+backend/logs/
+
+# Variables de entorno (¡Crítico por seguridad!)
+.env
+backend/scraper/.env
+
+# Caché de Python (Ignora todas las carpetas con este nombre en cualquier ruta)
+__pycache__/
+*.py[cod]
+
+# Entornos Virtuales de Python
+venv/
+backend/venv/
+backend/scraper/venv/
