@@ -12,14 +12,21 @@ Historial de correcciones:
  - FIX (error 500 en /parametros y /planificar): creación de parametros_sistema (+seed),
    planificacion_dia y columnas de planificación en presupuesto_semanal.
  - FIX COM-17: columna recetas_almuerzo.raciones con valor por defecto 4.
- - NUEVO COM-19 (Login): columnas de seguridad en usuarios (intentos_fallidos,
-   bloqueado, fecha_clave, clave_provisoria) y migración de hashes legacy a PBKDF2
-   con clave provisoria Nutri2026 (cambio obligatorio en primer login).
+ - COM-19 (Login): columnas de seguridad en usuarios (intentos_fallidos, bloqueado,
+   fecha_clave, clave_provisoria) y migración de hashes legacy a PBKDF2 con clave
+   provisoria Nutri2026 (cambio obligatorio en primer login).
+ - COM-19 (Admin respaldo): creación idempotente del usuario administrador con
+   DNI 0000000 y clave provisoria Admin2026 (cambio obligatorio en primer login).
 """
 import time
 import psycopg2
 from config import DB_URL
-from seguridad import hashear_clave, CLAVE_INICIAL
+from seguridad import (
+    hashear_clave,
+    CLAVE_INICIAL,
+    DNI_ADMIN_RESPALDO,
+    CLAVE_INICIAL_ADMIN
+)
 
 # =========================================================================
 # DDL: Tabla de parámetros dinámicos (espejo de database/parametros.sql)
@@ -124,6 +131,37 @@ def _migrar_claves_legacy(cur):
     return len(filas)
 
 
+def _asegurar_usuario_admin(cur):
+    """
+    COM-19: Crea el usuario administrador de respaldo (DNI 00000000) con clave
+    provisoria (Admin2026) si aún no existe. Idempotente: si el usuario ya existe
+    no se modifica nada (respeta la clave que el propio usuario haya definido).
+    El primer login forzará el cambio de clave (clave_provisoria = TRUE).
+    """
+    cur.execute(
+        "SELECT id FROM usuarios WHERE documento_identidad = %s;",
+        (DNI_ADMIN_RESPALDO,)
+    )
+    if cur.fetchone():
+        return False  # El usuario ya existe: no tocar
+    cur.execute("""
+        INSERT INTO usuarios
+        (tipo_documento, documento_identidad, nombres, apellido_paterno, apellido_materno,
+         fecha_nacimiento, clave_hash, rol, estado_activo, clave_provisoria, fecha_clave)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE, TRUE, CURRENT_TIMESTAMP);
+    """, (
+        'DNI',
+        DNI_ADMIN_RESPALDO,
+        'Administrador',
+        'Sistema',
+        'OSB',
+        '1990-01-01',
+        hashear_clave(CLAVE_INICIAL_ADMIN),
+        'Administrador'
+    ))
+    return True
+
+
 def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
     """
     Verifica/crea el esquema dinámico con reintentos, para tolerar el arranque
@@ -147,10 +185,14 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
             cur.execute(DDL_USUARIOS_SEGURIDAD)
             # 6. COM-19: migración de hashes legacy a PBKDF2 (clave provisoria)
             migrados = _migrar_claves_legacy(cur)
+            # 7. COM-19: usuario administrador de respaldo (DNI 00000000)
+            admin_creado = _asegurar_usuario_admin(cur)
             conn.commit()
             cur.close()
             if migrados:
                 print(f"[BOOTSTRAP] {migrados} usuario(s) con clave provisoria asignada (cambio obligatorio en primer login).")
+            if admin_creado:
+                print(f"[BOOTSTRAP] Usuario admin de respaldo creado (DNI {DNI_ADMIN_RESPALDO}) con clave provisoria.")
             print("[BOOTSTRAP] Esquema dinámico verificado/creado correctamente (incluye seguridad COM-19).")
             return True
         except Exception as e:
