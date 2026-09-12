@@ -3,7 +3,7 @@ seguridad.py
 Objetivo: Centralizar la lógica de seguridad del sistema (COM-19): hash de contraseñas
           con PBKDF2-SHA256 (sin dependencias externas), validación de la política de
           contraseñas (8-12 caracteres, letras+números, sin contener el DNI) y las
-          constantes de seguridad (intentos fallidos, expiración).
+          constantes de seguridad (intentos fallidos, expiración, usuarios bootstrap).
 Uso: Importar desde routers/auth.py y db_bootstrap.py.
 """
 import hashlib
@@ -22,6 +22,13 @@ ITERACIONES_PBKDF2 = 200_000       # Coste computacional del hash
 # Clave provisoria asignada a usuarios legacy (hash antiguo 'hash_123456').
 # El sistema fuerza su cambio en el primer login (clave_provisoria = TRUE).
 CLAVE_INICIAL = "Nutri2026"
+
+# COM-19: Usuario administrador de respaldo creado idempotentemente por db_bootstrap.
+# DNI solicitado por el proyecto (8 ceros).
+DNI_ADMIN_RESPALDO = "00000000"
+# Clave provisoria del admin de respaldo (cambio obligatorio en el primer login).
+# Cumple la política: 9 caracteres, letras+números, no contiene el DNI.
+CLAVE_INICIAL_ADMIN = "Admin2026"
 
 
 def hashear_clave(clave: str) -> str:
