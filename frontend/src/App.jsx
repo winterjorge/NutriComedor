@@ -1,9 +1,8 @@
 /**
  * App.jsx
  * Objetivo: Componente raíz de la aplicación. Orquesta la navegación por pestañas,
- *           el proveedor de parámetros dinámicos y, desde el ticket COM-19,
- *           la capa de autenticación: renderiza LoginView si no hay sesión activa
- *           y ModalCambioClave bloqueante cuando la contraseña está expirada o es provisoria.
+ *           el proveedor de parámetros dinámicos y, desde COM-19, la capa de
+ *           autenticación (LoginView sin sesión y ModalCambioClave bloqueante).
  * Uso: Montado en main.jsx mediante <React.StrictMode>. Envuelve toda la app con
  *      AuthProvider y ParametrosProvider.
  *
@@ -11,15 +10,17 @@
  *  - Versión base: navegación por pestañas (Recetario, Presupuesto, Planificaciones,
  *    Catálogo, Ventas y Demanda) con ParametrosProvider.
  *  - COM-19: integración del flujo de login (AuthContext) y modal de cambio de clave
- *    obligatorio. Se añade botón de cerrar sesión en el header.
+ *    obligatorio. Botón de cerrar sesión en el header.
+ *  - COM-21: nueva pestaña "Comedores" con ComedoresView (gestión multi-comedor).
  */
 import React, { useState } from 'react';
-import { ChefHat, Calculator, ShoppingCart, Activity, Users, ClipboardList, LogOut } from 'lucide-react';
+import { ChefHat, Calculator, ShoppingCart, Activity, Users, ClipboardList, LogOut, Store } from 'lucide-react';
 import { RecipesView } from './components/recipes/RecipesView';
 import { BudgetView } from './components/budget/BudgetView';
 import { PlanificacionesView } from './components/budget/PlanificacionesView';
 import { CatalogView } from './components/catalog/CatalogView';
 import { POSView } from './components/pos/POSView';
+import { ComedoresView } from './components/comedores/ComedoresView';
 import { ParametrosProvider } from './context/ParametrosContext';
 // COM-19: Autenticación y cambio de clave obligatorio
 import { AuthProvider, useAuth } from './context/AuthContext';
@@ -45,6 +46,7 @@ function AppContent() {
         { id: 'recipes', label: 'Recetario', icon: ChefHat, color: 'emerald' },
         { id: 'budget', label: 'Presupuesto', icon: Calculator, color: 'emerald' },
         { id: 'planificaciones', label: 'Planificaciones', icon: ClipboardList, color: 'blue' },
+        { id: 'comedores', label: 'Comedores', icon: Store, color: 'emerald' }, // COM-21
         { id: 'catalog', label: 'Catálogo', icon: ShoppingCart, color: 'emerald' },
         { id: 'pos', label: 'Ventas y Demanda', icon: Users, color: 'blue' },
     ];
@@ -60,6 +62,7 @@ function AppContent() {
                             <h1 className="text-2xl font-bold tracking-tight">NutriComedor OSB</h1>
                             <p className="text-xs text-emerald-100">
                                 {usuario.nombres} {usuario.apellido_paterno} · {usuario.tipo_documento} {usuario.documento_identidad}
+                                {usuario.rol === 'Administrador Sistema' && ' · Admin Sistema'}
                             </p>
                         </div>
                         <span className="text-sm bg-emerald-800 px-3 py-1 rounded-full border border-emerald-600 shadow-inner hidden md:inline-block">
@@ -104,16 +107,14 @@ function AppContent() {
                         {activeTab === 'recipes' && <RecipesView />}
                         {activeTab === 'budget' && <BudgetView />}
                         {activeTab === 'planificaciones' && <PlanificacionesView />}
+                        {activeTab === 'comedores' && <ComedoresView />}
                         {activeTab === 'catalog' && <CatalogView />}
                         {activeTab === 'pos' && <POSView />}
                     </div>
                 </main>
             </div>
 
-            {/* COM-19: Modal bloqueante de cambio obligatorio de clave.
-                Se muestra cuando el backend indica que la clave está expirada (6 meses)
-                o es provisoria (primer login). Bloquea el uso del sistema hasta
-                completarse el cambio o cerrarse la sesión. */}
+            {/* COM-19: Modal bloqueante de cambio obligatorio de clave */}
             {pendienteCambio && (
                 <ModalCambioClave
                     usuario={usuario}
@@ -127,8 +128,8 @@ function AppContent() {
 
 /**
  * Componente raíz exportado: envuelve AppContent con los providers globales.
- * El orden es importante: AuthProvider debe estar por fuera para que el login
- * esté disponible incluso antes de cargar los parámetros dinámicos.
+ * El orden es importante: AuthProvider por fuera para que el login esté
+ * disponible incluso antes de cargar los parámetros dinámicos.
  */
 export default function App() {
     return (

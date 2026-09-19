@@ -6,6 +6,11 @@ Objetivo: Endpoints del ticket COM-21: CRUD de comedores, asociación de usuario
 Uso: Registrado en main.py con prefijo /api/v1.
 Nota: Mientras no exista middleware JWT, el solicitante se identifica mediante
       `usuario_solicitante_id` en el payload (el frontend lo envía desde la sesión COM-19).
+
+Historial:
+ - COM-21 (Parte 1): CRUD de comedores, asociación y cambio de estado con permisos.
+ - COM-21 (Parte 3): se agrega GET /comedores/usuarios/buscar para que la UI pueda
+   localizar usuarios por documento antes de asociarlos a un comedor.
 """
 from fastapi import APIRouter, Depends, HTTPException
 from psycopg2.extras import RealDictCursor
@@ -86,7 +91,7 @@ def listar_comedores(departamento: str = None, distrito: str = None,
         cur.close()
 
 
-# IMPORTANTE: ruta fija declarada ANTES de /{comedor_id} para evitar conflicto de rutas
+# IMPORTANTE: rutas fijas declaradas ANTES de /{comedor_id} para evitar conflictos
 @router.get("/por-usuario/{usuario_id}")
 def comedores_de_usuario(usuario_id: int, db=Depends(get_db)):
     """Devuelve los comedores (y su estado/rol) a los que pertenece un usuario."""
@@ -100,6 +105,30 @@ def comedores_de_usuario(usuario_id: int, db=Depends(get_db)):
             ORDER BY c.nombre;
         """, (usuario_id,))
         return cur.fetchall()
+    finally:
+        cur.close()
+
+
+@router.get("/usuarios/buscar")
+def buscar_usuario_por_documento(documento: str, db=Depends(get_db)):
+    """
+    COM-21 (Parte 3): Búsqueda de usuario por documento para el flujo de asociación.
+    La UI de gestión de usuarios por comedor usa este endpoint antes de asociar.
+    """
+    if not documento or not documento.strip():
+        raise HTTPException(status_code=400, detail="Debe indicar un documento de búsqueda.")
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT id, tipo_documento, documento_identidad, nombres,
+                   apellido_paterno, apellido_materno, rol, estado_activo
+            FROM usuarios
+            WHERE documento_identidad = %s;
+        """, (documento.strip(),))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado con ese documento.")
+        return row
     finally:
         cur.close()
 
@@ -186,7 +215,8 @@ def usuarios_del_comedor(comedor_id: int, db=Depends(get_db)):
         if not _existe_comedor(cur, comedor_id):
             raise HTTPException(status_code=404, detail="Comedor no encontrado.")
         cur.execute("""
-            SELECT uc.id, uc.usuario_id, uc.rol, uc.estado_activo, uc.fecha_desactivacion,
+            SELECT uc.id, uc.usuario_id, uc.rol, uc.estado_activo,
+                   uc.desactivado_por, uc.fecha_desactivacion,
                    u.nombres, u.apellido_paterno, u.apellido_materno,
                    u.tipo_documento, u.documento_identidad
             FROM usuario_comedor uc
