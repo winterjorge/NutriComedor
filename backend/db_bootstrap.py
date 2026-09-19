@@ -13,10 +13,11 @@ Historial de correcciones:
    planificacion_dia y columnas de planificación en presupuesto_semanal.
  - FIX COM-17: columna recetas_almuerzo.raciones con valor por defecto 4.
  - COM-19 (Login): columnas de seguridad en usuarios (intentos_fallidos, bloqueado,
-   fecha_clave, clave_provisoria) y migración de hashes legacy a PBKDF2 con clave
-   provisoria Nutri2026 (cambio obligatorio en primer login).
- - COM-19 (Admin respaldo): creación idempotente del usuario administrador con
-   DNI 0000000 y clave provisoria Admin2026 (cambio obligatorio en primer login).
+   fecha_clave, clave_provisoria), migración de hashes legacy a PBKDF2 y usuario
+   admin de respaldo (DNI 0000000).
+ - COM-21 (Multi-comedor): tablas comedores y usuario_comedor (asociación muchos a
+   muchos con rol y estado por comedor), migración de roles legacy a
+   'Administrador Sistema', comedor default y asociación inicial de usuarios existentes.
 """
 import time
 import psycopg2
@@ -25,8 +26,16 @@ from seguridad import (
     hashear_clave,
     CLAVE_INICIAL,
     DNI_ADMIN_RESPALDO,
-    CLAVE_INICIAL_ADMIN
+    CLAVE_INICIAL_ADMIN,
 )
+
+# ==========================================
+# CONSTANTES DE ROLES (COM-21)
+# Espejo de routers/comedores.py: rol global de sistema vs roles por comedor.
+# ==========================================
+ROL_SISTEMA = "Administrador Sistema"
+ROL_ADMIN_COMEDOR = "Administrador"
+NOMBRE_COMEDOR_DEFAULT = "Comedor Popular Cruz de Motupe - Grupo 2"
 
 # =========================================================================
 # DDL: Tabla de parámetros dinámicos (espejo de database/parametros.sql)
@@ -109,6 +118,62 @@ ADD COLUMN IF NOT EXISTS fecha_clave TIMESTAMP DEFAULT CURRENT_TIMESTAMP - INTER
 ADD COLUMN IF NOT EXISTS clave_provisoria BOOLEAN NOT NULL DEFAULT TRUE;
 """
 
+# =========================================================================
+# DDL: COM-21 (MULTI-COMEDOR) - Catálogo de comedores a nivel nacional.
+# Atributos solicitados: Departamento, Ciudad, Distrito, Zona, Nombre,
+# Dirección, link de ubicación (mapa) y fecha de fundación.
+# =========================================================================
+DDL_COMEDORES = """
+CREATE TABLE IF NOT EXISTS comedores (
+    id SERIAL PRIMARY KEY,
+    departamento VARCHAR(100) NOT NULL,
+    ciudad VARCHAR(100) NOT NULL,
+    distrito VARCHAR(100) NOT NULL,
+    zona VARCHAR(150),
+    nombre VARCHAR(150) NOT NULL UNIQUE,
+    direccion TEXT,
+    link_ubicacion TEXT,
+    fecha_fundacion DATE,
+    fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP - INTERVAL '5 hours'
+);
+"""
+
+# =========================================================================
+# DDL: COM-21 - Asociación usuario-comedor (muchos a muchos).
+# Reglas: un usuario pertenece a cero o varios comedores; el estado
+# activo/inactivo y el rol son POR COMEDOR; se audita quién desactivó.
+# =========================================================================
+DDL_USUARIO_COMEDOR = """
+CREATE TABLE IF NOT EXISTS usuario_comedor (
+    id SERIAL PRIMARY KEY,
+    usuario_id INT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+    comedor_id INT NOT NULL REFERENCES comedores(id) ON DELETE CASCADE,
+    rol VARCHAR(50) NOT NULL DEFAULT 'Operador',
+    estado_activo BOOLEAN NOT NULL DEFAULT TRUE,
+    desactivado_por INT REFERENCES usuarios(id),
+    fecha_desactivacion TIMESTAMP,
+    fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP - INTERVAL '5 hours',
+    UNIQUE(usuario_id, comedor_id)
+);
+CREATE INDEX IF NOT EXISTS idx_usuario_comedor_comedor ON usuario_comedor(comedor_id);
+CREATE INDEX IF NOT EXISTS idx_usuario_comedor_usuario ON usuario_comedor(usuario_id);
+"""
+
+# =========================================================================
+# SEED: COM-21 - Comedor default (piloto de la tesis: Cruz de Motupe Grupo 2).
+# =========================================================================
+SEED_COMEDOR_DEFAULT = """
+INSERT INTO comedores
+(departamento, ciudad, distrito, zona, nombre, direccion, link_ubicacion, fecha_fundacion)
+VALUES
+('Lima', 'Lima', 'San Juan de Lurigancho', 'A.H. Cruz de Motupe',
+ %s,
+ 'Parque Central Número 2, Calle 12 - A.H. Cruz de Motupe',
+ 'https://maps.google.com/?q=Comedor+Popular+Cruz+de+Motupe+Grupo+2+San+Juan+de+Lurigancho',
+ '2015-03-15')
+ON CONFLICT (nombre) DO NOTHING;
+"""
+
 
 def _migrar_claves_legacy(cur):
     """
@@ -133,17 +198,16 @@ def _migrar_claves_legacy(cur):
 
 def _asegurar_usuario_admin(cur):
     """
-    COM-19: Crea el usuario administrador de respaldo (DNI 00000000) con clave
+    COM-19: Crea el usuario administrador de respaldo (DNI 0000000) con clave
     provisoria (Admin2026) si aún no existe. Idempotente: si el usuario ya existe
     no se modifica nada (respeta la clave que el propio usuario haya definido).
-    El primer login forzará el cambio de clave (clave_provisoria = TRUE).
     """
     cur.execute(
         "SELECT id FROM usuarios WHERE documento_identidad = %s;",
         (DNI_ADMIN_RESPALDO,)
     )
     if cur.fetchone():
-        return False  # El usuario ya existe: no tocar
+        return False
     cur.execute("""
         INSERT INTO usuarios
         (tipo_documento, documento_identidad, nombres, apellido_paterno, apellido_materno,
@@ -160,6 +224,43 @@ def _asegurar_usuario_admin(cur):
         'Administrador'
     ))
     return True
+
+
+def _migrar_roles_legacy(cur):
+    """
+    COM-21: Los roles globales antiguos ('Administradora' / 'Administrador') pasan
+    a 'Administrador Sistema'. Los roles operativos por comedor viven en
+    usuario_comedor.rol ('Administrador' / 'Operador').
+    """
+    cur.execute("""
+        UPDATE usuarios
+        SET rol = %s
+        WHERE rol IN ('Administradora', 'Administrador');
+    """, (ROL_SISTEMA,))
+    return cur.rowcount
+
+
+def _asociar_usuarios_existentes(cur):
+    """
+    COM-21: Migra el comportamiento previo de 'un solo comedor': todo usuario que
+    aún no pertenece a ningún comedor se asocia al comedor default como
+    Administrador activo. Idempotente (solo usuarios sin asociación previa).
+    """
+    cur.execute("SELECT id FROM comedores WHERE nombre = %s;", (NOMBRE_COMEDOR_DEFAULT,))
+    row = cur.fetchone()
+    if not row:
+        return 0
+    comedor_id = row[0]
+    cur.execute("""
+        INSERT INTO usuario_comedor (usuario_id, comedor_id, rol, estado_activo)
+        SELECT u.id, %s, %s, TRUE
+        FROM usuarios u
+        WHERE NOT EXISTS (
+            SELECT 1 FROM usuario_comedor uc WHERE uc.usuario_id = u.id
+        )
+        ON CONFLICT (usuario_id, comedor_id) DO NOTHING;
+    """, (comedor_id, ROL_ADMIN_COMEDOR))
+    return cur.rowcount
 
 
 def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
@@ -185,15 +286,27 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
             cur.execute(DDL_USUARIOS_SEGURIDAD)
             # 6. COM-19: migración de hashes legacy a PBKDF2 (clave provisoria)
             migrados = _migrar_claves_legacy(cur)
-            # 7. COM-19: usuario administrador de respaldo (DNI 00000000)
+            # 7. COM-19: usuario administrador de respaldo (DNI 0000000)
             admin_creado = _asegurar_usuario_admin(cur)
+            # 8. COM-21: tablas de comedores y asociación usuario-comedor
+            cur.execute(DDL_COMEDORES)
+            cur.execute(DDL_USUARIO_COMEDOR)
+            # 9. COM-21: comedor default (piloto) y migración de roles globales
+            cur.execute(SEED_COMEDOR_DEFAULT, (NOMBRE_COMEDOR_DEFAULT,))
+            roles_migrados = _migrar_roles_legacy(cur)
+            # 10. COM-21: asociación inicial de usuarios sin comedor
+            asociados = _asociar_usuarios_existentes(cur)
             conn.commit()
             cur.close()
             if migrados:
                 print(f"[BOOTSTRAP] {migrados} usuario(s) con clave provisoria asignada (cambio obligatorio en primer login).")
             if admin_creado:
                 print(f"[BOOTSTRAP] Usuario admin de respaldo creado (DNI {DNI_ADMIN_RESPALDO}) con clave provisoria.")
-            print("[BOOTSTRAP] Esquema dinámico verificado/creado correctamente (incluye seguridad COM-19).")
+            if roles_migrados:
+                print(f"[BOOTSTRAP] COM-21: {roles_migrados} rol(es) migrados a '{ROL_SISTEMA}'.")
+            if asociados:
+                print(f"[BOOTSTRAP] COM-21: {asociados} usuario(s) asociados al comedor default como administradores.")
+            print("[BOOTSTRAP] Esquema dinámico verificado/creado correctamente (incluye multi-comedor COM-21).")
             return True
         except Exception as e:
             print(f"[BOOTSTRAP] Intento {intento}/{reintentos} fallido: {e}")
