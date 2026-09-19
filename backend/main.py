@@ -8,8 +8,18 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # Importación de Routers Modulares
-from routers import health, presupuesto, recetas, ingredientes, padron, parametros, planificacion, auth
-# Asegurado de esquema dinámico (parámetros, planificación, raciones, seguridad) al arrancar
+from routers import (
+    health,
+    presupuesto,
+    recetas,
+    ingredientes,
+    padron,
+    parametros,
+    planificacion,
+    auth,
+    comedores,  # COM-21: gestión multi-comedor y asociación de usuarios
+)
+# Asegurado de esquema dinámico (parámetros, planificación, raciones, seguridad, comedores) al arrancar
 from db_bootstrap import asegurar_esquema
 
 
@@ -20,7 +30,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="API - NutriComedor", version="2.3.0", lifespan=lifespan)
+app = FastAPI(title="API - NutriComedor", version="2.4.0", lifespan=lifespan)
 
 # Configuración de CORS (Mantiene compatibilidad con tu Frontend)
 app.add_middleware(
@@ -34,6 +44,7 @@ app.add_middleware(
 # Registro de Routers con el prefijo global de la API
 app.include_router(health.router, prefix="/api/v1")
 app.include_router(auth.router, prefix="/api/v1")
+app.include_router(comedores.router, prefix="/api/v1")  # COM-21
 app.include_router(parametros.router, prefix="/api/v1")
 app.include_router(presupuesto.router, prefix="/api/v1")
 app.include_router(recetas.router, prefix="/api/v1")
