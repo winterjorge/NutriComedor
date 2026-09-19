@@ -5,34 +5,25 @@
  *           lo que garantiza un manejo uniforme de errores, cabeceras y endpoints.
  * Uso: Importar `api` en hooks y componentes para consumir los endpoints del sistema.
  *
- * Historial de cambios:
- *  - Versión base: endpoints de recetas, catálogo, padron, presupuesto y planificaciones.
- *  - COM-17: parser defensivo `leerErrorSeguro` para evitar el fallo
- *    "Unexpected token 'I', 'Internal S'... is not valid JSON" cuando el backend
- *    devuelve respuestas 500 en texto plano.
- *  - COM-19: nuevos endpoints de autenticación (login, cambiar-clave) con retorno
- *    uniforme {ok, data} para facilitar el manejo en LoginView y ModalCambioClave.
+ * Historial:
+ *  - COM-17: parser defensivo `leerErrorSeguro` (evita "Unexpected token 'I'" con 500 en texto plano).
+ *  - COM-19: endpoints de autenticación (login, cambiar-clave).
+ *  - COM-21: bloque COMEDORES (listar, crear, editar, usuarios por comedor,
+ *            asociación, cambio de estado y búsqueda de usuario por documento).
  */
 const API_BASE = '/api/v1';
 
 /**
- * COM-17: Parser defensivo de errores. Si el cuerpo de la respuesta no es JSON válido
- * (por ejemplo, un "Internal Server Error" en texto plano), devuelve un mensaje legible
- * en lugar de romper el JSON.parse del frontend.
- * @param {Response} response - Respuesta fetch no exitosa.
- * @param {string} mensajePorDefecto - Mensaje genérico si no se puede parsear.
- * @returns {Promise<string>} Mensaje de error listo para mostrar al usuario.
+ * Parser defensivo de errores: si el cuerpo no es JSON, devuelve un mensaje legible.
  */
 const leerErrorSeguro = async (response, mensajePorDefecto) => {
     try {
         const data = await response.json();
-        // El backend puede devolver {detail: "..."} o {detail: {mensaje, tipo}}
         if (typeof data.detail === 'object' && data.detail !== null) {
             return data.detail.mensaje || mensajePorDefecto;
         }
         return data.detail || data.message || mensajePorDefecto;
     } catch (e) {
-        // El servidor respondió con texto plano o cuerpo vacío
         return `${mensajePorDefecto} (HTTP ${response.status})`;
     }
 };
@@ -41,11 +32,6 @@ export const api = {
     // ==========================================
     // AUTENTICACIÓN (COM-19)
     // ==========================================
-    /**
-     * Inicia sesión con tipo+documento y contraseña.
-     * Retorna {ok: boolean, data: ...} para facilitar el manejo en LoginView.
-     * En caso de error, data.detail contiene {mensaje, tipo} (error/aviso).
-     */
     login: async (data) => {
         try {
             const response = await fetch(`${API_BASE}/auth/login`, {
@@ -53,17 +39,12 @@ export const api = {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data)
             });
-            const payload = await response.json();
-            return { ok: response.ok, data: response.ok ? payload : { detail: payload.detail } };
+            const body = await response.json().catch(() => ({}));
+            return { ok: response.ok, status: response.status, data: body };
         } catch (err) {
-            return { ok: false, data: { detail: 'Error de conexión con el servidor.' } };
+            return { ok: false, status: 0, data: { detail: 'Error de conexión con el servidor.' } };
         }
     },
-
-    /**
-     * Cambia la contraseña validando la política COM-19 (8-12 caracteres,
-     * letras+números, sin contener el DNI). Reinicia la vigencia de 6 meses.
-     */
     cambiarClave: async (data) => {
         try {
             const response = await fetch(`${API_BASE}/auth/cambiar-clave`, {
@@ -71,10 +52,10 @@ export const api = {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data)
             });
-            const payload = await response.json();
-            return { ok: response.ok, data: response.ok ? payload : { detail: payload.detail } };
+            const body = await response.json().catch(() => ({}));
+            return { ok: response.ok, status: response.status, data: body };
         } catch (err) {
-            return { ok: false, data: { detail: 'Error de conexión con el servidor.' } };
+            return { ok: false, status: 0, data: { detail: 'Error de conexión con el servidor.' } };
         }
     },
 
@@ -84,6 +65,72 @@ export const api = {
     getParametros: async () => {
         const response = await fetch(`${API_BASE}/parametros`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener parámetros'));
+        return response.json();
+    },
+
+    // ==========================================
+    // COMEDORES (COM-21)
+    // ==========================================
+    getComedores: async (params = {}) => {
+        const qs = new URLSearchParams(params).toString();
+        const response = await fetch(`${API_BASE}/comedores?${qs}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener comedores'));
+        return response.json();
+    },
+    getComedorDetalle: async (id) => {
+        const response = await fetch(`${API_BASE}/comedores/${id}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el comedor'));
+        return response.json();
+    },
+    createComedor: async (data) => {
+        const response = await fetch(`${API_BASE}/comedores`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al crear el comedor'));
+        return response.json();
+    },
+    updateComedor: async (id, data) => {
+        const response = await fetch(`${API_BASE}/comedores/${id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al actualizar el comedor'));
+        return response.json();
+    },
+    getComedoresDeUsuario: async (usuarioId) => {
+        const response = await fetch(`${API_BASE}/comedores/por-usuario/${usuarioId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener comedores del usuario'));
+        return response.json();
+    },
+    buscarUsuarioPorDocumento: async (documento) => {
+        const response = await fetch(`${API_BASE}/comedores/usuarios/buscar?documento=${encodeURIComponent(documento)}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Usuario no encontrado'));
+        return response.json();
+    },
+    getUsuariosComedor: async (comedorId) => {
+        const response = await fetch(`${API_BASE}/comedores/${comedorId}/usuarios`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener usuarios del comedor'));
+        return response.json();
+    },
+    asociarUsuarioComedor: async (comedorId, data) => {
+        const response = await fetch(`${API_BASE}/comedores/${comedorId}/usuarios`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al asociar el usuario'));
+        return response.json();
+    },
+    cambiarEstadoUsuarioComedor: async (comedorId, usuarioId, data) => {
+        const response = await fetch(`${API_BASE}/comedores/${comedorId}/usuarios/${usuarioId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al cambiar el estado'));
         return response.json();
     },
 
@@ -120,9 +167,7 @@ export const api = {
         return response.json();
     },
     deleteReceta: async (id) => {
-        const response = await fetch(`${API_BASE}/recetas/${id}`, {
-            method: 'DELETE'
-        });
+        const response = await fetch(`${API_BASE}/recetas/${id}`, { method: 'DELETE' });
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al eliminar receta'));
         return response.json();
     },
@@ -146,9 +191,7 @@ export const api = {
         return response.json();
     },
     deleteIngredienteReceta: async (recetaId, ingredienteId) => {
-        const response = await fetch(`${API_BASE}/recetas/${recetaId}/ingredientes/${ingredienteId}`, {
-            method: 'DELETE'
-        });
+        const response = await fetch(`${API_BASE}/recetas/${recetaId}/ingredientes/${ingredienteId}`, { method: 'DELETE' });
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al eliminar ingrediente'));
         return response.json();
     },
@@ -210,9 +253,7 @@ export const api = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data)
     }),
-    eliminarVenta: async (id) => fetch(`${API_BASE}/padron/${id}`, {
-        method: 'DELETE'
-    }),
+    eliminarVenta: async (id) => fetch(`${API_BASE}/padron/${id}`, { method: 'DELETE' }),
 
     // ==========================================
     // PRESUPUESTO
@@ -272,9 +313,7 @@ export const api = {
         return response.json();
     },
     eliminarPlanificacion: async (id) => {
-        const response = await fetch(`${API_BASE}/planificaciones/${id}`, {
-            method: 'DELETE'
-        });
+        const response = await fetch(`${API_BASE}/planificaciones/${id}`, { method: 'DELETE' });
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al eliminar planificación'));
         return response.json();
     }
