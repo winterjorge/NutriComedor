@@ -11,16 +11,18 @@
  *    Catálogo, Ventas y Demanda) con ParametrosProvider.
  *  - COM-19: integración del flujo de login (AuthContext) y modal de cambio de clave
  *    obligatorio. Botón de cerrar sesión en el header.
- *  - COM-21: nueva pestaña "Comedores" con ComedoresView (gestión multi-comedor).
+ *  - COM-21: pestaña "Comedores" con ComedoresView (gestión multi-comedor).
+ *  - COM-22: pestaña "Grupos" con GruposView (grupos de usuario, roles y membresías).
  */
 import React, { useState } from 'react';
-import { ChefHat, Calculator, ShoppingCart, Activity, Users, ClipboardList, LogOut, Store } from 'lucide-react';
+import { ChefHat, Calculator, ShoppingCart, Activity, Users, ClipboardList, LogOut, Store, UserCog } from 'lucide-react';
 import { RecipesView } from './components/recipes/RecipesView';
 import { BudgetView } from './components/budget/BudgetView';
 import { PlanificacionesView } from './components/budget/PlanificacionesView';
 import { CatalogView } from './components/catalog/CatalogView';
 import { POSView } from './components/pos/POSView';
 import { ComedoresView } from './components/comedores/ComedoresView';
+import { GruposView } from './components/grupos/GruposView';
 import { ParametrosProvider } from './context/ParametrosContext';
 // COM-19: Autenticación y cambio de clave obligatorio
 import { AuthProvider, useAuth } from './context/AuthContext';
@@ -46,7 +48,8 @@ function AppContent() {
         { id: 'recipes', label: 'Recetario', icon: ChefHat, color: 'emerald' },
         { id: 'budget', label: 'Presupuesto', icon: Calculator, color: 'emerald' },
         { id: 'planificaciones', label: 'Planificaciones', icon: ClipboardList, color: 'blue' },
-        { id: 'comedores', label: 'Comedores', icon: Store, color: 'emerald' }, // COM-21
+        { id: 'comedores', label: 'Comedores', icon: Store, color: 'emerald' },
+        { id: 'grupos', label: 'Grupos', icon: UserCog, color: 'blue' }, // COM-22
         { id: 'catalog', label: 'Catálogo', icon: ShoppingCart, color: 'emerald' },
         { id: 'pos', label: 'Ventas y Demanda', icon: Users, color: 'blue' },
     ];
@@ -108,6 +111,7 @@ function AppContent() {
                         {activeTab === 'budget' && <BudgetView />}
                         {activeTab === 'planificaciones' && <PlanificacionesView />}
                         {activeTab === 'comedores' && <ComedoresView />}
+                        {activeTab === 'grupos' && <GruposView />}
                         {activeTab === 'catalog' && <CatalogView />}
                         {activeTab === 'pos' && <POSView />}
                     </div>
