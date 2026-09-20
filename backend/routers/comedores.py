@@ -1,20 +1,18 @@
 """
 routers/comedores.py
-Objetivo: Endpoints del ticket COM-21: CRUD de comedores, asociación de usuarios a
-          comedores (cero o varios), manejo de estado activo/inactivo por comedor y
-          desactivación permitida solo a quien gestiona el comedor o al admin del sistema.
+Objetivo: Endpoints de comedores (COM-21): CRUD, asociación de usuarios y estado por
+          comedor; y endpoints de sesión de comedor (COM-20): contexto de selección
+          cascada y verificación de vigencia de membresía al login recordado.
 Uso: Registrado en main.py con prefijo /api/v1.
 Nota: Mientras no exista middleware JWT, el solicitante se identifica mediante
       `usuario_solicitante_id` en el payload (el frontend lo envía desde la sesión COM-19).
 
 Historial:
  - COM-21 (Parte 1): CRUD de comedores, asociación y cambio de estado con permisos.
- - COM-21 (Parte 3): se agrega GET /comedores/usuarios/buscar para que la UI pueda
-   localizar usuarios por documento antes de asociarlos a un comedor.
- - COM-22: los permisos de gestión de comedores se delegan al módulo central
-   `permisos.py`. Además del modelo legacy (usuario_comedor), ahora pueden gestionar
-   un comedor: miembros del grupo Directivo (Presidente/Tesorero) y del grupo
-   Administrativo municipal con cobertura (global o específica) sobre el comedor.
+ - COM-21 (Parte 3): GET /comedores/usuarios/buscar para la UI de asociación.
+ - COM-22: permisos delegados al módulo central permisos.py (grupos y roles).
+ - COM-20: GET /comedores/contexto-seleccion (perfil + membresias activas + alcance
+   global) y GET /comedores/verificar-membresia (vigencia al login recordado).
 """
 from fastapi import APIRouter, Depends, HTTPException
 from psycopg2.extras import RealDictCursor
@@ -23,8 +21,8 @@ from schemas.comedor import (
     ComedorCreate, ComedorUpdate, AsociarUsuarioInput,
     CambiarEstadoUsuarioComedorInput, ROLES_COMEDOR
 )
-# COM-22: fuente única de verdad de permisos (grupos, roles y alcances)
-from permisos import es_admin_sistema, es_admin_comedor
+# COM-22/COM-20: fuente única de verdad de permisos y nombres de grupos
+from permisos import es_admin_sistema, es_admin_comedor, GRUPO_ADMINISTRATIVO
 
 router = APIRouter(prefix="/comedores", tags=["Comedores"])
 
@@ -36,7 +34,7 @@ ROL_ADMIN_COMEDOR = "Administrador"       # Rol legacy dentro de usuario_comedor
 
 
 # ==========================================
-# HELPERS (COM-22: delegación de permisos)
+# HELPERS INTERNOS
 # ==========================================
 def _existe_comedor(cur, comedor_id: int) -> bool:
     cur.execute("SELECT 1 FROM comedores WHERE id = %s;", (comedor_id,))
@@ -50,7 +48,6 @@ def _validar_permiso_admin(cur, usuario_id: int, comedor_id: int):
       - Admin legacy del comedor (usuario_comedor rol 'Administrador' activo).
       - Directivo Presidente/Tesorero del comedor (grupo Directivo, COM-22).
       - Administrativo municipal con cobertura global o específica (COM-22).
-    La evaluación completa vive en permisos.es_admin_comedor / es_admin_sistema.
     """
     if not (es_admin_sistema(cur, usuario_id) or
             es_admin_comedor(cur, usuario_id, comedor_id)):
@@ -60,8 +57,50 @@ def _validar_permiso_admin(cur, usuario_id: int, comedor_id: int):
         )
 
 
+def _membresias_activas(cur, usuario_id: int):
+    """
+    COM-20: membresías ACTIVAS del usuario con los datos del comedor,
+    ordenadas para alimentar los dropdowns cascada (solo opciones vigentes).
+    """
+    cur.execute("""
+        SELECT uc.comedor_id, uc.rol AS rol_comedor,
+               c.departamento, c.ciudad, c.distrito, c.zona, c.nombre
+        FROM usuario_comedor uc
+        JOIN comedores c ON c.id = uc.comedor_id
+        WHERE uc.usuario_id = %s AND uc.estado_activo = TRUE
+        ORDER BY c.departamento, c.ciudad, c.distrito, c.nombre;
+    """, (usuario_id,))
+    return cur.fetchall()
+
+
+def _es_administrativo_activo(cur, usuario_id: int) -> bool:
+    """COM-20: True si el usuario tiene membresía activa en el grupo Administrativo."""
+    cur.execute("""
+        SELECT 1
+        FROM usuario_grupo ug
+        JOIN grupos_usuario g ON g.id = ug.grupo_id
+        WHERE ug.usuario_id = %s AND ug.estado_activo = TRUE
+          AND g.nombre = %s
+        LIMIT 1;
+    """, (usuario_id, GRUPO_ADMINISTRATIVO))
+    return cur.fetchone() is not None
+
+
+def _administrativo_con_alcance_global(cur, usuario_id: int) -> bool:
+    """COM-20: True si el Administrativo tiene alcance global (comedor_id NULL)."""
+    cur.execute("""
+        SELECT 1
+        FROM usuario_grupo ug
+        JOIN grupos_usuario g ON g.id = ug.grupo_id
+        WHERE ug.usuario_id = %s AND ug.estado_activo = TRUE
+          AND g.nombre = %s AND ug.comedor_id IS NULL
+        LIMIT 1;
+    """, (usuario_id, GRUPO_ADMINISTRATIVO))
+    return cur.fetchone() is not None
+
+
 # ==========================================
-# ENDPOINTS DE COMEDORES
+# ENDPOINTS DE COMEDORES (CATÁLOGO)
 # ==========================================
 @router.get("")
 def listar_comedores(departamento: str = None, distrito: str = None,
@@ -109,7 +148,6 @@ def comedores_de_usuario(usuario_id: int, db=Depends(get_db)):
 def buscar_usuario_por_documento(documento: str, db=Depends(get_db)):
     """
     COM-21 (Parte 3): Búsqueda de usuario por documento para el flujo de asociación.
-    La UI de gestión de usuarios por comedor usa este endpoint antes de asociar.
     """
     if not documento or not documento.strip():
         raise HTTPException(status_code=400, detail="Debe indicar un documento de búsqueda.")
@@ -129,12 +167,86 @@ def buscar_usuario_por_documento(documento: str, db=Depends(get_db)):
         cur.close()
 
 
+# ==========================================
+# COM-20: CONTEXTO DE SELECCIÓN Y VERIFICACIÓN
+# ==========================================
+@router.get("/contexto-seleccion")
+def contexto_seleccion(usuario_id: int, db=Depends(get_db)):
+    """
+    COM-20: Datos para la pantalla de selección de comedor post-login.
+    Devuelve:
+      - perfil: 'SISTEMA' | 'ADMINISTRATIVO' | 'COMEDOR'
+      - membresias_activas: solo membresías vigentes con datos del comedor
+        (el frontend construye los dropdowns cascada con estas opciones).
+      - alcance_global: True si un Administrativo tiene alcance global
+        (el frontend usará todos los comedores como fuente de opciones).
+    """
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        # 1) Perfil del usuario según grupos/roles (COM-22)
+        if es_admin_sistema(cur, usuario_id):
+            perfil = "SISTEMA"
+        elif _es_administrativo_activo(cur, usuario_id):
+            perfil = "ADMINISTRATIVO"
+        else:
+            perfil = "COMEDOR"
+
+        # 2) Membresías activas (única fuente de opciones para el usuario)
+        membresias = _membresias_activas(cur, usuario_id)
+
+        # 3) Alcance global solo aplica a Administrativos
+        alcance_global = False
+        if perfil == "ADMINISTRATIVO":
+            alcance_global = _administrativo_con_alcance_global(cur, usuario_id)
+
+        return {
+            "perfil": perfil,
+            "membresias_activas": membresias,
+            "alcance_global": alcance_global
+        }
+    finally:
+        cur.close()
+
+
+@router.get("/verificar-membresia")
+def verificar_membresia(usuario_id: int, comedor_id: int = None,
+                        perfil: str = "COMEDOR", db=Depends(get_db)):
+    """
+    COM-20: Verifica que el usuario SIGUE activo en el contexto recordado
+    (se llama en login recordado y al restaurar sesión):
+      - SISTEMA: sigue siendo administrador de sistemas.
+      - ADMINISTRATIVO: sigue con membresía activa en el grupo Administrativo.
+      - COMEDOR: la membresía del comedor seleccionado sigue activa.
+    Responde {'activo': bool}; si es False el frontend deslogea con mensaje.
+    """
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        if perfil == "SISTEMA":
+            activo = es_admin_sistema(cur, usuario_id)
+        elif perfil == "ADMINISTRATIVO":
+            activo = _es_administrativo_activo(cur, usuario_id)
+        else:
+            if comedor_id is None:
+                activo = False
+            else:
+                cur.execute("""
+                    SELECT 1 FROM usuario_comedor
+                    WHERE usuario_id = %s AND comedor_id = %s AND estado_activo = TRUE;
+                """, (usuario_id, comedor_id))
+                activo = cur.fetchone() is not None
+        return {"activo": bool(activo)}
+    finally:
+        cur.close()
+
+
+# ==========================================
+# CRUD DE COMEDORES (COM-21)
+# ==========================================
 @router.post("", status_code=201)
 def crear_comedor(data: ComedorCreate, db=Depends(get_db)):
     """Crea un comedor. Regla COM-21/COM-22: exclusivo del Administrador de Sistemas."""
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
-        # COM-22: se consulta el grupo/rol legacy vía permisos (fuente única)
         if not es_admin_sistema(cur, data.usuario_solicitante_id):
             raise HTTPException(status_code=403,
                             detail="Solo el Administrador del Sistema puede crear comedores.")
@@ -182,7 +294,6 @@ def actualizar_comedor(comedor_id: int, data: ComedorUpdate, db=Depends(get_db))
             raise HTTPException(status_code=404, detail="Comedor no encontrado.")
         _validar_permiso_admin(cur, data.usuario_solicitante_id, comedor_id)
 
-        # Construir SET dinámico solo con los campos enviados (excluye al solicitante)
         campos = {k: v for k, v in data.dict(exclude_unset=True).items()
                   if k != "usuario_solicitante_id" and v is not None}
         if not campos:
@@ -268,10 +379,8 @@ def cambiar_estado_usuario(comedor_id: int, usuario_id: int,
                            data: CambiarEstadoUsuarioComedorInput, db=Depends(get_db)):
     """
     Activa/desactiva a un usuario DENTRO de un comedor (el estado es por comedor).
-    Reglas COM-21:
-      - Solo quien gestiona el comedor o el admin del sistema (COM-22: vía permisos).
-      - Nadie puede desactivarse a sí mismo.
-      - No se deja al comedor sin su último administrador activo (salvo admin sistema).
+    Reglas COM-21: solo quien gestiona el comedor o el admin del sistema;
+    nadie se desactiva a sí mismo; el comedor no queda sin su último admin activo.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -285,11 +394,9 @@ def cambiar_estado_usuario(comedor_id: int, usuario_id: int,
         if not registro:
             raise HTTPException(status_code=404, detail="El usuario no está asociado a este comedor.")
 
-        # Candado: nadie se desactiva a sí mismo
         if not data.estado_activo and usuario_id == data.usuario_solicitante_id:
             raise HTTPException(status_code=400, detail="No puedes desactivarte a ti mismo en este comedor.")
 
-        # Candado: el comedor no puede quedar sin administradores activos
         if not data.estado_activo and registro["rol"] == ROL_ADMIN_COMEDOR and registro["estado_activo"]:
             if not es_admin_sistema(cur, data.usuario_solicitante_id):
                 cur.execute("""
