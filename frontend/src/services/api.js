@@ -8,10 +8,12 @@
  * Historial:
  *  - COM-17: parser defensivo `leerErrorSeguro` (evita "Unexpected token 'I'" con 500 en texto plano).
  *  - COM-19: endpoints de autenticación (login, cambiar-clave).
- *  - COM-21: bloque COMEDORES (CRUD, usuarios por comedor, asociación, estado, búsqueda por documento).
- *  - COM-22: bloque GRUPOS (catálogo grupos/roles, membresías, asignación y cambio de estado).
- *  - COM-20: getContextoSeleccion y verificarMembresia (selección de comedor post-login
- *            y verificación de vigencia al login recordado).
+ *  - COM-20: getContextoSeleccion y verificarMembresia (selección de comedor post-login).
+ *  - COM-21: bloque COMEDORES (CRUD, usuarios por comedor, asociación, estado, búsqueda).
+ *  - COM-22: bloque GRUPOS (catálogo, membresías, asignación y estado).
+ *  - COM-23: bloque USUARIOS (creación, bloqueo/desbloqueo, política de claves),
+ *            bloque MUNICIPALIDADES (CRUD) y extensiones de GRUPOS (privilegios,
+ *            creación de grupos y roles temporales con vigencia/revocación).
  */
 const API_BASE = '/api/v1';
 
@@ -71,7 +73,7 @@ export const api = {
     },
 
     // ==========================================
-    // COMEDORES (COM-21)
+    // COMEDORES (COM-21) Y CONTEXTO DE SELECCIÓN (COM-20)
     // ==========================================
     getComedores: async (params = {}) => {
         const qs = new URLSearchParams(params).toString();
@@ -135,23 +137,11 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al cambiar el estado'));
         return response.json();
     },
-
-    // ==========================================
-    // COM-20: CONTEXTO DE SELECCIÓN DE COMEDOR
-    // ==========================================
-    /**
-     * Devuelve { perfil, membresias_activas, alcance_global } para construir
-     * los dropdowns cascada de selección post-login (solo opciones activas).
-     */
     getContextoSeleccion: async (usuarioId) => {
         const response = await fetch(`${API_BASE}/comedores/contexto-seleccion?usuario_id=${usuarioId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el contexto de selección'));
         return response.json();
     },
-    /**
-     * Verifica que el usuario SIGUE activo en el contexto recordado
-     * (se llama en login recordado y al restaurar sesión).
-     */
     verificarMembresia: async (usuarioId, comedorId, perfil) => {
         const params = new URLSearchParams({ usuario_id: String(usuarioId), perfil: perfil || 'COMEDOR' });
         if (comedorId !== null && comedorId !== undefined) {
@@ -163,7 +153,7 @@ export const api = {
     },
 
     // ==========================================
-    // GRUPOS DE USUARIO (COM-22)
+    // GRUPOS, PRIVILEGIOS Y ROLES TEMPORALES (COM-22 / COM-23)
     // ==========================================
     getGrupos: async () => {
         const response = await fetch(`${API_BASE}/grupos`);
@@ -197,6 +187,146 @@ export const api = {
             body: JSON.stringify(data)
         });
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al cambiar el estado de la membresía'));
+        return response.json();
+    },
+    // COM-23: catálogo de privilegios con los grupos que los poseen
+    getPrivilegios: async () => {
+        const response = await fetch(`${API_BASE}/grupos/privilegios`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener privilegios'));
+        return response.json();
+    },
+    // COM-23: creación de grupos con ámbito
+    createGrupo: async (data) => {
+        const response = await fetch(`${API_BASE}/grupos`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al crear el grupo'));
+        return response.json();
+    },
+    // COM-23: reemplazo del conjunto de privilegios de un grupo
+    asignarPrivilegiosGrupo: async (grupoId, data) => {
+        const response = await fetch(`${API_BASE}/grupos/${grupoId}/privilegios`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al asignar privilegios'));
+        return response.json();
+    },
+    // COM-23: roles temporales con vigencia
+    getRolesTemporales: async (params = {}) => {
+        const qs = new URLSearchParams(params).toString();
+        const response = await fetch(`${API_BASE}/grupos/roles-temporales?${qs}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener roles temporales'));
+        return response.json();
+    },
+    otorgarRolTemporal: async (data) => {
+        const response = await fetch(`${API_BASE}/grupos/roles-temporales`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al otorgar el rol temporal'));
+        return response.json();
+    },
+    revocarRolTemporal: async (rolTemporalId, data) => {
+        const response = await fetch(`${API_BASE}/grupos/roles-temporales/${rolTemporalId}/revocar`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al revocar el rol temporal'));
+        return response.json();
+    },
+
+    // ==========================================
+    // USUARIOS (COM-23)
+    // ==========================================
+    getUsuarios: async (params = {}) => {
+        const qs = new URLSearchParams(params).toString();
+        const response = await fetch(`${API_BASE}/usuarios?${qs}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener usuarios'));
+        return response.json();
+    },
+    crearUsuario: async (data) => {
+        const response = await fetch(`${API_BASE}/usuarios`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al crear el usuario'));
+        return response.json();
+    },
+    cambiarEstadoCuenta: async (usuarioId, data) => {
+        const response = await fetch(`${API_BASE}/usuarios/${usuarioId}/estado-cuenta`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al cambiar el estado de la cuenta'));
+        return response.json();
+    },
+    desbloquearReintentos: async (usuarioId, data) => {
+        const response = await fetch(`${API_BASE}/usuarios/${usuarioId}/desbloqueo-reintentos`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al desbloquear por intentos'));
+        return response.json();
+    },
+    getPoliticaClave: async () => {
+        const response = await fetch(`${API_BASE}/usuarios/politica-clave`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener la política de claves'));
+        return response.json();
+    },
+    updatePoliticaClave: async (data) => {
+        const response = await fetch(`${API_BASE}/usuarios/politica-clave`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al actualizar la política'));
+        return response.json();
+    },
+
+    // ==========================================
+    // MUNICIPALIDADES (COM-23)
+    // ==========================================
+    getMunicipalidades: async (params = {}) => {
+        const qs = new URLSearchParams(params).toString();
+        const response = await fetch(`${API_BASE}/municipalidades?${qs}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener municipalidades'));
+        return response.json();
+    },
+    getMunicipalidadDetalle: async (id) => {
+        const response = await fetch(`${API_BASE}/municipalidades/${id}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener la municipalidad'));
+        return response.json();
+    },
+    getComedoresDeMunicipalidad: async (id) => {
+        const response = await fetch(`${API_BASE}/municipalidades/${id}/comedores`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener comedores de la municipalidad'));
+        return response.json();
+    },
+    createMunicipalidad: async (data) => {
+        const response = await fetch(`${API_BASE}/municipalidades`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al crear la municipalidad'));
+        return response.json();
+    },
+    updateMunicipalidad: async (id, data) => {
+        const response = await fetch(`${API_BASE}/municipalidades/${id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al actualizar la municipalidad'));
         return response.json();
     },
 

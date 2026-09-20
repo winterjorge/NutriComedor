@@ -2,24 +2,29 @@
  * App.jsx
  * Objetivo: Componente raíz de la aplicación. Orquesta la navegación por pestañas,
  *           el proveedor de parámetros dinámicos, la capa de autenticación (COM-19),
- *           la selección de comedor post-login (COM-20) y los módulos multi-comedor
- *           (COM-21) y de grupos de usuario (COM-22).
+ *           la selección de comedor post-login (COM-20), el módulo multi-comedor
+ *           (COM-21), grupos de usuario (COM-22) y el módulo de gestión de usuarios
+ *           (COM-23) con visibilidad según perfil/privilegios.
  * Uso: Montado en main.jsx mediante <React.StrictMode>. Envuelve toda la app con
  *      AuthProvider y ParametrosProvider.
  *
  * Historial de cambios:
- *  - Versión base: navegación por pestañas (Recetario, Presupuesto, Planificaciones,
- *    Catálogo, Ventas y Demanda) con ParametrosProvider.
+ *  - Versión base: navegación por pestañas con ParametrosProvider.
  *  - COM-19: flujo de login (AuthContext), modal de cambio de clave obligatorio y
  *    botón de cerrar sesión en el header.
- *  - COM-21: pestaña "Comedores" con ComedoresView (gestión multi-comedor).
- *  - COM-22: pestaña "Grupos" con GruposView (grupos, roles y membresías).
- *  - COM-20: gate de selección de comedor entre login y dashboard: spinner mientras
- *            `validando` (verificación de membresía recordada), SeleccionComedorView
- *            si no hay selección, y exhibición del comedor/alcance activo en el header.
+ *  - COM-20: gate de selección de comedor (spinner `validando`, SeleccionComedorView)
+ *    y contexto activo en el header.
+ *  - COM-21: pestaña "Comedores" con ComedoresView.
+ *  - COM-22: pestaña "Grupos" con GruposView.
+ *  - COM-23: pestaña "Usuarios" visible según membresías efectivas: perfil SISTEMA
+ *    ve el panel global; Directivo con rol de gestión o Administrativo ven el panel
+ *    de comedor; sin privilegios la pestaña no aparece.
  */
-import React, { useState } from 'react';
-import { ChefHat, Calculator, ShoppingCart, Activity, Users, ClipboardList, LogOut, Store, UserCog, Loader2, MapPin } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import {
+    ChefHat, Calculator, ShoppingCart, Activity, Users, ClipboardList,
+    LogOut, Store, UserCog, Loader2, MapPin, Contact
+} from 'lucide-react';
 import { RecipesView } from './components/recipes/RecipesView';
 import { BudgetView } from './components/budget/BudgetView';
 import { PlanificacionesView } from './components/budget/PlanificacionesView';
@@ -27,13 +32,16 @@ import { CatalogView } from './components/catalog/CatalogView';
 import { POSView } from './components/pos/POSView';
 import { ComedoresView } from './components/comedores/ComedoresView';
 import { GruposView } from './components/grupos/GruposView';
+// COM-23: paneles de gestión de usuarios (global y por comedor)
+import { GestionUsuariosSistemaView } from './components/usuarios/GestionUsuariosSistemaView';
+import { GestionUsuariosComedorView } from './components/usuarios/GestionUsuariosComedorView';
 import { ParametrosProvider } from './context/ParametrosContext';
-// COM-19: Autenticación y cambio de clave obligatorio
+// COM-19/COM-20: autenticación, cambio de clave y selección de comedor
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { LoginView } from './components/auth/LoginView';
 import { ModalCambioClave } from './components/auth/ModalCambioClave';
-// COM-20: pantalla de selección de comedor post-login
 import { SeleccionComedorView } from './components/auth/SeleccionComedorView';
+import { api } from './services/api';
 
 /**
  * COM-20: describe el contexto de trabajo activo para exhibirlo en el header.
@@ -47,18 +55,46 @@ const descripcionContexto = (seleccion) => {
     return seleccion.comedor_nombre || 'Comedor';
 };
 
-/**
- * Componente interno que consume la sesión y decide qué renderizar:
- *  - Sin sesión                -> LoginView
- *  - validando                 -> spinner (verificación de comedor recordado)
- *  - Sin selección             -> SeleccionComedorView (gate COM-20)
- *  - Con selección             -> dashboard con pestañas + contexto en header
- */
 function AppContent() {
     const [activeTab, setActiveTab] = useState('pos');
     const { usuario, pendienteCambio, completarCambioClave, cerrarSesion, seleccion, validando } = useAuth();
 
-    // COM-19: Si no hay usuario autenticado, renderizar solo la pantalla de login
+    // COM-23: perfil de gestión de usuarios derivado de las membresías efectivas:
+    //   'SISTEMA'        -> panel global (admin de sistemas).
+    //   'COMEDOR_ADMIN'  -> panel por comedor (Directivo con rol de gestión o Administrativo).
+    //   null             -> la pestaña Usuarios no aparece.
+    const [perfilGestion, setPerfilGestion] = useState(null);
+
+    useEffect(() => {
+        if (!usuario) {
+            setPerfilGestion(null);
+            return;
+        }
+        const determinar = async () => {
+            try {
+                const membresias = await api.getGruposDeUsuario(usuario.id);
+                const esSistema =
+                    usuario.rol === 'Administrador Sistema' ||
+                    membresias.some(m => m.estado_activo && m.ambito === 'SISTEMA');
+                // Roles de gestión del grupo Directivo (semilla del sistema)
+                const ROLES_GESTION = ['Presidente', 'Tesorero'];
+                const cubreComedores = membresias.some(m =>
+                    m.estado_activo && (
+                        m.ambito === 'GLOBAL' ||
+                        (m.ambito === 'COMEDOR' && m.grupo === 'Directivo' && ROLES_GESTION.includes(m.rol))
+                    )
+                );
+                if (esSistema) setPerfilGestion('SISTEMA');
+                else if (cubreComedores) setPerfilGestion('COMEDOR_ADMIN');
+                else setPerfilGestion(null);
+            } catch (e) {
+                setPerfilGestion(null);
+            }
+        };
+        determinar();
+    }, [usuario]);
+
+    // COM-19: sin sesión -> login
     if (!usuario) {
         return <LoginView />;
     }
@@ -73,23 +109,19 @@ function AppContent() {
         );
     }
 
-    // COM-20: con sesión pero sin selección => pantalla de selección de comedor.
-    // Si además hay cambio de clave pendiente, el modal bloqueante se superpone.
+    // COM-20: con sesión pero sin selección => pantalla de selección de comedor
     if (!seleccion) {
         return (
             <>
                 <SeleccionComedorView />
                 {pendienteCambio && (
-                    <ModalCambioClave
-                        usuario={usuario}
-                        onExito={completarCambioClave}
-                        onSalir={cerrarSesion}
-                    />
+                    <ModalCambioClave usuario={usuario} onExito={completarCambioClave} onSalir={cerrarSesion} />
                 )}
             </>
         );
     }
 
+    // Pestañas base + pestañas condicionales por perfil (COM-23)
     const tabs = [
         { id: 'recipes', label: 'Recetario', icon: ChefHat, color: 'emerald' },
         { id: 'budget', label: 'Presupuesto', icon: Calculator, color: 'emerald' },
@@ -99,6 +131,9 @@ function AppContent() {
         { id: 'catalog', label: 'Catálogo', icon: ShoppingCart, color: 'emerald' },
         { id: 'pos', label: 'Ventas y Demanda', icon: Users, color: 'blue' },
     ];
+    if (perfilGestion) {
+        tabs.splice(2, 0, { id: 'usuarios', label: 'Usuarios', icon: Contact, color: 'blue' });
+    }
 
     return (
         <>
@@ -125,7 +160,7 @@ function AppContent() {
                         <span className="text-sm bg-emerald-800 px-3 py-1 rounded-full border border-emerald-600 shadow-inner hidden lg:inline-block">
                             Módulo Predictivo Activo
                         </span>
-                        {/* COM-19: botón de cerrar sesión (logout manual olvida el comedor) */}
+                        {/* COM-19: logout manual (olvida sesión y comedor recordado) */}
                         <button
                             onClick={cerrarSesion}
                             className="flex items-center gap-2 bg-emerald-800 hover:bg-emerald-900 px-3 py-2 rounded-lg text-sm font-medium transition-colors border border-emerald-600"
@@ -168,11 +203,14 @@ function AppContent() {
                         {activeTab === 'grupos' && <GruposView />}
                         {activeTab === 'catalog' && <CatalogView />}
                         {activeTab === 'pos' && <POSView />}
+                        {/* COM-23: panel de gestión según perfil */}
+                        {activeTab === 'usuarios' && perfilGestion === 'SISTEMA' && <GestionUsuariosSistemaView />}
+                        {activeTab === 'usuarios' && perfilGestion === 'COMEDOR_ADMIN' && <GestionUsuariosComedorView />}
                     </div>
                 </main>
             </div>
 
-            {/* COM-19: Modal bloqueante de cambio obligatorio de clave */}
+            {/* COM-19: modal bloqueante de cambio obligatorio de clave */}
             {pendienteCambio && (
                 <ModalCambioClave
                     usuario={usuario}
@@ -186,8 +224,6 @@ function AppContent() {
 
 /**
  * Componente raíz exportado: envuelve AppContent con los providers globales.
- * El orden es importante: AuthProvider por fuera para que el login esté
- * disponible incluso antes de cargar los parámetros dinámicos.
  */
 export default function App() {
     return (
