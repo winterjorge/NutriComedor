@@ -19,9 +19,12 @@ Historial de correcciones:
  - COM-22 (Grupos de usuario): tablas grupos_usuario, roles_grupo y usuario_grupo;
    seed del catálogo cerrado (Sistema / Administrativo / Directivo / Operativo con sus
    roles) y migración idempotente de membresías legacy de COM-21 al modelo de grupos.
- - COM-23 (Gestión de usuarios): se delega el esquema del módulo al módulo funcional
+ - COM-23 (Gestión de usuarios): esquema del módulo delegado a
    `esquema_gestion_usuarios` (municipalidades, privilegios, roles temporales y
    parámetros editables de política de contraseñas).
+ - COM-25 (Permisos por vistas): esquema delegado a `esquema_permisos_vistas`
+   (catálogo de módulos del sistema y matriz rol -> módulos permitidos con la
+   semilla de la matriz base del negocio).
 """
 import time
 import psycopg2
@@ -34,6 +37,8 @@ from seguridad import (
 )
 # COM-23: esquema del módulo de gestión de usuarios (nombres por funcionalidad)
 from esquema_gestion_usuarios import aplicar_esquema_gestion_usuarios
+# COM-25: esquema de permisos por vistas (módulos del sistema por rol)
+from esquema_permisos_vistas import aplicar_esquema_permisos_vistas
 
 # ==========================================
 # CONSTANTES DE ROLES (COM-21)
@@ -225,7 +230,7 @@ CREATE INDEX IF NOT EXISTS idx_usuario_grupo_grupo ON usuario_grupo(grupo_id);
 """
 
 # =========================================================================
-# SEED: COM-22 - Catálogo cerrado de grupos (no se crean grupos desde la UI).
+# SEED: COM-22 - Catálogo cerrado de grupos (base del modelo de roles).
 # =========================================================================
 SEED_GRUPOS = """
 INSERT INTO grupos_usuario (nombre, ambito, descripcion) VALUES
@@ -441,6 +446,8 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
             # 14. COM-23: esquema del módulo de gestión de usuarios (municipalidades,
             #     privilegios, roles temporales y política de claves editable)
             aplicar_esquema_gestion_usuarios(cur)
+            # 15. COM-25: catálogo de módulos del sistema y matriz rol -> módulos
+            aplicar_esquema_permisos_vistas(cur)
             conn.commit()
             cur.close()
             if migrados:
@@ -453,7 +460,7 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
                 print(f"[BOOTSTRAP] COM-21: {asociados} usuario(s) asociados al comedor default como administradores.")
             if membresias_migradas:
                 print(f"[BOOTSTRAP] COM-22: {membresias_migradas} membresía(s) migradas al modelo de grupos.")
-            print("[BOOTSTRAP] Esquema dinámico verificado/creado correctamente (incluye gestión de usuarios COM-23).")
+            print("[BOOTSTRAP] Esquema dinámico verificado/creado correctamente (incluye permisos por vistas COM-25).")
             return True
         except Exception as e:
             print(f"[BOOTSTRAP] Intento {intento}/{reintentos} fallido: {e}")

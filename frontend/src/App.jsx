@@ -3,8 +3,9 @@
  * Objetivo: Componente raíz de la aplicación. Orquesta la navegación por pestañas,
  *           el proveedor de parámetros dinámicos, la capa de autenticación (COM-19),
  *           la selección de comedor post-login (COM-20), el módulo multi-comedor
- *           (COM-21), grupos de usuario (COM-22) y el módulo de gestión de usuarios
- *           (COM-23) con visibilidad según perfil/privilegios.
+ *           (COM-21), grupos de usuario (COM-22), gestión de usuarios (COM-23) y la
+ *           diferenciación de vistas por grupo/rol (COM-25): cada pestaña se muestra
+ *           solo si el usuario posee el módulo correspondiente en la matriz de permisos.
  * Uso: Montado en main.jsx mediante <React.StrictMode>. Envuelve toda la app con
  *      AuthProvider y ParametrosProvider.
  *
@@ -16,14 +17,15 @@
  *    y contexto activo en el header.
  *  - COM-21: pestaña "Comedores" con ComedoresView.
  *  - COM-22: pestaña "Grupos" con GruposView.
- *  - COM-23: pestaña "Usuarios" visible según membresías efectivas: perfil SISTEMA
- *    ve el panel global; Directivo con rol de gestión o Administrativo ven el panel
- *    de comedor; sin privilegios la pestaña no aparece.
+ *  - COM-23: pestaña "Usuarios" con panel global o de comedor según perfil.
+ *  - COM-25: pestañas filtradas por `misModulos` (matriz rol -> módulos); nueva
+ *    pestaña "Reportes" (módulo reportes); sub-pestañas del panel de administración
+ *    filtradas por módulos (municipalidades / roles / bloqueos / vistas).
  */
 import React, { useState, useEffect } from 'react';
 import {
     ChefHat, Calculator, ShoppingCart, Activity, Users, ClipboardList,
-    LogOut, Store, UserCog, Loader2, MapPin, Contact
+    LogOut, Store, UserCog, Loader2, MapPin, Contact, BarChart3
 } from 'lucide-react';
 import { RecipesView } from './components/recipes/RecipesView';
 import { BudgetView } from './components/budget/BudgetView';
@@ -32,6 +34,7 @@ import { CatalogView } from './components/catalog/CatalogView';
 import { POSView } from './components/pos/POSView';
 import { ComedoresView } from './components/comedores/ComedoresView';
 import { GruposView } from './components/grupos/GruposView';
+import { ReportesView } from './components/reportes/ReportesView';
 // COM-23: paneles de gestión de usuarios (global y por comedor)
 import { GestionUsuariosSistemaView } from './components/usuarios/GestionUsuariosSistemaView';
 import { GestionUsuariosComedorView } from './components/usuarios/GestionUsuariosComedorView';
@@ -42,6 +45,21 @@ import { LoginView } from './components/auth/LoginView';
 import { ModalCambioClave } from './components/auth/ModalCambioClave';
 import { SeleccionComedorView } from './components/auth/SeleccionComedorView';
 import { api } from './services/api';
+
+// COM-25: módulos de administración que abren el panel global de usuarios
+const MODULOS_ADMIN = ['municipalidades', 'roles', 'bloqueos', 'vistas'];
+
+// COM-25: catálogo de pestañas con su módulo requerido (matriz rol -> módulos)
+const TABS_BASE = [
+    { id: 'recipes', label: 'Recetario', icon: ChefHat, color: 'emerald', modulo: 'recetario' },
+    { id: 'budget', label: 'Presupuesto', icon: Calculator, color: 'emerald', modulo: 'presupuesto' },
+    { id: 'planificaciones', label: 'Planificaciones', icon: ClipboardList, color: 'blue', modulo: 'planificaciones' },
+    { id: 'comedores', label: 'Comedores', icon: Store, color: 'emerald', modulo: 'comedores' },
+    { id: 'grupos', label: 'Grupos', icon: UserCog, color: 'blue', modulo: 'grupos' },
+    { id: 'reportes', label: 'Reportes', icon: BarChart3, color: 'blue', modulo: 'reportes' },
+    { id: 'catalog', label: 'Catálogo', icon: ShoppingCart, color: 'emerald', modulo: 'catalogo' },
+    { id: 'pos', label: 'Ventas y Demanda', icon: Users, color: 'blue', modulo: 'ventas' },
+];
 
 /**
  * COM-20: describe el contexto de trabajo activo para exhibirlo en el header.
@@ -59,12 +77,38 @@ function AppContent() {
     const [activeTab, setActiveTab] = useState('pos');
     const { usuario, pendienteCambio, completarCambioClave, cerrarSesion, seleccion, validando } = useAuth();
 
-    // COM-23: perfil de gestión de usuarios derivado de las membresías efectivas:
-    //   'SISTEMA'        -> panel global (admin de sistemas).
-    //   'COMEDOR_ADMIN'  -> panel por comedor (Directivo con rol de gestión o Administrativo).
-    //   null             -> la pestaña Usuarios no aparece.
+    // COM-25: módulos efectivos del usuario en sesión (membresías activas + roles temporales)
+    const [misModulos, setMisModulos] = useState([]);
+    const [cargandoModulos, setCargandoModulos] = useState(true);
+
+    // COM-23: perfil de gestión de comedor (fallback para el panel por comedor cuando
+    // el usuario no posee módulos de administración global en la matriz COM-25).
     const [perfilGestion, setPerfilGestion] = useState(null);
 
+    // Carga los módulos permitidos del usuario en sesión (COM-25)
+    useEffect(() => {
+        if (!usuario) {
+            setMisModulos([]);
+            return;
+        }
+        let vivo = true;
+        const cargar = async () => {
+            setCargandoModulos(true);
+            try {
+                const res = await api.getMisModulos(usuario.id);
+                if (vivo) setMisModulos(res.modulos || []);
+            } catch (e) {
+                if (vivo) setMisModulos([]);
+            } finally {
+                if (vivo) setCargandoModulos(false);
+            }
+        };
+        cargar();
+        return () => { vivo = false; };
+    }, [usuario]);
+
+    // COM-23: determina si el usuario puede gestionar usuarios de comedor
+    // (Directivo con rol de gestión o Administrativo con cobertura).
     useEffect(() => {
         if (!usuario) {
             setPerfilGestion(null);
@@ -73,10 +117,6 @@ function AppContent() {
         const determinar = async () => {
             try {
                 const membresias = await api.getGruposDeUsuario(usuario.id);
-                const esSistema =
-                    usuario.rol === 'Administrador Sistema' ||
-                    membresias.some(m => m.estado_activo && m.ambito === 'SISTEMA');
-                // Roles de gestión del grupo Directivo (semilla del sistema)
                 const ROLES_GESTION = ['Presidente', 'Tesorero'];
                 const cubreComedores = membresias.some(m =>
                     m.estado_activo && (
@@ -84,9 +124,7 @@ function AppContent() {
                         (m.ambito === 'COMEDOR' && m.grupo === 'Directivo' && ROLES_GESTION.includes(m.rol))
                     )
                 );
-                if (esSistema) setPerfilGestion('SISTEMA');
-                else if (cubreComedores) setPerfilGestion('COMEDOR_ADMIN');
-                else setPerfilGestion(null);
+                setPerfilGestion(cubreComedores ? 'COMEDOR_ADMIN' : null);
             } catch (e) {
                 setPerfilGestion(null);
             }
@@ -121,18 +159,41 @@ function AppContent() {
         );
     }
 
-    // Pestañas base + pestañas condicionales por perfil (COM-23)
-    const tabs = [
-        { id: 'recipes', label: 'Recetario', icon: ChefHat, color: 'emerald' },
-        { id: 'budget', label: 'Presupuesto', icon: Calculator, color: 'emerald' },
-        { id: 'planificaciones', label: 'Planificaciones', icon: ClipboardList, color: 'blue' },
-        { id: 'comedores', label: 'Comedores', icon: Store, color: 'emerald' },
-        { id: 'grupos', label: 'Grupos', icon: UserCog, color: 'blue' },
-        { id: 'catalog', label: 'Catálogo', icon: ShoppingCart, color: 'emerald' },
-        { id: 'pos', label: 'Ventas y Demanda', icon: Users, color: 'blue' },
-    ];
-    if (perfilGestion) {
-        tabs.splice(2, 0, { id: 'usuarios', label: 'Usuarios', icon: Contact, color: 'blue' });
+    // COM-25: pestañas visibles según los módulos permitidos del usuario
+    const tieneModulosAdmin = MODULOS_ADMIN.some(m => misModulos.includes(m));
+    const puedeVerUsuarios = tieneModulosAdmin || perfilGestion === 'COMEDOR_ADMIN';
+
+    const tabs = TABS_BASE.filter(t => misModulos.includes(t.modulo));
+    if (puedeVerUsuarios) {
+        tabs.splice(3, 0, { id: 'usuarios', label: 'Usuarios', icon: Contact, color: 'blue', modulo: null });
+    }
+
+    // Mantener activa una pestaña visible (ajuste cuando cambian los permisos)
+    if (tabs.length > 0 && !tabs.some(t => t.id === activeTab)) {
+        // Se difiere al render para no mutar estado durante el render
+        setTimeout(() => setActiveTab(tabs[0].id), 0);
+    }
+
+    // Sin módulos asignados: mensaje informativo (sin pestañas)
+    if (!cargandoModulos && tabs.length === 0) {
+        return (
+            <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+                <div className="bg-white border border-slate-200 rounded-2xl shadow-sm p-8 max-w-md text-center">
+                    <Activity size={36} className="text-emerald-600 mx-auto mb-3" />
+                    <h2 className="text-lg font-bold text-slate-800 mb-2">Sin módulos asignados</h2>
+                    <p className="text-sm text-slate-600">
+                        Su usuario no tiene módulos permitidos en este momento. Consulte con el
+                        administrador del sistema para que le asigne los accesos correspondientes.
+                    </p>
+                    <button
+                        onClick={cerrarSesion}
+                        className="mt-4 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium transition-colors"
+                    >
+                        Cerrar sesión
+                    </button>
+                </div>
+            </div>
+        );
     }
 
     return (
@@ -173,40 +234,55 @@ function AppContent() {
                 </header>
 
                 <main className="max-w-6xl mx-auto mt-8 p-4">
-                    {/* Barra de pestañas */}
-                    <div className="flex gap-2 mb-6 border-b border-slate-200 pb-2 overflow-x-auto">
-                        {tabs.map(tab => {
-                            const Icon = tab.icon;
-                            const isActive = activeTab === tab.id;
-                            return (
-                                <button
-                                    key={tab.id}
-                                    onClick={() => setActiveTab(tab.id)}
-                                    className={`flex shrink-0 items-center gap-2 px-4 py-2 font-medium rounded-t-lg transition-colors ${
-                                        isActive
-                                            ? `bg-white text-${tab.color}-700 shadow-sm border-t border-x border-slate-200`
-                                            : 'text-slate-500 hover:bg-slate-100'
-                                    }`}
-                                >
-                                    <Icon size={18} /> {tab.label}
-                                </button>
-                            );
-                        })}
-                    </div>
+                    {cargandoModulos ? (
+                        // COM-25: mientras se calculan los módulos permitidos
+                        <div className="p-16 text-center text-emerald-600">
+                            <Loader2 className="animate-spin mx-auto" size={32} />
+                            <p className="text-sm mt-2 text-slate-500">Cargando sus módulos permitidos...</p>
+                        </div>
+                    ) : (
+                        <>
+                            {/* Barra de pestañas (solo módulos permitidos) */}
+                            <div className="flex gap-2 mb-6 border-b border-slate-200 pb-2 overflow-x-auto">
+                                {tabs.map(tab => {
+                                    const Icon = tab.icon;
+                                    const isActive = activeTab === tab.id;
+                                    return (
+                                        <button
+                                            key={tab.id}
+                                            onClick={() => setActiveTab(tab.id)}
+                                            className={`flex shrink-0 items-center gap-2 px-4 py-2 font-medium rounded-t-lg transition-colors ${
+                                                isActive
+                                                    ? `bg-white text-${tab.color}-700 shadow-sm border-t border-x border-slate-200`
+                                                    : 'text-slate-500 hover:bg-slate-100'
+                                            }`}
+                                        >
+                                            <Icon size={18} /> {tab.label}
+                                        </button>
+                                    );
+                                })}
+                            </div>
 
-                    {/* Contenedor de vistas por pestaña */}
-                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 min-h-[500px]">
-                        {activeTab === 'recipes' && <RecipesView />}
-                        {activeTab === 'budget' && <BudgetView />}
-                        {activeTab === 'planificaciones' && <PlanificacionesView />}
-                        {activeTab === 'comedores' && <ComedoresView />}
-                        {activeTab === 'grupos' && <GruposView />}
-                        {activeTab === 'catalog' && <CatalogView />}
-                        {activeTab === 'pos' && <POSView />}
-                        {/* COM-23: panel de gestión según perfil */}
-                        {activeTab === 'usuarios' && perfilGestion === 'SISTEMA' && <GestionUsuariosSistemaView />}
-                        {activeTab === 'usuarios' && perfilGestion === 'COMEDOR_ADMIN' && <GestionUsuariosComedorView />}
-                    </div>
+                            {/* Contenedor de vistas por pestaña */}
+                            <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 min-h-[500px]">
+                                {activeTab === 'recipes' && <RecipesView />}
+                                {activeTab === 'budget' && <BudgetView />}
+                                {activeTab === 'planificaciones' && <PlanificacionesView />}
+                                {activeTab === 'comedores' && <ComedoresView />}
+                                {activeTab === 'grupos' && <GruposView />}
+                                {activeTab === 'reportes' && <ReportesView />}
+                                {activeTab === 'catalog' && <CatalogView />}
+                                {activeTab === 'pos' && <POSView />}
+                                {/* COM-23/COM-25: panel de gestión según módulos y perfil */}
+                                {activeTab === 'usuarios' && tieneModulosAdmin && (
+                                    <GestionUsuariosSistemaView modulosPermitidos={misModulos} />
+                                )}
+                                {activeTab === 'usuarios' && !tieneModulosAdmin && perfilGestion === 'COMEDOR_ADMIN' && (
+                                    <GestionUsuariosComedorView />
+                                )}
+                            </div>
+                        </>
+                    )}
                 </main>
             </div>
 

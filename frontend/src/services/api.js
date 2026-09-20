@@ -14,6 +14,8 @@
  *  - COM-23: bloque USUARIOS (creación, bloqueo/desbloqueo, política de claves),
  *            bloque MUNICIPALIDADES (CRUD) y extensiones de GRUPOS (privilegios,
  *            creación de grupos y roles temporales con vigencia/revocación).
+ *  - COM-25: bloque VISTAS (catálogo de módulos, matriz de permisos por rol,
+ *            edición de permisos y módulos efectivos del usuario en sesión).
  */
 const API_BASE = '/api/v1';
 
@@ -189,13 +191,11 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al cambiar el estado de la membresía'));
         return response.json();
     },
-    // COM-23: catálogo de privilegios con los grupos que los poseen
     getPrivilegios: async () => {
         const response = await fetch(`${API_BASE}/grupos/privilegios`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener privilegios'));
         return response.json();
     },
-    // COM-23: creación de grupos con ámbito
     createGrupo: async (data) => {
         const response = await fetch(`${API_BASE}/grupos`, {
             method: 'POST',
@@ -205,7 +205,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al crear el grupo'));
         return response.json();
     },
-    // COM-23: reemplazo del conjunto de privilegios de un grupo
     asignarPrivilegiosGrupo: async (grupoId, data) => {
         const response = await fetch(`${API_BASE}/grupos/${grupoId}/privilegios`, {
             method: 'PUT',
@@ -215,7 +214,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al asignar privilegios'));
         return response.json();
     },
-    // COM-23: roles temporales con vigencia
     getRolesTemporales: async (params = {}) => {
         const qs = new URLSearchParams(params).toString();
         const response = await fetch(`${API_BASE}/grupos/roles-temporales?${qs}`);
@@ -238,6 +236,38 @@ export const api = {
             body: JSON.stringify(data)
         });
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al revocar el rol temporal'));
+        return response.json();
+    },
+
+    // ==========================================
+    // PERMISOS POR VISTAS (COM-25)
+    // ==========================================
+    // Catálogo de módulos del sistema (pestañas/vistas disponibles)
+    getModulosSistema: async () => {
+        const response = await fetch(`${API_BASE}/vistas/modulos`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener módulos del sistema'));
+        return response.json();
+    },
+    // Matriz completa grupo -> rol -> módulos para el editor de la sub-pestaña Vistas
+    getMatrizPermisos: async () => {
+        const response = await fetch(`${API_BASE}/vistas/permisos`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener la matriz de permisos'));
+        return response.json();
+    },
+    // Reemplaza los módulos permitidos de un rol (solo administrador de sistemas)
+    updatePermisosRol: async (rolId, data) => {
+        const response = await fetch(`${API_BASE}/vistas/permisos/${rolId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al actualizar los permisos del rol'));
+        return response.json();
+    },
+    // Módulos efectivos del usuario en sesión (membresías activas + roles temporales vigentes)
+    getMisModulos: async (usuarioId) => {
+        const response = await fetch(`${API_BASE}/vistas/mis-modulos?usuario_id=${usuarioId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener sus módulos permitidos'));
         return response.json();
     },
 
