@@ -9,8 +9,9 @@
  *  - COM-17: parser defensivo `leerErrorSeguro` (evita "Unexpected token 'I'" con 500 en texto plano).
  *  - COM-19: endpoints de autenticación (login, cambiar-clave).
  *  - COM-21: bloque COMEDORES (CRUD, usuarios por comedor, asociación, estado, búsqueda por documento).
- *  - COM-22: bloque GRUPOS (catálogo grupos/roles, membresías por usuario, listado filtrado,
- *            asignación y cambio de estado auditado).
+ *  - COM-22: bloque GRUPOS (catálogo grupos/roles, membresías, asignación y cambio de estado).
+ *  - COM-20: getContextoSeleccion y verificarMembresia (selección de comedor post-login
+ *            y verificación de vigencia al login recordado).
  */
 const API_BASE = '/api/v1';
 
@@ -132,6 +133,32 @@ export const api = {
             body: JSON.stringify(data)
         });
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al cambiar el estado'));
+        return response.json();
+    },
+
+    // ==========================================
+    // COM-20: CONTEXTO DE SELECCIÓN DE COMEDOR
+    // ==========================================
+    /**
+     * Devuelve { perfil, membresias_activas, alcance_global } para construir
+     * los dropdowns cascada de selección post-login (solo opciones activas).
+     */
+    getContextoSeleccion: async (usuarioId) => {
+        const response = await fetch(`${API_BASE}/comedores/contexto-seleccion?usuario_id=${usuarioId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el contexto de selección'));
+        return response.json();
+    },
+    /**
+     * Verifica que el usuario SIGUE activo en el contexto recordado
+     * (se llama en login recordado y al restaurar sesión).
+     */
+    verificarMembresia: async (usuarioId, comedorId, perfil) => {
+        const params = new URLSearchParams({ usuario_id: String(usuarioId), perfil: perfil || 'COMEDOR' });
+        if (comedorId !== null && comedorId !== undefined) {
+            params.append('comedor_id', String(comedorId));
+        }
+        const response = await fetch(`${API_BASE}/comedores/verificar-membresia?${params.toString()}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al verificar la membresía'));
         return response.json();
     },
 
