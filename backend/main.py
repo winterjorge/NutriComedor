@@ -21,9 +21,10 @@ from routers import (
     grupos,           # COM-22/COM-23: grupos, privilegios y roles temporales
     usuarios,         # COM-23: gestión de usuarios, bloqueos y política de claves
     municipalidades,  # COM-23: registro nacional de municipalidades
+    vistas,           # COM-25: permisos por vistas (módulos por grupo/rol)
 )
 # Asegurado de esquema dinámico (parámetros, planificación, raciones, seguridad,
-# comedores, grupos y gestión de usuarios) al arrancar
+# comedores, grupos, gestión de usuarios y permisos por vistas) al arrancar
 from db_bootstrap import asegurar_esquema
 
 
@@ -34,7 +35,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="API - NutriComedor", version="2.6.0", lifespan=lifespan)
+app = FastAPI(title="API - NutriComedor", version="2.7.0", lifespan=lifespan)
 
 # Configuración de CORS (Mantiene compatibilidad con tu Frontend)
 app.add_middleware(
@@ -52,6 +53,7 @@ app.include_router(comedores.router, prefix="/api/v1")        # COM-21
 app.include_router(grupos.router, prefix="/api/v1")           # COM-22/COM-23
 app.include_router(usuarios.router, prefix="/api/v1")         # COM-23
 app.include_router(municipalidades.router, prefix="/api/v1")  # COM-23
+app.include_router(vistas.router, prefix="/api/v1")           # COM-25
 app.include_router(parametros.router, prefix="/api/v1")
 app.include_router(presupuesto.router, prefix="/api/v1")
 app.include_router(recetas.router, prefix="/api/v1")
