@@ -1,13 +1,10 @@
 /**
  * components/usuarios/GestionUsuariosSistemaView.jsx
- * Objetivo: Panel del administrador de sistemas: usuarios y bloqueos, municipalidades,
- *           grupos y privilegios, política de contraseñas y editor de permisos por
- *           vistas. Las sub-pestañas visibles se filtran según los módulos permitidos
- *           del usuario en sesión (matriz rol -> módulos):
- *             - 'bloqueos'        -> Usuarios y Bloqueos + Política de Claves
- *             - 'municipalidades' -> Municipalidades
- *             - 'roles'           -> Grupos y Privilegios
- *             - 'vistas'          -> Editor de permisos por vistas (VistaPermisosView)
+ * Objetivo: Panel del administrador de sistemas: usuarios y bloqueos (creación con
+ *           formulario dinámico por perfil y edición con precarga de membresías según
+ *           la corrección COM-26), municipalidades, grupos y privilegios, política de
+ *           contraseñas y editor de permisos por vistas. Las sub-pestañas visibles se
+ *           filtran según los módulos permitidos del usuario en sesión.
  * Uso: Renderizado por App.jsx en la pestaña "Usuarios" cuando el usuario posee al
  *      menos uno de los módulos de administración; recibe `modulosPermitidos`.
  */
@@ -21,6 +18,7 @@ import { useAuth } from '../../context/AuthContext';
 import { ModalConfirmacion } from '../common/ModalConfirmacion';
 import { ModalExito } from '../common/ModalExito';
 import { ModalCrearUsuario } from './ModalCrearUsuario';
+import { ModalEditarUsuario } from './ModalEditarUsuario';
 import { ModalMunicipalidad } from './ModalMunicipalidad';
 import { ModalGrupoPrivilegios } from './ModalGrupoPrivilegios';
 import { VistaPermisosView } from './VistaPermisosView';
@@ -55,6 +53,7 @@ export const GestionUsuariosSistemaView = ({ modulosPermitidos = [] }) => {
     const [estado, setEstado] = useState('');
     const [cargandoUsuarios, setCargandoUsuarios] = useState(true);
     const [modalCrearUsuario, setModalCrearUsuario] = useState(false);
+    const [editarUsuarioId, setEditarUsuarioId] = useState(null); // COM-26: edición con precarga
     const [confCuenta, setConfCuenta] = useState(null);        // { objetivo, activar }
     const [confDesbloqueo, setConfDesbloqueo] = useState(null); // objetivo
 
@@ -302,6 +301,14 @@ export const GestionUsuariosSistemaView = ({ modulosPermitidos = [] }) => {
                                         </td>
                                         <td className="p-3">
                                             <div className="flex justify-end gap-2">
+                                                {/* COM-26: edición con precarga de membresías y alcance */}
+                                                <button
+                                                    onClick={() => setEditarUsuarioId(u.id)}
+                                                    title="Editar usuario (datos, perfil y alcance)"
+                                                    className="p-1.5 bg-slate-100 text-slate-700 hover:bg-slate-200 rounded-lg transition-colors"
+                                                >
+                                                    <Edit3 size={15} />
+                                                </button>
                                                 {u.bloqueado && (
                                                     <button
                                                         onClick={() => setConfDesbloqueo(u)}
@@ -500,6 +507,14 @@ export const GestionUsuariosSistemaView = ({ modulosPermitidos = [] }) => {
                 <ModalCrearUsuario
                     onClose={() => setModalCrearUsuario(false)}
                     onExito={() => { setModalCrearUsuario(false); setExito('Usuario creado exitosamente'); cargarUsuarios(); }}
+                />
+            )}
+            {/* COM-26: edición de usuario con precarga de membresías y alcance */}
+            {editarUsuarioId && (
+                <ModalEditarUsuario
+                    usuarioId={editarUsuarioId}
+                    onClose={() => setEditarUsuarioId(null)}
+                    onExito={() => { setEditarUsuarioId(null); setExito('Usuario actualizado exitosamente'); cargarUsuarios(); }}
                 />
             )}
             {modalMuni && (

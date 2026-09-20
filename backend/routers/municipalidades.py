@@ -1,13 +1,10 @@
 """
 routers/municipalidades.py
-Objetivo: CRUD del registro nacional de municipalidades (módulo de gestión de usuarios):
-          listar con filtros, crear, consultar y actualizar municipalidades, y listar
-          los comedores vinculados a cada una.
+Objetivo: CRUD del registro nacional de municipalidades y endpoint de búsqueda para
+          el autocompletado del flujo de creación/edición de usuarios (corrección COM-26).
 Uso: Registrado en main.py con prefijo /api/v1.
 Permisos: crear/actualizar exige el privilegio GESTION_MUNICIPALIDADES (o admin de
-          sistemas); listar y consultar son de lectura para usuarios autenticados.
-Nota: Mientras no exista middleware JWT, el solicitante se identifica mediante
-      `usuario_solicitante_id` en el payload (el frontend lo envía desde la sesión).
+          sistemas); listar, consultar y buscar son de lectura.
 """
 from fastapi import APIRouter, Depends, HTTPException
 from psycopg2.extras import RealDictCursor
@@ -36,13 +33,39 @@ def _validar_permiso_gestion(cur, usuario_id: int):
 
 
 # ==========================================
+# BÚSQUEDA PARA AUTOCOMPLETADO (COM-26)
+# IMPORTANTE: se declara antes de las rutas /{municipalidad_id} para evitar conflictos.
+# ==========================================
+@router.get("/buscar")
+def buscar_municipalidades(q: str = "", db=Depends(get_db)):
+    """
+    COM-26: búsqueda de municipalidades por nombre o ubicación (departamento, provincia,
+    distrito). Alimenta el campo de texto con autocompletado del formulario de usuarios.
+    """
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        like = f"%{q}%" if q.strip() else "%"
+        cur.execute("""
+            SELECT id, nombre, departamento, provincia, distrito
+            FROM municipalidades
+            WHERE nombre ILIKE %s OR departamento ILIKE %s
+               OR provincia ILIKE %s OR distrito ILIKE %s
+            ORDER BY nombre
+            LIMIT 15;
+        """, (like, like, like, like))
+        return cur.fetchall()
+    finally:
+        cur.close()
+
+
+# ==========================================
 # ENDPOINTS DE LECTURA
 # ==========================================
 @router.get("")
 def listar_municipalidades(departamento: str = None, provincia: str = None,
                            distrito: str = None, nombre: str = None,
                            db=Depends(get_db)):
-    """Lista municipalidades con filtros opcionales (lectura para autenticados)."""
+    """Lista municipalidades con filtros opcionales (lectura)."""
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         query = "SELECT * FROM municipalidades WHERE 1=1"
@@ -88,7 +111,7 @@ def comedores_de_municipalidad(municipalidad_id: int, db=Depends(get_db)):
         if not _existe_municipalidad(cur, municipalidad_id):
             raise HTTPException(status_code=404, detail="Municipalidad no encontrada.")
         cur.execute("""
-            SELECT id, nombre, departamento, ciudad, distrito, zona, estado_activo
+            SELECT id, nombre, departamento, ciudad, distrito, zona
             FROM comedores
             WHERE municipalidad_id = %s
             ORDER BY nombre;
@@ -139,7 +162,6 @@ def actualizar_municipalidad(municipalidad_id: int, data: MunicipalidadUpdate,
             raise HTTPException(status_code=404, detail="Municipalidad no encontrada.")
         _validar_permiso_gestion(cur, data.usuario_solicitante_id)
 
-        # Construir SET dinámico solo con los campos enviados (excluye al solicitante)
         campos = {k: v for k, v in data.dict(exclude_unset=True).items()
                   if k != "usuario_solicitante_id" and v is not None}
         if not campos:

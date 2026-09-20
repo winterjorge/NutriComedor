@@ -14,8 +14,11 @@
  *  - COM-23: bloque USUARIOS (creación, bloqueo/desbloqueo, política de claves),
  *            bloque MUNICIPALIDADES (CRUD) y extensiones de GRUPOS (privilegios,
  *            creación de grupos y roles temporales con vigencia/revocación).
- *  - COM-25: bloque VISTAS (catálogo de módulos, matriz de permisos por rol,
- *            edición de permisos y módulos efectivos del usuario en sesión).
+ *  - COM-25: bloque VISTAS (catálogo de módulos del sistema, matriz de permisos por rol,
+ *            edición de permisos por rol y módulos efectivos del usuario en sesión).
+ *  - COM-26: flujo CRUD de usuarios por perfil: contextoCreacion, crearUsuario y
+ *            editarUsuario con perfil objetivo y alcance, más los métodos de búsqueda
+ *            buscarMunicipalidades y buscarComedores para el autocompletado.
  */
 const API_BASE = '/api/v1';
 
@@ -104,6 +107,12 @@ export const api = {
             body: JSON.stringify(data)
         });
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al actualizar el comedor'));
+        return response.json();
+    },
+    // COM-26: búsqueda de comedores para el autocompletado del formulario de usuarios
+    buscarComedores: async (q) => {
+        const response = await fetch(`${API_BASE}/comedores/buscar?q=${encodeURIComponent(q || '')}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al buscar comedores'));
         return response.json();
     },
     getComedoresDeUsuario: async (usuarioId) => {
@@ -242,19 +251,16 @@ export const api = {
     // ==========================================
     // PERMISOS POR VISTAS (COM-25)
     // ==========================================
-    // Catálogo de módulos del sistema (pestañas/vistas disponibles)
     getModulosSistema: async () => {
         const response = await fetch(`${API_BASE}/vistas/modulos`);
-        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener módulos del sistema'));
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener los módulos del sistema'));
         return response.json();
     },
-    // Matriz completa grupo -> rol -> módulos para el editor de la sub-pestaña Vistas
     getMatrizPermisos: async () => {
         const response = await fetch(`${API_BASE}/vistas/permisos`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener la matriz de permisos'));
         return response.json();
     },
-    // Reemplaza los módulos permitidos de un rol (solo administrador de sistemas)
     updatePermisosRol: async (rolId, data) => {
         const response = await fetch(`${API_BASE}/vistas/permisos/${rolId}`, {
             method: 'PUT',
@@ -264,7 +270,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al actualizar los permisos del rol'));
         return response.json();
     },
-    // Módulos efectivos del usuario en sesión (membresías activas + roles temporales vigentes)
     getMisModulos: async (usuarioId) => {
         const response = await fetch(`${API_BASE}/vistas/mis-modulos?usuario_id=${usuarioId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener sus módulos permitidos'));
@@ -272,7 +277,7 @@ export const api = {
     },
 
     // ==========================================
-    // USUARIOS (COM-23)
+    // USUARIOS: FLUJO CRUD POR PERFIL (COM-23 / COM-26)
     // ==========================================
     getUsuarios: async (params = {}) => {
         const qs = new URLSearchParams(params).toString();
@@ -280,6 +285,20 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener usuarios'));
         return response.json();
     },
+    /**
+     * COM-26: contexto de creación/edición según el perfil del creador:
+     * perfil del solicitante, perfiles que puede crear, grupos/roles por perfil
+     * y alcance permitido (municipalidades y/o comedores).
+     */
+    getContextoCreacion: async (usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/usuarios/contexto-creacion?usuario_solicitante_id=${usuarioSolicitanteId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el contexto de creación'));
+        return response.json();
+    },
+    /**
+     * COM-26: creación de usuario con perfil objetivo y alcance
+     * (municipalidad_ids para Administrativo, comedor_ids para Directivo/Operativo).
+     */
     crearUsuario: async (data) => {
         const response = await fetch(`${API_BASE}/usuarios`, {
             method: 'POST',
@@ -287,6 +306,27 @@ export const api = {
             body: JSON.stringify(data)
         });
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al crear el usuario'));
+        return response.json();
+    },
+    /**
+     * COM-26: edición de usuario (datos personales + membresías del grupo del perfil objetivo).
+     */
+    editarUsuario: async (usuarioId, data) => {
+        const response = await fetch(`${API_BASE}/usuarios/${usuarioId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al editar el usuario'));
+        return response.json();
+    },
+    /**
+     * COM-26: detalle del usuario para precargar la edición (datos personales,
+     * perfil, grupo/rol actual y alcance vigente: municipalidades/comedores).
+     */
+    getDetalleFlujoUsuario: async (usuarioId, solicitanteId) => {
+        const response = await fetch(`${API_BASE}/usuarios/${usuarioId}/detalle-flujo?usuario_solicitante_id=${solicitanteId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el detalle del usuario'));
         return response.json();
     },
     cambiarEstadoCuenta: async (usuarioId, data) => {
@@ -357,6 +397,12 @@ export const api = {
             body: JSON.stringify(data)
         });
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al actualizar la municipalidad'));
+        return response.json();
+    },
+    // COM-26: búsqueda de municipalidades para el autocompletado del formulario de usuarios
+    buscarMunicipalidades: async (q) => {
+        const response = await fetch(`${API_BASE}/municipalidades/buscar?q=${encodeURIComponent(q || '')}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al buscar municipalidades'));
         return response.json();
     },
 
