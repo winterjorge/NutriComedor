@@ -39,6 +39,8 @@ from seguridad import (
 from esquema_gestion_usuarios import aplicar_esquema_gestion_usuarios
 # COM-25: esquema de permisos por vistas (módulos del sistema por rol)
 from esquema_permisos_vistas import aplicar_esquema_permisos_vistas
+# COM-26: esquema del flujo de creación/edición de usuarios por perfil
+from esquema_flujo_usuario import aplicar_esquema_flujo_usuario
 
 # ==========================================
 # CONSTANTES DE ROLES (COM-21)
@@ -448,6 +450,8 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
             aplicar_esquema_gestion_usuarios(cur)
             # 15. COM-25: catálogo de módulos del sistema y matriz rol -> módulos
             aplicar_esquema_permisos_vistas(cur)
+            # 16. COM-26: asociación usuario -> municipalidad (flujo CRUD por perfil)
+            aplicar_esquema_flujo_usuario(cur)
             conn.commit()
             cur.close()
             if migrados:
