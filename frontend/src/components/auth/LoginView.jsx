@@ -1,17 +1,23 @@
 /**
  * components/auth/LoginView.jsx
- * Objetivo: Pantalla de inicio de sesión (COM-19) por tipo de documento (DNI por defecto)
- *           + contraseña. Valida campos en blanco, muestra errores (rojo) y avisos de
- *           bloqueo inminente (ámbar).
+ * Objetivo: Pantalla de inicio de sesión por tipo de documento (DNI por defecto) y
+ *           contraseña, con validación de campos en blanco, mensajes de error/aviso
+ *           por intentos fallidos (COM-19) y aviso de deslogueo forzado cuando el
+ *           comedor recordado ya no tiene membresía activa (COM-20).
  * Uso: Renderizado por App.jsx cuando no existe sesión activa (useAuth).
+ *
+ * Historial:
+ *  - COM-19: login con política de intentos, aviso de bloqueo y cambio de clave obligatorio.
+ *  - COM-20: `iniciarSesion` ahora es asíncrono (verifica comedor recordado) y se muestra
+ *            el banner `avisoLogout` ("Ya no te encuentras registrado en el comedor.").
  */
 import React, { useState } from 'react';
-import { Activity, User, Lock, Eye, EyeOff, AlertCircle, AlertTriangle, Loader2 } from 'lucide-react';
+import { Activity, Lock, Eye, EyeOff, AlertCircle, AlertTriangle, Loader2 } from 'lucide-react';
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 
 export const LoginView = () => {
-    const { iniciarSesion } = useAuth();
+    const { iniciarSesion, avisoLogout } = useAuth();
 
     // Datos del formulario de acceso
     const [tipoDocumento, setTipoDocumento] = useState('DNI');
@@ -19,7 +25,7 @@ export const LoginView = () => {
     const [clave, setClave] = useState('');
     const [verClave, setVerClave] = useState(false);
 
-    // Mensajes de feedback: error (caja roja) y aviso (caja ámbar)
+    // Mensajes de feedback: error (rojo), aviso de intentos (ámbar)
     const [error, setError] = useState('');
     const [aviso, setAviso] = useState('');
     const [cargando, setCargando] = useState(false);
@@ -47,8 +53,9 @@ export const LoginView = () => {
                 clave
             });
             if (ok) {
-                // Login exitoso (si requiere_cambio_clave, App mostrará el modal de cambio)
-                iniciarSesion(data);
+                // COM-20: iniciarSesion verifica el comedor recordado y puede
+                // deslogear con avisoLogout si la membresía ya no está activa.
+                await iniciarSesion(data);
             } else {
                 // El backend devuelve detail como {mensaje, tipo} o como string
                 const detail = data.detail;
@@ -61,7 +68,6 @@ export const LoginView = () => {
                 }
             }
         } catch (err) {
-            console.error('Error de conexión en login:', err);
             setError('Error de conexión con el servidor.');
         } finally {
             setCargando(false);
@@ -79,6 +85,14 @@ export const LoginView = () => {
                 </div>
 
                 <form onSubmit={handleSubmit} className="p-6 space-y-4">
+                    {/* COM-20: deslogueo forzado por membresía inactiva en comedor recordado */}
+                    {avisoLogout && (
+                        <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-start gap-2">
+                            <AlertCircle size={18} className="shrink-0 mt-0.5" />
+                            <p className="text-sm font-medium">{avisoLogout}</p>
+                        </div>
+                    )}
+
                     {/* Mensaje de error (caja roja) */}
                     {error && (
                         <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-start gap-2">
@@ -86,6 +100,7 @@ export const LoginView = () => {
                             <p className="text-sm font-medium">{error}</p>
                         </div>
                     )}
+
                     {/* Mensaje de aviso de bloqueo inminente (caja ámbar) */}
                     {aviso && (
                         <div className="p-3 bg-amber-50 border border-amber-300 rounded-lg text-amber-800 flex items-start gap-2">
@@ -98,17 +113,14 @@ export const LoginView = () => {
                     <div className="flex gap-3">
                         <div className="w-1/3">
                             <label className="block text-sm font-semibold text-slate-600 mb-1">Tipo</label>
-                            <div className="relative">
-                                <User className="absolute left-3 top-2.5 text-slate-400" size={16} />
-                                <select
-                                    value={tipoDocumento}
-                                    onChange={(e) => setTipoDocumento(e.target.value)}
-                                    className="w-full pl-9 pr-2 py-2 border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-emerald-500 bg-white text-sm"
-                                >
-                                    <option value="DNI">DNI</option>
-                                    <option value="CE">C.E.</option>
-                                </select>
-                            </div>
+                            <select
+                                value={tipoDocumento}
+                                onChange={(e) => setTipoDocumento(e.target.value)}
+                                className="w-full px-3 py-2 border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-emerald-500 bg-white text-sm"
+                            >
+                                <option value="DNI">DNI</option>
+                                <option value="CE">C.E.</option>
+                            </select>
                         </div>
                         <div className="flex-1">
                             <label className="block text-sm font-semibold text-slate-600 mb-1">Documento</label>
