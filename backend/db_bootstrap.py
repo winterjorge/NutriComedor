@@ -12,12 +12,13 @@ Historial de correcciones:
  - FIX (error 500 en /parametros y /planificar): creación de parametros_sistema (+seed),
    planificacion_dia y columnas de planificación en presupuesto_semanal.
  - FIX COM-17: columna recetas_almuerzo.raciones con valor por defecto 4.
- - COM-19 (Login): columnas de seguridad en usuarios (intentos_fallidos, bloqueado,
-   fecha_clave, clave_provisoria), migración de hashes legacy a PBKDF2 y usuario
-   admin de respaldo (DNI 0000000).
- - COM-21 (Multi-comedor): tablas comedores y usuario_comedor (asociación muchos a
-   muchos con rol y estado por comedor), migración de roles legacy a
-   'Administrador Sistema', comedor default y asociación inicial de usuarios existentes.
+ - COM-19 (Login): columnas de seguridad en usuarios, migración de hashes legacy a
+   PBKDF2 y usuario admin de respaldo (DNI 0000000).
+ - COM-21 (Multi-comedor): tablas comedores y usuario_comedor, migración de roles
+   legacy a 'Administrador Sistema', comedor default y asociación inicial.
+ - COM-22 (Grupos de usuario): tablas grupos_usuario, roles_grupo y usuario_grupo;
+   seed del catálogo cerrado (Sistema / Administrativo / Directivo / Operativo con sus
+   roles) y migración idempotente de membresías legacy de COM-21 al modelo de grupos.
 """
 import time
 import psycopg2
@@ -120,8 +121,6 @@ ADD COLUMN IF NOT EXISTS clave_provisoria BOOLEAN NOT NULL DEFAULT TRUE;
 
 # =========================================================================
 # DDL: COM-21 (MULTI-COMEDOR) - Catálogo de comedores a nivel nacional.
-# Atributos solicitados: Departamento, Ciudad, Distrito, Zona, Nombre,
-# Dirección, link de ubicación (mapa) y fecha de fundación.
 # =========================================================================
 DDL_COMEDORES = """
 CREATE TABLE IF NOT EXISTS comedores (
@@ -140,8 +139,6 @@ CREATE TABLE IF NOT EXISTS comedores (
 
 # =========================================================================
 # DDL: COM-21 - Asociación usuario-comedor (muchos a muchos).
-# Reglas: un usuario pertenece a cero o varios comedores; el estado
-# activo/inactivo y el rol son POR COMEDOR; se audita quién desactivó.
 # =========================================================================
 DDL_USUARIO_COMEDOR = """
 CREATE TABLE IF NOT EXISTS usuario_comedor (
@@ -174,12 +171,93 @@ VALUES
 ON CONFLICT (nombre) DO NOTHING;
 """
 
+# =========================================================================
+# DDL: COM-22 (GRUPOS) - Catálogo de grupos de usuario por ámbito.
+# =========================================================================
+DDL_GRUPOS_USUARIO = """
+CREATE TABLE IF NOT EXISTS grupos_usuario (
+    id SERIAL PRIMARY KEY,
+    nombre VARCHAR(100) NOT NULL UNIQUE,
+    ambito VARCHAR(20) NOT NULL CHECK (ambito IN ('SISTEMA','GLOBAL','COMEDOR')),
+    descripcion TEXT,
+    fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP - INTERVAL '5 hours'
+);
+"""
+
+# =========================================================================
+# DDL: COM-22 - Roles disponibles dentro de cada grupo.
+# =========================================================================
+DDL_ROLES_GRUPO = """
+CREATE TABLE IF NOT EXISTS roles_grupo (
+    id SERIAL PRIMARY KEY,
+    grupo_id INT NOT NULL REFERENCES grupos_usuario(id) ON DELETE CASCADE,
+    nombre VARCHAR(100) NOT NULL,
+    descripcion TEXT,
+    fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP - INTERVAL '5 hours',
+    UNIQUE(grupo_id, nombre)
+);
+"""
+
+# =========================================================================
+# DDL: COM-22 - Membresías usuario-grupo-rol con alcance (global o por comedor).
+# UNIQUE NULLS NOT DISTINCT garantiza una sola membresía por
+# (usuario, grupo, rol, comedor) incluso cuando comedor_id es NULL (alcance global).
+# =========================================================================
+DDL_USUARIO_GRUPO = """
+CREATE TABLE IF NOT EXISTS usuario_grupo (
+    id SERIAL PRIMARY KEY,
+    usuario_id INT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+    grupo_id INT NOT NULL REFERENCES grupos_usuario(id) ON DELETE CASCADE,
+    rol_id INT NOT NULL REFERENCES roles_grupo(id) ON DELETE CASCADE,
+    comedor_id INT REFERENCES comedores(id) ON DELETE CASCADE,
+    estado_activo BOOLEAN NOT NULL DEFAULT TRUE,
+    desactivado_por INT REFERENCES usuarios(id),
+    fecha_desactivacion TIMESTAMP,
+    fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP - INTERVAL '5 hours',
+    UNIQUE NULLS NOT DISTINCT (usuario_id, grupo_id, rol_id, comedor_id)
+);
+CREATE INDEX IF NOT EXISTS idx_usuario_grupo_usuario ON usuario_grupo(usuario_id);
+CREATE INDEX IF NOT EXISTS idx_usuario_grupo_comedor ON usuario_grupo(comedor_id);
+CREATE INDEX IF NOT EXISTS idx_usuario_grupo_grupo ON usuario_grupo(grupo_id);
+"""
+
+# =========================================================================
+# SEED: COM-22 - Catálogo cerrado de grupos (no se crean grupos desde la UI).
+# =========================================================================
+SEED_GRUPOS = """
+INSERT INTO grupos_usuario (nombre, ambito, descripcion) VALUES
+('Administrador de Sistemas', 'SISTEMA', 'Soporte y mantenimiento del sistema.'),
+('Administrativo', 'GLOBAL', 'Grupo municipal: manejo global de todos los comedores o específico si se desea.'),
+('Directivo', 'COMEDOR', 'Parte administrativa del comedor.'),
+('Operativo', 'COMEDOR', 'Parte operativa del comedor.')
+ON CONFLICT (nombre) DO NOTHING;
+"""
+
+# =========================================================================
+# SEED: COM-22 - Roles por grupo (Auditor/Reportería; Presidente/Secretario/
+# Tesorero; Cocinero; y el rol único del grupo de sistemas).
+# =========================================================================
+SEED_ROLES_GRUPO = """
+INSERT INTO roles_grupo (grupo_id, nombre, descripcion)
+SELECT g.id, r.nombre, r.descripcion
+FROM (VALUES
+  ('Administrador de Sistemas', 'Administrador de Sistemas', 'Soporte y mantenimiento integral del sistema.'),
+  ('Administrativo', 'Auditor', 'Auditoría global o por comedor asignado.'),
+  ('Administrativo', 'Reportería', 'Generación de reportes globales o por comedor asignado.'),
+  ('Directivo', 'Presidente', 'Representación y gestión administrativa del comedor.'),
+  ('Directivo', 'Secretario', 'Actas y documentación del comedor.'),
+  ('Directivo', 'Tesorero', 'Manejo de fondos y presupuesto del comedor.'),
+  ('Operativo', 'Cocinero', 'Preparación operativa de los menús del comedor.')
+) AS r(grupo, nombre, descripcion)
+JOIN grupos_usuario g ON g.nombre = r.grupo
+ON CONFLICT (grupo_id, nombre) DO NOTHING;
+"""
+
 
 def _migrar_claves_legacy(cur):
     """
     COM-19: Asigna la clave provisoria (Nutri2026) con hash PBKDF2 a los usuarios
     cuyo clave_hash antiguo no tiene formato pbkdf2 (ej. 'hash_123456' del seed).
-    Idempotente: solo toca filas que aún no tengan el formato nuevo.
     """
     cur.execute("SELECT id FROM usuarios WHERE clave_hash NOT LIKE 'pbkdf2%';")
     filas = cur.fetchall()
@@ -199,8 +277,7 @@ def _migrar_claves_legacy(cur):
 def _asegurar_usuario_admin(cur):
     """
     COM-19: Crea el usuario administrador de respaldo (DNI 0000000) con clave
-    provisoria (Admin2026) si aún no existe. Idempotente: si el usuario ya existe
-    no se modifica nada (respeta la clave que el propio usuario haya definido).
+    provisoria (Admin2026) si aún no existe.
     """
     cur.execute(
         "SELECT id FROM usuarios WHERE documento_identidad = %s;",
@@ -230,7 +307,7 @@ def _migrar_roles_legacy(cur):
     """
     COM-21: Los roles globales antiguos ('Administradora' / 'Administrador') pasan
     a 'Administrador Sistema'. Los roles operativos por comedor viven en
-    usuario_comedor.rol ('Administrador' / 'Operador').
+    usuario_comedor.rol y, desde COM-22, también en usuario_grupo.
     """
     cur.execute("""
         UPDATE usuarios
@@ -242,9 +319,8 @@ def _migrar_roles_legacy(cur):
 
 def _asociar_usuarios_existentes(cur):
     """
-    COM-21: Migra el comportamiento previo de 'un solo comedor': todo usuario que
-    aún no pertenece a ningún comedor se asocia al comedor default como
-    Administrador activo. Idempotente (solo usuarios sin asociación previa).
+    COM-21: Todo usuario que aún no pertenece a ningún comedor se asocia al comedor
+    default como Administrador activo (preserva el piloto de un solo comedor).
     """
     cur.execute("SELECT id FROM comedores WHERE nombre = %s;", (NOMBRE_COMEDOR_DEFAULT,))
     row = cur.fetchone()
@@ -261,6 +337,60 @@ def _asociar_usuarios_existentes(cur):
         ON CONFLICT (usuario_id, comedor_id) DO NOTHING;
     """, (comedor_id, ROL_ADMIN_COMEDOR))
     return cur.rowcount
+
+
+def _migrar_membresias_legacy(cur):
+    """
+    COM-22: Migra el modelo COM-21 al modelo de grupos (idempotente):
+      1) usuarios.rol = 'Administrador Sistema'  -> grupo 'Administrador de Sistemas'
+         con alcance global (comedor_id NULL).
+      2) usuario_comedor rol 'Administrador'    -> Directivo / Presidente del comedor.
+      3) usuario_comedor rol 'Operador'         -> Operativo / Cocinero del comedor.
+    Se conserva el estado activo/inactivo de la membresía original.
+    """
+    total = 0
+    # 1) Administradores de sistemas (alcance global)
+    cur.execute("""
+        INSERT INTO usuario_grupo (usuario_id, grupo_id, rol_id, comedor_id, estado_activo)
+        SELECT u.id, g.id, r.id, NULL, TRUE
+        FROM usuarios u
+        CROSS JOIN grupos_usuario g
+        CROSS JOIN roles_grupo r
+        WHERE u.rol = 'Administrador Sistema'
+          AND g.nombre = 'Administrador de Sistemas'
+          AND r.grupo_id = g.id AND r.nombre = 'Administrador de Sistemas'
+          AND NOT EXISTS (
+              SELECT 1 FROM usuario_grupo ug
+              WHERE ug.usuario_id = u.id AND ug.rol_id = r.id
+                AND ug.comedor_id IS NULL
+          )
+        ON CONFLICT DO NOTHING;
+    """)
+    total += cur.rowcount
+
+    # 2) y 3) Membresías por comedor (Directivo/Presidente y Operativo/Cocinero)
+    for rol_legacy, grupo_nombre, rol_nombre in (
+        ('Administrador', 'Directivo', 'Presidente'),
+        ('Operador', 'Operativo', 'Cocinero'),
+    ):
+        cur.execute("""
+            INSERT INTO usuario_grupo (usuario_id, grupo_id, rol_id, comedor_id, estado_activo)
+            SELECT uc.usuario_id, g.id, r.id, uc.comedor_id, uc.estado_activo
+            FROM usuario_comedor uc
+            CROSS JOIN grupos_usuario g
+            CROSS JOIN roles_grupo r
+            WHERE uc.rol = %s
+              AND g.nombre = %s
+              AND r.grupo_id = g.id AND r.nombre = %s
+              AND NOT EXISTS (
+                  SELECT 1 FROM usuario_grupo ug
+                  WHERE ug.usuario_id = uc.usuario_id AND ug.rol_id = r.id
+                    AND ug.comedor_id IS NOT DISTINCT FROM uc.comedor_id
+              )
+            ON CONFLICT DO NOTHING;
+        """, (rol_legacy, grupo_nombre, rol_nombre))
+        total += cur.rowcount
+    return total
 
 
 def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
@@ -296,6 +426,15 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
             roles_migrados = _migrar_roles_legacy(cur)
             # 10. COM-21: asociación inicial de usuarios sin comedor
             asociados = _asociar_usuarios_existentes(cur)
+            # 11. COM-22: tablas de grupos, roles y membresías
+            cur.execute(DDL_GRUPOS_USUARIO)
+            cur.execute(DDL_ROLES_GRUPO)
+            cur.execute(DDL_USUARIO_GRUPO)
+            # 12. COM-22: seed del catálogo cerrado de grupos y roles
+            cur.execute(SEED_GRUPOS)
+            cur.execute(SEED_ROLES_GRUPO)
+            # 13. COM-22: migración de membresías legacy COM-21 al modelo de grupos
+            membresias_migradas = _migrar_membresias_legacy(cur)
             conn.commit()
             cur.close()
             if migrados:
@@ -306,7 +445,9 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
                 print(f"[BOOTSTRAP] COM-21: {roles_migrados} rol(es) migrados a '{ROL_SISTEMA}'.")
             if asociados:
                 print(f"[BOOTSTRAP] COM-21: {asociados} usuario(s) asociados al comedor default como administradores.")
-            print("[BOOTSTRAP] Esquema dinámico verificado/creado correctamente (incluye multi-comedor COM-21).")
+            if membresias_migradas:
+                print(f"[BOOTSTRAP] COM-22: {membresias_migradas} membresía(s) migradas al modelo de grupos.")
+            print("[BOOTSTRAP] Esquema dinámico verificado/creado correctamente (incluye grupos COM-22).")
             return True
         except Exception as e:
             print(f"[BOOTSTRAP] Intento {intento}/{reintentos} fallido: {e}")

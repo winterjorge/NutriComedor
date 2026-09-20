@@ -8,8 +8,9 @@
  * Historial:
  *  - COM-17: parser defensivo `leerErrorSeguro` (evita "Unexpected token 'I'" con 500 en texto plano).
  *  - COM-19: endpoints de autenticación (login, cambiar-clave).
- *  - COM-21: bloque COMEDORES (listar, crear, editar, usuarios por comedor,
- *            asociación, cambio de estado y búsqueda de usuario por documento).
+ *  - COM-21: bloque COMEDORES (CRUD, usuarios por comedor, asociación, estado, búsqueda por documento).
+ *  - COM-22: bloque GRUPOS (catálogo grupos/roles, membresías por usuario, listado filtrado,
+ *            asignación y cambio de estado auditado).
  */
 const API_BASE = '/api/v1';
 
@@ -131,6 +132,44 @@ export const api = {
             body: JSON.stringify(data)
         });
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al cambiar el estado'));
+        return response.json();
+    },
+
+    // ==========================================
+    // GRUPOS DE USUARIO (COM-22)
+    // ==========================================
+    getGrupos: async () => {
+        const response = await fetch(`${API_BASE}/grupos`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener grupos'));
+        return response.json();
+    },
+    getGruposDeUsuario: async (usuarioId) => {
+        const response = await fetch(`${API_BASE}/grupos/por-usuario/${usuarioId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener grupos del usuario'));
+        return response.json();
+    },
+    getMembresias: async (params = {}) => {
+        const qs = new URLSearchParams(params).toString();
+        const response = await fetch(`${API_BASE}/grupos/membresias?${qs}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener membresías'));
+        return response.json();
+    },
+    asignarGrupo: async (data) => {
+        const response = await fetch(`${API_BASE}/grupos/membresias`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al asignar el grupo'));
+        return response.json();
+    },
+    cambiarEstadoMembresia: async (membresiaId, data) => {
+        const response = await fetch(`${API_BASE}/grupos/membresias/${membresiaId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al cambiar el estado de la membresía'));
         return response.json();
     },
 
