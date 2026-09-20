@@ -19,6 +19,9 @@ Historial de correcciones:
  - COM-22 (Grupos de usuario): tablas grupos_usuario, roles_grupo y usuario_grupo;
    seed del catálogo cerrado (Sistema / Administrativo / Directivo / Operativo con sus
    roles) y migración idempotente de membresías legacy de COM-21 al modelo de grupos.
+ - COM-23 (Gestión de usuarios): se delega el esquema del módulo al módulo funcional
+   `esquema_gestion_usuarios` (municipalidades, privilegios, roles temporales y
+   parámetros editables de política de contraseñas).
 """
 import time
 import psycopg2
@@ -29,6 +32,8 @@ from seguridad import (
     DNI_ADMIN_RESPALDO,
     CLAVE_INICIAL_ADMIN,
 )
+# COM-23: esquema del módulo de gestión de usuarios (nombres por funcionalidad)
+from esquema_gestion_usuarios import aplicar_esquema_gestion_usuarios
 
 # ==========================================
 # CONSTANTES DE ROLES (COM-21)
@@ -200,8 +205,6 @@ CREATE TABLE IF NOT EXISTS roles_grupo (
 
 # =========================================================================
 # DDL: COM-22 - Membresías usuario-grupo-rol con alcance (global o por comedor).
-# UNIQUE NULLS NOT DISTINCT garantiza una sola membresía por
-# (usuario, grupo, rol, comedor) incluso cuando comedor_id es NULL (alcance global).
 # =========================================================================
 DDL_USUARIO_GRUPO = """
 CREATE TABLE IF NOT EXISTS usuario_grupo (
@@ -435,6 +438,9 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
             cur.execute(SEED_ROLES_GRUPO)
             # 13. COM-22: migración de membresías legacy COM-21 al modelo de grupos
             membresias_migradas = _migrar_membresias_legacy(cur)
+            # 14. COM-23: esquema del módulo de gestión de usuarios (municipalidades,
+            #     privilegios, roles temporales y política de claves editable)
+            aplicar_esquema_gestion_usuarios(cur)
             conn.commit()
             cur.close()
             if migrados:
@@ -447,7 +453,7 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
                 print(f"[BOOTSTRAP] COM-21: {asociados} usuario(s) asociados al comedor default como administradores.")
             if membresias_migradas:
                 print(f"[BOOTSTRAP] COM-22: {membresias_migradas} membresía(s) migradas al modelo de grupos.")
-            print("[BOOTSTRAP] Esquema dinámico verificado/creado correctamente (incluye grupos COM-22).")
+            print("[BOOTSTRAP] Esquema dinámico verificado/creado correctamente (incluye gestión de usuarios COM-23).")
             return True
         except Exception as e:
             print(f"[BOOTSTRAP] Intento {intento}/{reintentos} fallido: {e}")
