@@ -2,7 +2,7 @@
 routers/comedores.py
 Objetivo: Endpoints del ticket COM-21: CRUD de comedores, asociación de usuarios a
           comedores (cero o varios), manejo de estado activo/inactivo por comedor y
-          desactivación permitida solo al administrador del comedor o del sistema.
+          desactivación permitida solo a quien gestiona el comedor o al admin del sistema.
 Uso: Registrado en main.py con prefijo /api/v1.
 Nota: Mientras no exista middleware JWT, el solicitante se identifica mediante
       `usuario_solicitante_id` en el payload (el frontend lo envía desde la sesión COM-19).
@@ -11,6 +11,10 @@ Historial:
  - COM-21 (Parte 1): CRUD de comedores, asociación y cambio de estado con permisos.
  - COM-21 (Parte 3): se agrega GET /comedores/usuarios/buscar para que la UI pueda
    localizar usuarios por documento antes de asociarlos a un comedor.
+ - COM-22: los permisos de gestión de comedores se delegan al módulo central
+   `permisos.py`. Además del modelo legacy (usuario_comedor), ahora pueden gestionar
+   un comedor: miembros del grupo Directivo (Presidente/Tesorero) y del grupo
+   Administrativo municipal con cobertura (global o específica) sobre el comedor.
 """
 from fastapi import APIRouter, Depends, HTTPException
 from psycopg2.extras import RealDictCursor
@@ -19,49 +23,41 @@ from schemas.comedor import (
     ComedorCreate, ComedorUpdate, AsociarUsuarioInput,
     CambiarEstadoUsuarioComedorInput, ROLES_COMEDOR
 )
+# COM-22: fuente única de verdad de permisos (grupos, roles y alcances)
+from permisos import es_admin_sistema, es_admin_comedor
 
 router = APIRouter(prefix="/comedores", tags=["Comedores"])
 
 # ==========================================
 # CONSTANTES DE ROLES (COM-21)
 # ==========================================
-ROL_SISTEMA = "Administrador Sistema"     # Rol global en usuarios.rol
-ROL_ADMIN_COMEDOR = "Administrador"       # Rol dentro de usuario_comedor
+ROL_SISTEMA = "Administrador Sistema"     # Rol global legacy en usuarios.rol
+ROL_ADMIN_COMEDOR = "Administrador"       # Rol legacy dentro de usuario_comedor
 
 
 # ==========================================
-# HELPERS DE PERMISOS (COM-21)
+# HELPERS (COM-22: delegación de permisos)
 # ==========================================
-def _es_admin_sistema(cur, usuario_id: int) -> bool:
-    """True si el usuario tiene el rol global de Administrador del Sistema."""
-    cur.execute("SELECT rol FROM usuarios WHERE id = %s;", (usuario_id,))
-    row = cur.fetchone()
-    return bool(row) and row["rol"] == ROL_SISTEMA
-
-
-def _es_admin_comedor_activo(cur, usuario_id: int, comedor_id: int) -> bool:
-    """True si el usuario es Administrador ACTIVO en ese comedor específico."""
-    cur.execute("""
-        SELECT 1 FROM usuario_comedor
-        WHERE usuario_id = %s AND comedor_id = %s
-          AND rol = %s AND estado_activo = TRUE;
-    """, (usuario_id, comedor_id, ROL_ADMIN_COMEDOR))
+def _existe_comedor(cur, comedor_id: int) -> bool:
+    cur.execute("SELECT 1 FROM comedores WHERE id = %s;", (comedor_id,))
     return cur.fetchone() is not None
 
 
 def _validar_permiso_admin(cur, usuario_id: int, comedor_id: int):
-    """Regla COM-21: solo el admin del comedor o el admin del sistema operan cambios."""
-    if not (_es_admin_sistema(cur, usuario_id) or
-            _es_admin_comedor_activo(cur, usuario_id, comedor_id)):
+    """
+    Regla COM-21 + COM-22: pueden operar cambios sobre el comedor:
+      - Administrador de Sistemas (grupo SISTEMA o rol legacy).
+      - Admin legacy del comedor (usuario_comedor rol 'Administrador' activo).
+      - Directivo Presidente/Tesorero del comedor (grupo Directivo, COM-22).
+      - Administrativo municipal con cobertura global o específica (COM-22).
+    La evaluación completa vive en permisos.es_admin_comedor / es_admin_sistema.
+    """
+    if not (es_admin_sistema(cur, usuario_id) or
+            es_admin_comedor(cur, usuario_id, comedor_id)):
         raise HTTPException(
             status_code=403,
             detail="Sin permiso: solo el administrador del comedor o del sistema puede ejecutar esta acción."
         )
-
-
-def _existe_comedor(cur, comedor_id: int) -> bool:
-    cur.execute("SELECT 1 FROM comedores WHERE id = %s;", (comedor_id,))
-    return cur.fetchone() is not None
 
 
 # ==========================================
@@ -135,10 +131,11 @@ def buscar_usuario_por_documento(documento: str, db=Depends(get_db)):
 
 @router.post("", status_code=201)
 def crear_comedor(data: ComedorCreate, db=Depends(get_db)):
-    """Crea un comedor. Regla COM-21: exclusivo del Administrador del Sistema."""
+    """Crea un comedor. Regla COM-21/COM-22: exclusivo del Administrador de Sistemas."""
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
-        if not _es_admin_sistema(cur, data.usuario_solicitante_id):
+        # COM-22: se consulta el grupo/rol legacy vía permisos (fuente única)
+        if not es_admin_sistema(cur, data.usuario_solicitante_id):
             raise HTTPException(status_code=403,
                             detail="Solo el Administrador del Sistema puede crear comedores.")
         cur.execute("""
@@ -178,7 +175,7 @@ def obtener_comedor(comedor_id: int, db=Depends(get_db)):
 
 @router.put("/{comedor_id}")
 def actualizar_comedor(comedor_id: int, data: ComedorUpdate, db=Depends(get_db)):
-    """Actualización parcial de comedor (admin sistema o admin del comedor)."""
+    """Actualización parcial de comedor (admin sistema o quien gestiona el comedor)."""
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         if not _existe_comedor(cur, comedor_id):
@@ -272,7 +269,7 @@ def cambiar_estado_usuario(comedor_id: int, usuario_id: int,
     """
     Activa/desactiva a un usuario DENTRO de un comedor (el estado es por comedor).
     Reglas COM-21:
-      - Solo admin del comedor o admin del sistema.
+      - Solo quien gestiona el comedor o el admin del sistema (COM-22: vía permisos).
       - Nadie puede desactivarse a sí mismo.
       - No se deja al comedor sin su último administrador activo (salvo admin sistema).
     """
@@ -294,7 +291,7 @@ def cambiar_estado_usuario(comedor_id: int, usuario_id: int,
 
         # Candado: el comedor no puede quedar sin administradores activos
         if not data.estado_activo and registro["rol"] == ROL_ADMIN_COMEDOR and registro["estado_activo"]:
-            if not _es_admin_sistema(cur, data.usuario_solicitante_id):
+            if not es_admin_sistema(cur, data.usuario_solicitante_id):
                 cur.execute("""
                     SELECT COUNT(*) AS n FROM usuario_comedor
                     WHERE comedor_id = %s AND rol = %s AND estado_activo = TRUE;
