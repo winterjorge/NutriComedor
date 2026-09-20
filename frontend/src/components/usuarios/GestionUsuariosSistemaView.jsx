@@ -1,18 +1,20 @@
 /**
  * components/usuarios/GestionUsuariosSistemaView.jsx
- * Objetivo: Panel del administrador de sistemas (COM-23): gestión de usuarios
- *           (creación, bloqueo/desbloqueo administrativo y desbloqueo por intentos),
- *           municipalidades (CRUD), grupos con privilegios y política de contraseñas
- *           editable (longitud, expiración e intentos).
- * Uso: Renderizado por App.jsx en la pestaña "Usuarios" cuando el perfil posee
- *      privilegios globales (GESTION_USUARIOS / admin de sistemas).
- * Nota: Los modales de creación/edición viven en archivos propios (ModalCrearUsuario,
- *       ModalMunicipalidad, ModalGrupoPrivilegios) para mantener este archivo legible.
+ * Objetivo: Panel del administrador de sistemas: usuarios y bloqueos, municipalidades,
+ *           grupos y privilegios, política de contraseñas y editor de permisos por
+ *           vistas. Las sub-pestañas visibles se filtran según los módulos permitidos
+ *           del usuario en sesión (matriz rol -> módulos):
+ *             - 'bloqueos'        -> Usuarios y Bloqueos + Política de Claves
+ *             - 'municipalidades' -> Municipalidades
+ *             - 'roles'           -> Grupos y Privilegios
+ *             - 'vistas'          -> Editor de permisos por vistas (VistaPermisosView)
+ * Uso: Renderizado por App.jsx en la pestaña "Usuarios" cuando el usuario posee al
+ *      menos uno de los módulos de administración; recibe `modulosPermitidos`.
  */
 import React, { useState, useEffect, useCallback } from 'react';
 import {
     Users, Building2, ShieldCheck, KeyRound, Plus, Lock, Unlock,
-    RefreshCw, Loader2, AlertCircle, Edit3
+    RefreshCw, Loader2, AlertCircle, Edit3, Eye
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
@@ -21,18 +23,31 @@ import { ModalExito } from '../common/ModalExito';
 import { ModalCrearUsuario } from './ModalCrearUsuario';
 import { ModalMunicipalidad } from './ModalMunicipalidad';
 import { ModalGrupoPrivilegios } from './ModalGrupoPrivilegios';
+import { VistaPermisosView } from './VistaPermisosView';
 
-// Sub-pestañas del panel de administración global
+// Sub-pestañas con su módulo requerido (matriz de permisos por rol)
 const SUBTABS = [
-    { id: 'usuarios', label: 'Usuarios', icon: Users },
-    { id: 'municipalidades', label: 'Municipalidades', icon: Building2 },
-    { id: 'grupos', label: 'Grupos y Privilegios', icon: ShieldCheck },
-    { id: 'politica', label: 'Política de Claves', icon: KeyRound },
+    { id: 'usuarios', label: 'Usuarios y Bloqueos', icon: Users, modulo: 'bloqueos' },
+    { id: 'municipalidades', label: 'Municipalidades', icon: Building2, modulo: 'municipalidades' },
+    { id: 'grupos', label: 'Grupos y Privilegios', icon: ShieldCheck, modulo: 'roles' },
+    { id: 'politica', label: 'Política de Claves', icon: KeyRound, modulo: 'bloqueos' },
+    { id: 'vistas', label: 'Vistas', icon: Eye, modulo: 'vistas' },
 ];
 
-export const GestionUsuariosSistemaView = () => {
+export const GestionUsuariosSistemaView = ({ modulosPermitidos = [] }) => {
     const { usuario } = useAuth();
-    const [subtab, setSubtab] = useState('usuarios');
+
+    // Sub-pestañas visibles según los módulos permitidos del usuario en sesión
+    const subtabsVisibles = SUBTABS.filter(s => modulosPermitidos.includes(s.modulo));
+    const [subtab, setSubtab] = useState(subtabsVisibles[0]?.id || '');
+
+    // Ajusta la sub-pestaña activa si cambian los permisos del usuario
+    useEffect(() => {
+        if (!subtabsVisibles.some(s => s.id === subtab)) {
+            setSubtab(subtabsVisibles[0]?.id || '');
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [modulosPermitidos]);
 
     // ===== Estado: Usuarios =====
     const [usuarios, setUsuarios] = useState([]);
@@ -191,7 +206,7 @@ export const GestionUsuariosSistemaView = () => {
 
     return (
         <div className="animate-in fade-in duration-300">
-            {/* Encabezado y sub-pestañas */}
+            {/* Encabezado y sub-pestañas (solo las permitidas por la matriz de módulos) */}
             <div className="flex flex-wrap justify-between items-center gap-3 mb-5">
                 <div>
                     <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
@@ -202,7 +217,7 @@ export const GestionUsuariosSistemaView = () => {
             </div>
 
             <div className="flex gap-2 mb-5 border-b border-slate-200 pb-2 overflow-x-auto">
-                {SUBTABS.map(t => {
+                {subtabsVisibles.map(t => {
                     const Icon = t.icon;
                     const activa = subtab === t.id;
                     return (
@@ -225,7 +240,7 @@ export const GestionUsuariosSistemaView = () => {
                 </div>
             )}
 
-            {/* ============ SUB-PESTAÑA: USUARIOS ============ */}
+            {/* ============ SUB-PESTAÑA: USUARIOS Y BLOQUEOS (bloqueos) ============ */}
             {subtab === 'usuarios' && (
                 <div>
                     <div className="flex flex-wrap gap-3 mb-4 items-center">
@@ -361,7 +376,7 @@ export const GestionUsuariosSistemaView = () => {
                 </div>
             )}
 
-            {/* ============ SUB-PESTAÑA: GRUPOS Y PRIVILEGIOS ============ */}
+            {/* ============ SUB-PESTAÑA: GRUPOS Y PRIVILEGIOS (roles) ============ */}
             {subtab === 'grupos' && (
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
                     {/* Formulario de creación de grupo */}
@@ -423,7 +438,7 @@ export const GestionUsuariosSistemaView = () => {
                                     </button>
                                 </div>
                                 <div className="flex flex-wrap gap-1.5">
-                                    {(privilegios.filter(p => (p.grupos || []).includes(g.nombre))).length === 0 ? (
+                                    {privilegios.filter(p => (p.grupos || []).includes(g.nombre)).length === 0 ? (
                                         <span className="text-xs text-slate-400">Sin privilegios asignados.</span>
                                     ) : privilegios.filter(p => (p.grupos || []).includes(g.nombre)).map(p => (
                                         <span key={p.id} className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded-full text-[10px] font-medium">
@@ -437,7 +452,7 @@ export const GestionUsuariosSistemaView = () => {
                 </div>
             )}
 
-            {/* ============ SUB-PESTAÑA: POLÍTICA DE CLAVES ============ */}
+            {/* ============ SUB-PESTAÑA: POLÍTICA DE CLAVES (bloqueos) ============ */}
             {subtab === 'politica' && politica && (
                 <form onSubmit={guardarPolitica} className="max-w-md bg-slate-50 border border-slate-200 rounded-xl p-5 space-y-4">
                     <h3 className="font-bold text-slate-700 flex items-center gap-2"><KeyRound size={16} /> Política de contraseñas</h3>
@@ -476,6 +491,9 @@ export const GestionUsuariosSistemaView = () => {
                     </button>
                 </form>
             )}
+
+            {/* ============ SUB-PESTAÑA: VISTAS (editor de permisos por rol) ============ */}
+            {subtab === 'vistas' && <VistaPermisosView />}
 
             {/* ===== Modales y confirmaciones ===== */}
             {modalCrearUsuario && (
