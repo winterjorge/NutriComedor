@@ -1,12 +1,10 @@
 """
 schemas/gestion_usuarios.py
-Objetivo: Modelos Pydantic del módulo de gestión de usuarios y entidades administrativas:
-          municipalidades, creación/bloqueo de usuarios, política de contraseñas editable,
-          roles temporales con vigencia y gestión de grupos con privilegios.
-Uso: Importar en routers/municipalidades.py, routers/usuarios.py y routers/grupos.py
-     para validar payloads de entrada y estructurar respuestas.
-Nota: Los nombres de objetos describen funcionalidad (precepto de nomenclatura);
-      el ticket COM-23 solo se referencia como trazabilidad en este docstring.
+Objetivo: Modelos Pydantic del módulo de gestión de usuarios: creación y edición de
+          usuarios según perfil del creador (corrección COM-26), bloqueo/desbloqueo,
+          política de contraseñas, roles temporales y gestión de grupos/privilegios.
+Uso: Importar en routers/usuarios.py y routers/grupos.py.
+Referencia: tickets COM-23/COM-26 (solo trazabilidad; los nombres obedecen a la funcionalidad).
 """
 from pydantic import BaseModel
 from typing import Optional, List
@@ -22,7 +20,7 @@ class MunicipalidadBase(BaseModel):
     distrito: str
     nombre: str
     direccion: Optional[str] = None
-    link_ubicacion: Optional[str] = None   # URL de mapa (Google Maps / GeoURI)
+    link_ubicacion: Optional[str] = None
 
 
 class MunicipalidadCreate(MunicipalidadBase):
@@ -42,13 +40,17 @@ class MunicipalidadUpdate(BaseModel):
 
 
 # ==========================================
-# USUARIOS (creación y bloqueo)
+# USUARIOS: FLUJO CRUD POR PERFIL (COM-26)
 # ==========================================
 class UsuarioCreate(BaseModel):
     """
-    Alta de usuario del sistema (privilegio GESTION_USUARIOS).
-    La clave_inicial debe cumplir la política vigente y se marca como provisoria
-    para forzar su cambio en el primer login.
+    COM-26: creación de usuario según el perfil del creador.
+      - perfil_objetivo: ADMINISTRADOR_SISTEMA | ADMINISTRATIVO | DIRECTIVO | OPERATIVO.
+      - grupo_id/rol_id: deben corresponder al grupo del perfil objetivo.
+      - municipalidad_ids: obligatorio cuando el perfil objetivo es ADMINISTRATIVO
+        (solo municipalidades del alcance del solicitante).
+      - comedor_ids: obligatorio cuando el perfil objetivo es DIRECTIVO u OPERATIVO
+        (solo comedores del alcance del solicitante; cargos no repetibles se validan).
     """
     tipo_documento: str = "DNI"
     documento_identidad: str
@@ -57,6 +59,30 @@ class UsuarioCreate(BaseModel):
     apellido_materno: Optional[str] = None
     fecha_nacimiento: Optional[str] = None
     clave_inicial: str
+    perfil_objetivo: str
+    grupo_id: int
+    rol_id: int
+    municipalidad_ids: List[int] = []
+    comedor_ids: List[int] = []
+    usuario_solicitante_id: int
+
+
+class UsuarioUpdate(BaseModel):
+    """
+    COM-26: edición de usuario (datos personales + reemplazo de las membresías del
+    grupo del perfil objetivo). Las membresías de otros grupos no se alteran.
+    """
+    tipo_documento: Optional[str] = None
+    documento_identidad: Optional[str] = None
+    nombres: Optional[str] = None
+    apellido_paterno: Optional[str] = None
+    apellido_materno: Optional[str] = None
+    fecha_nacimiento: Optional[str] = None
+    perfil_objetivo: str
+    grupo_id: int
+    rol_id: int
+    municipalidad_ids: List[int] = []
+    comedor_ids: List[int] = []
     usuario_solicitante_id: int
 
 
@@ -75,10 +101,7 @@ class DesbloqueoReintentosInput(BaseModel):
 # POLÍTICA DE CONTRASEÑAS (editable)
 # ==========================================
 class PoliticaClaveUpdate(BaseModel):
-    """
-    Modificación de la política de contraseñas (privilegio GESTION_POLITICAS_CLAVE).
-    Campos opcionales: solo se actualizan los enviados.
-    """
+    """Modificación de la política de contraseñas (privilegio GESTION_POLITICAS_CLAVE)."""
     longitud_min: Optional[int] = None
     longitud_max: Optional[int] = None
     meses_expiracion: Optional[int] = None
@@ -90,10 +113,7 @@ class PoliticaClaveUpdate(BaseModel):
 # ROLES TEMPORALES (vigencia definida)
 # ==========================================
 class RolTemporalInput(BaseModel):
-    """
-    Otorga un rol de comedor por tiempo definido (ej. el tesorero asume al presidente).
-    fecha_inicio/fecha_fin en formato ISO (YYYY-MM-DD o timestamp).
-    """
+    """Otorga un rol de comedor por tiempo definido a un usuario con membresía activa."""
     usuario_id: int
     comedor_id: int
     rol_id: int
@@ -120,9 +140,6 @@ class GrupoCreate(BaseModel):
 
 
 class AsignarPrivilegiosInput(BaseModel):
-    """
-    Reemplaza el conjunto de privilegios de un grupo (privilegio GESTION_GRUPOS).
-    Recibe la lista completa de ids de privilegios que el grupo debe poseer.
-    """
+    """Reemplaza el conjunto de privilegios de un grupo por la lista enviada."""
     privilegio_ids: List[int]
     usuario_solicitante_id: int

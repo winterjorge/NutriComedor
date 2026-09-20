@@ -1,18 +1,17 @@
 /**
- * components/usuarios/ModalCrearUsuario.jsx
- * Objetivo: Modal de creación de usuarios con formulario DINÁMICO según el perfil del
- *           creador (corrección COM-26). Al montar consulta el contexto de creación
- *           (perfil del solicitante, perfiles que puede crear y su alcance) y muestra:
- *             - Administrador de Sistemas objetivo: sin datos adicionales.
- *             - Administrativo objetivo: autocompletado de municipalidades (alcance del creador).
- *             - Directivo/Operativo objetivo: autocompletado de comedores (alcance del creador).
- *           El rol se elige del grupo correspondiente al perfil objetivo. El backend
- *           valida la matriz de creación, el alcance y la unicidad de cargos permanentes.
- * Uso: Abierto por las vistas de gestión de usuarios; `onExito` al guardar.
+ * components/usuarios/ModalEditarUsuario.jsx
+ * Objetivo: Modal de edición de usuarios (corrección COM-26): precarga los datos
+ *           personales, el perfil actual, el grupo/rol y el alcance vigente
+ *           (municipalidades o comedores) mediante el endpoint detalle-flujo, y
+ *           permite modificar datos, perfil/rol y alcance con las mismas reglas
+ *           dinámicas de la creación (sin campo de contraseña).
+ * Uso: Abierto por las vistas de gestión de usuarios pasando el `usuarioId` a editar;
+ *      `onExito` al guardar. El backend valida la matriz de creación, el alcance y
+ *      la unicidad de cargos permanentes (excluyendo al propio usuario editado).
  * Nota: Los nombres describen funcionalidad (no referencian tickets).
  */
 import React, { useState, useEffect } from 'react';
-import { X, UserPlus, Loader2, AlertCircle, ShieldCheck } from 'lucide-react';
+import { X, UserCog, Loader2, AlertCircle, ShieldCheck } from 'lucide-react';
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { AutocompleteBusqueda } from '../common/AutocompleteBusqueda';
@@ -25,15 +24,16 @@ const ETIQUETAS_PERFIL = {
     OPERATIVO: 'Operativo (Comedor)',
 };
 
-export const ModalCrearUsuario = ({ onClose, onExito }) => {
+export const ModalEditarUsuario = ({ usuarioId, onClose, onExito }) => {
     const { usuario } = useAuth();
 
-    // Contexto de creación del solicitante (perfil, perfiles permitidos, alcance)
+    // Contexto de creación del solicitante y detalle del usuario a editar
     const [contexto, setContexto] = useState(null);
-    const [cargandoContexto, setCargandoContexto] = useState(true);
-    const [errorContexto, setErrorContexto] = useState('');
+    const [detalle, setDetalle] = useState(null);
+    const [cargando, setCargando] = useState(true);
+    const [errorCarga, setErrorCarga] = useState('');
 
-    // Datos personales del nuevo usuario
+    // Datos personales (precargados)
     const [form, setForm] = useState({
         tipo_documento: 'DNI',
         documento_identidad: '',
@@ -41,10 +41,9 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
         apellido_paterno: '',
         apellido_materno: '',
         fecha_nacimiento: '',
-        clave_inicial: '',
     });
 
-    // Perfil objetivo, grupo/rol y alcance seleccionado
+    // Perfil objetivo, grupo/rol y alcance seleccionado (precargados)
     const [perfilObjetivo, setPerfilObjetivo] = useState('');
     const [rolId, setRolId] = useState('');
     const [municipalidadesSel, setMunicipalidadesSel] = useState([]);
@@ -53,24 +52,40 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
     const [error, setError] = useState('');
     const [guardando, setGuardando] = useState(false);
 
-    // Carga el contexto de creación al montar
+    // Precarga en paralelo: contexto del solicitante + detalle del usuario objetivo
     useEffect(() => {
         const cargar = async () => {
-            setCargandoContexto(true);
-            setErrorContexto('');
+            setCargando(true);
+            setErrorCarga('');
             try {
-                const ctx = await api.getContextoCreacion(usuario.id);
+                const [ctx, det] = await Promise.all([
+                    api.getContextoCreacion(usuario.id),
+                    api.getDetalleFlujoUsuario(usuarioId, usuario.id),
+                ]);
                 setContexto(ctx);
+                setDetalle(det);
+                setForm({
+                    tipo_documento: det.usuario.tipo_documento || 'DNI',
+                    documento_identidad: det.usuario.documento_identidad || '',
+                    nombres: det.usuario.nombres || '',
+                    apellido_paterno: det.usuario.apellido_paterno || '',
+                    apellido_materno: det.usuario.apellido_materno || '',
+                    fecha_nacimiento: det.usuario.fecha_nacimiento ? String(det.usuario.fecha_nacimiento).slice(0, 10) : '',
+                });
+                setPerfilObjetivo(det.perfil_objetivo);
+                setRolId(det.rol_id ? String(det.rol_id) : '');
+                setMunicipalidadesSel(det.municipalidades || []);
+                setComedoresSel(det.comedores || []);
             } catch (e) {
-                setErrorContexto(e.message);
+                setErrorCarga(e.message);
             } finally {
-                setCargandoContexto(false);
+                setCargando(false);
             }
         };
         cargar();
-    }, [usuario.id]);
+    }, [usuarioId, usuario.id]);
 
-    // Grupo del catálogo que corresponde al perfil objetivo elegido
+    // Grupo del catálogo correspondiente al perfil objetivo elegido
     const grupoPerfil = contexto?.grupos?.find(g => g.perfil === perfilObjetivo) || null;
 
     // Al cambiar el perfil objetivo se resetean el rol y el alcance seleccionado
@@ -85,16 +100,14 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
     const idsMunicipalidadesPermitidas = (contexto?.municipalidades || []).map(m => m.id);
     const idsComedoresPermitidos = (contexto?.comedores || []).map(c => c.id);
 
-    const esSistema = perfilObjetivo === 'ADMINISTRADOR_SISTEMA';
     const esAdministrativo = perfilObjetivo === 'ADMINISTRATIVO';
     const esComedor = perfilObjetivo === 'DIRECTIVO' || perfilObjetivo === 'OPERATIVO';
 
     const validar = () => {
         if (!form.documento_identidad.trim()) return 'El documento es obligatorio.';
         if (!form.nombres.trim()) return 'Los nombres son obligatorios.';
-        if (!form.clave_inicial) return 'La contraseña inicial es obligatoria.';
-        if (!perfilObjetivo) return 'Seleccione el perfil del nuevo usuario.';
-        if (!grupoPerfil || !rolId) return 'Seleccione el rol del nuevo usuario.';
+        if (!perfilObjetivo) return 'Seleccione el perfil del usuario.';
+        if (!grupoPerfil || !rolId) return 'Seleccione el rol del usuario.';
         if (esAdministrativo && municipalidadesSel.length === 0) {
             return 'Debe seleccionar al menos una municipalidad para el perfil Administrativo.';
         }
@@ -114,14 +127,13 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
         }
         setGuardando(true);
         try {
-            await api.crearUsuario({
+            await api.editarUsuario(usuarioId, {
                 tipo_documento: form.tipo_documento,
                 documento_identidad: form.documento_identidad.trim(),
                 nombres: form.nombres.trim(),
                 apellido_paterno: form.apellido_paterno.trim() || null,
                 apellido_materno: form.apellido_materno.trim() || null,
                 fecha_nacimiento: form.fecha_nacimiento || null,
-                clave_inicial: form.clave_inicial,
                 perfil_objetivo: perfilObjetivo,
                 grupo_id: grupoPerfil.grupo_id,
                 rol_id: Number(rolId),
@@ -143,7 +155,7 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
                 {/* Encabezado */}
                 <div className="flex justify-between items-center px-6 py-4 bg-emerald-700 text-white shrink-0">
                     <h3 className="font-bold text-lg flex items-center gap-2">
-                        <UserPlus size={20} /> Nuevo Usuario
+                        <UserCog size={20} /> Editar Usuario
                     </h3>
                     <button onClick={onClose} className="text-emerald-100 hover:text-white transition-colors" aria-label="Cerrar">
                         <X size={22} />
@@ -151,9 +163,9 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
                 </div>
 
                 <form onSubmit={handleSubmit} className="p-6 space-y-4 overflow-y-auto">
-                    {errorContexto && (
+                    {errorCarga && (
                         <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-center gap-2 text-sm">
-                            <AlertCircle size={16} /> {errorContexto}
+                            <AlertCircle size={16} /> {errorCarga}
                         </div>
                     )}
                     {error && (
@@ -162,10 +174,10 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
                         </div>
                     )}
 
-                    {cargandoContexto ? (
+                    {cargando ? (
                         <div className="p-8 text-center text-emerald-600">
                             <Loader2 className="animate-spin mx-auto" size={28} />
-                            <p className="text-sm mt-2 text-slate-500">Cargando contexto de creación...</p>
+                            <p className="text-sm mt-2 text-slate-500">Cargando datos del usuario...</p>
                         </div>
                     ) : (
                         <>
@@ -184,8 +196,7 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
                                     <label className="block text-xs font-semibold text-slate-600 mb-1">Documento *</label>
                                     <input type="text" value={form.documento_identidad}
                                         onChange={(e) => setForm({ ...form, documento_identidad: e.target.value.replace(/[^0-9A-Za-z]/g, '').slice(0, 15) })}
-                                        className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500"
-                                        placeholder="Ej: 70000001" />
+                                        className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
                                 </div>
                             </div>
 
@@ -211,24 +222,16 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
                                 </div>
                             </div>
 
-                            <div className="grid grid-cols-2 gap-3">
-                                <div>
-                                    <label className="block text-xs font-semibold text-slate-600 mb-1">Fecha de nacimiento</label>
-                                    <input type="date" value={form.fecha_nacimiento}
-                                        onChange={(e) => setForm({ ...form, fecha_nacimiento: e.target.value })}
-                                        className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
-                                </div>
-                                <div>
-                                    <label className="block text-xs font-semibold text-slate-600 mb-1">Contraseña inicial *</label>
-                                    <input type="password" value={form.clave_inicial}
-                                        onChange={(e) => setForm({ ...form, clave_inicial: e.target.value })}
-                                        className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
-                                </div>
+                            <div>
+                                <label className="block text-xs font-semibold text-slate-600 mb-1">Fecha de nacimiento</label>
+                                <input type="date" value={form.fecha_nacimiento}
+                                    onChange={(e) => setForm({ ...form, fecha_nacimiento: e.target.value })}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
                             </div>
 
                             {/* Perfil objetivo */}
                             <div>
-                                <label className="block text-xs font-semibold text-slate-600 mb-1">Perfil del nuevo usuario *</label>
+                                <label className="block text-xs font-semibold text-slate-600 mb-1">Perfil del usuario *</label>
                                 <select value={perfilObjetivo}
                                     onChange={(e) => cambiarPerfil(e.target.value)}
                                     className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm outline-none focus:ring-2 focus:ring-emerald-500">
@@ -238,7 +241,8 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
                                     ))}
                                 </select>
                                 <p className="mt-1 text-[11px] text-slate-400">
-                                    Solo se muestran los perfiles que su rol le permite crear.
+                                    Al cambiar el perfil se reemplazan las membresías del grupo elegido;
+                                    las de otros grupos no se alteran.
                                 </p>
                             </div>
 
@@ -304,9 +308,9 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
                             className="px-5 py-2 border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-100 transition-colors text-sm">
                             Cancelar
                         </button>
-                        <button type="submit" disabled={guardando || cargandoContexto}
+                        <button type="submit" disabled={guardando || cargando}
                             className="px-5 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors text-sm font-medium disabled:opacity-50 flex items-center gap-2">
-                            {guardando && <Loader2 className="animate-spin" size={15} />} Crear usuario
+                            {guardando && <Loader2 className="animate-spin" size={15} />} Guardar cambios
                         </button>
                     </div>
                 </form>

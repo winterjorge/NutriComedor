@@ -1,21 +1,28 @@
 /**
  * components/usuarios/GestionUsuariosComedorView.jsx
- * Objetivo: Panel del administrador de comedor (COM-23): gestionar a los usuarios de su
- *           comedor: activar/desactivar membresías, modificar grupos/roles, otorgar y
- *           revocar roles temporales con vigencia, y desbloquear cuentas bloqueadas por
- *           intentos fallidos de contraseña.
- * Uso: Renderizado por App.jsx en la pestaña "Usuarios" cuando el perfil tiene ámbito de
- *      comedor (Directivo con rol de gestión o Administrativo con cobertura). Usa el
- *      comedor de la sesión (COM-20); los Administrativos ven un selector de comedores.
+ * Objetivo: Panel del administrador de comedor: gestionar a los usuarios de su
+ *           comedor. Incluye la creación y edición de usuarios con el formulario
+ *           dinámico por perfil (corrección COM-26), activación/desactivación de
+ *           membresías, modificación de grupos, otorgamiento de roles temporales
+ *           con vigencia y desbloqueo de cuentas por intentos fallidos.
+ * Uso: Renderizado por App.jsx en la pestaña "Usuarios" cuando el perfil tiene ámbito
+ *      de comedor (Directivo con rol de gestión o Administrativo con cobertura).
+ *      Usa el comedor de la sesión; los Administrativos ven un selector de comedores.
  */
 import React, { useState, useEffect, useCallback } from 'react';
-import { RefreshCw, Loader2, AlertCircle, UserCheck, UserX, ShieldCheck, History } from 'lucide-react';
+import {
+    RefreshCw, Loader2, AlertCircle, UserCheck, UserX, ShieldCheck,
+    History, Plus, Edit3
+} from 'lucide-react';
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { ModalConfirmacion } from '../common/ModalConfirmacion';
 import { ModalExito } from '../common/ModalExito';
 import { ModalRolTemporal } from './ModalRolTemporal';
 import { ModalGruposUsuarioComedor } from './ModalGruposUsuarioComedor';
+// Modales dinámicos de creación y edición (flujo por perfil)
+import { ModalCrearUsuario } from './ModalCrearUsuario';
+import { ModalEditarUsuario } from './ModalEditarUsuario';
 
 export const GestionUsuariosComedorView = () => {
     const { usuario, seleccion } = useAuth();
@@ -36,15 +43,17 @@ export const GestionUsuariosComedorView = () => {
     const [modalRolTemp, setModalRolTemp] = useState(null);  // usuario objetivo
     const [modalGrupos, setModalGrupos] = useState(null);    // usuario objetivo
 
-    // Opciones de comedor según perfil (COM-20 / COM-23)
+    // Estados para creación y edición dinámica
+    const [modalCrear, setModalCrear] = useState(false);
+    const [editarId, setEditarId] = useState(null);
+
+    // Opciones de comedor según perfil
     useEffect(() => {
         const cargarOpciones = async () => {
             if (seleccion?.perfil === 'COMEDOR') {
-                // Perfil de comedor: solo su comedor activo
                 setOpcionesComedor([{ id: seleccion.comedor_id, nombre: seleccion.comedor_nombre }]);
                 setComedorSel(seleccion.comedor_id);
             } else {
-                // Administrativo municipal: selector con los comedores que cubre
                 const todos = await api.getComedores();
                 setOpcionesComedor(todos);
                 if (todos.length && !seleccion?.comedor_id) setComedorSel(todos[0].id);
@@ -89,7 +98,7 @@ export const GestionUsuariosComedorView = () => {
         }
     };
 
-    // Desbloqueo por intentos fallidos (regla COM-23 para admin de comedor)
+    // Desbloqueo por intentos fallidos
     const confirmarDesbloqueo = async () => {
         const objetivo = confDesbloqueo;
         setConfDesbloqueo(null);
@@ -104,27 +113,35 @@ export const GestionUsuariosComedorView = () => {
 
     return (
         <div className="animate-in fade-in duration-300">
-            {/* Encabezado y selector de comedor */}
+            {/* Encabezado, selector de comedor y botón de creación */}
             <div className="flex flex-wrap justify-between items-center gap-3 mb-5">
                 <div>
                     <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
                         <UserCheck className="text-emerald-600" size={22} /> Usuarios de mi Comedor
                     </h2>
                     <p className="text-sm text-slate-500">
-                        Active/desactive usuarios, modifique grupos, otorgue roles temporales y desbloquee por intentos.
+                        Cree, edite, active/desactive usuarios, modifique grupos, otorgue roles temporales y desbloquee por intentos.
                     </p>
                 </div>
-                {opcionesComedor.length > 1 && (
-                    <select
-                        value={comedorSel}
-                        onChange={(e) => setComedorSel(Number(e.target.value))}
-                        className="px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm outline-none focus:ring-2 focus:ring-emerald-500"
+                <div className="flex gap-2 items-center">
+                    {opcionesComedor.length > 1 && (
+                        <select
+                            value={comedorSel}
+                            onChange={(e) => setComedorSel(Number(e.target.value))}
+                            className="px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm outline-none focus:ring-2 focus:ring-emerald-500"
+                        >
+                            {opcionesComedor.map(c => (
+                                <option key={c.id} value={c.id}>{c.nombre}</option>
+                            ))}
+                        </select>
+                    )}
+                    <button
+                        onClick={() => setModalCrear(true)}
+                        className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
                     >
-                        {opcionesComedor.map(c => (
-                            <option key={c.id} value={c.id}>{c.nombre} — {c.distrito}</option>
-                        ))}
-                    </select>
-                )}
+                        <Plus size={16} /> Nuevo Usuario
+                    </button>
+                </div>
             </div>
 
             {error && (
@@ -168,11 +185,19 @@ export const GestionUsuariosComedorView = () => {
                                 </td>
                                 <td className="p-3">
                                     <div className="flex justify-end gap-2">
+                                        {/* Edición dinámica (datos, perfil y alcance) */}
+                                        <button
+                                            onClick={() => setEditarId(u.id)}
+                                            title="Editar usuario"
+                                            className="p-1.5 bg-slate-100 text-slate-700 hover:bg-slate-200 rounded-lg transition-colors"
+                                        >
+                                            <Edit3 size={15} />
+                                        </button>
                                         {/* Modificar grupos/roles del usuario */}
                                         <button
                                             onClick={() => setModalGrupos(u)}
                                             title="Modificar grupos y roles"
-                                            className="p-1.5 bg-slate-100 text-slate-700 hover:bg-slate-200 rounded-lg transition-colors"
+                                            className="p-1.5 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded-lg transition-colors"
                                         >
                                             <ShieldCheck size={15} />
                                         </button>
@@ -180,7 +205,7 @@ export const GestionUsuariosComedorView = () => {
                                         <button
                                             onClick={() => setModalRolTemp(u)}
                                             title="Otorgar/revocar rol temporal"
-                                            className="p-1.5 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded-lg transition-colors"
+                                            className="p-1.5 bg-purple-50 text-purple-700 hover:bg-purple-100 rounded-lg transition-colors"
                                         >
                                             <History size={15} />
                                         </button>
@@ -210,13 +235,36 @@ export const GestionUsuariosComedorView = () => {
                 </table>
             </div>
 
-            {/* ===== Modales y confirmaciones ===== */}
+            {/* ===== Modales de Creación y Edición Dinámica ===== */}
+            {modalCrear && (
+                <ModalCrearUsuario
+                    onClose={() => setModalCrear(false)}
+                    onExito={() => {
+                        setModalCrear(false);
+                        setExito('Usuario creado y asociado al comedor exitosamente.');
+                        cargarUsuarios();
+                    }}
+                />
+            )}
+            {editarId && (
+                <ModalEditarUsuario
+                    usuarioId={editarId}
+                    onClose={() => setEditarId(null)}
+                    onExito={() => {
+                        setEditarId(null);
+                        setExito('Usuario actualizado exitosamente.');
+                        cargarUsuarios();
+                    }}
+                />
+            )}
+
+            {/* ===== Modales de Gestión Avanzada y Confirmaciones ===== */}
             {modalRolTemp && (
                 <ModalRolTemporal
                     usuarioObjetivo={modalRolTemp}
                     comedorId={comedorSel}
                     onClose={() => setModalRolTemp(null)}
-                    onExito={() => { setModalRolTemp(null); setExito('Rol temporal otorgado exitosamente'); cargarUsuarios(); }}
+                    onExito={() => { setModalRolTemp(null); setExito('Rol temporal gestionado exitosamente'); cargarUsuarios(); }}
                 />
             )}
             {modalGrupos && (
