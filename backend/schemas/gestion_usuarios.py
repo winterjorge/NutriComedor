@@ -1,10 +1,10 @@
 """
 schemas/gestion_usuarios.py
-Objetivo: Modelos Pydantic del módulo de gestión de usuarios: creación y edición de
-          usuarios según perfil del creador (corrección COM-26), bloqueo/desbloqueo,
-          política de contraseñas, roles temporales y gestión de grupos/privilegios.
-Uso: Importar en routers/usuarios.py y routers/grupos.py.
-Referencia: tickets COM-23/COM-26 (solo trazabilidad; los nombres obedecen a la funcionalidad).
+Objetivo: Modelos Pydantic del módulo de gestión de usuarios, municipalidades, grupos,
+          roles temporales y política de contraseñas.
+Uso: Importar en routers/usuarios.py, routers/municipalidades.py y routers/grupos.py.
+Referencia: tickets COM-23 (municipalidades y usuarios), COM-26 (flujo CRUD por perfil),
+            COM-27 (FK de ubicación geográfica en municipalidades).
 """
 from pydantic import BaseModel
 from typing import Optional, List
@@ -14,13 +14,23 @@ from typing import Optional, List
 # MUNICIPALIDADES
 # ==========================================
 class MunicipalidadBase(BaseModel):
-    """Atributos obligatorios/descriptivos de una municipalidad."""
-    departamento: str
-    provincia: str
-    distrito: str
+    """
+    Atributos de una municipalidad. COM-27: la fuente de verdad de la ubicación son los
+    FK (departamento_id, provincia_id, distrito_id); los campos de texto se conservan
+    por compatibilidad y se derivan automáticamente de los FK en el backend.
+    """
+    # Campos de texto legacy (COM-23). COM-27: ahora opcionales, el backend los deriva
+    # de los FK para mantener consistencia con los datos sembrados por el CSV.
+    departamento: Optional[str] = None
+    provincia: Optional[str] = None
+    distrito: Optional[str] = None
     nombre: str
     direccion: Optional[str] = None
     link_ubicacion: Optional[str] = None
+    # COM-27: FK de ubicación geográfica (fuente de verdad)
+    departamento_id: Optional[int] = None
+    provincia_id: Optional[int] = None
+    distrito_id: Optional[int] = None
 
 
 class MunicipalidadCreate(MunicipalidadBase):
@@ -36,21 +46,21 @@ class MunicipalidadUpdate(BaseModel):
     nombre: Optional[str] = None
     direccion: Optional[str] = None
     link_ubicacion: Optional[str] = None
+    # COM-27: FK de ubicación geográfica
+    departamento_id: Optional[int] = None
+    provincia_id: Optional[int] = None
+    distrito_id: Optional[int] = None
     usuario_solicitante_id: int
 
 
 # ==========================================
-# USUARIOS: FLUJO CRUD POR PERFIL (COM-26)
+# USUARIOS (flujo CRUD por perfil - COM-26 / COM-27)
 # ==========================================
 class UsuarioCreate(BaseModel):
     """
-    COM-26: creación de usuario según el perfil del creador.
-      - perfil_objetivo: ADMINISTRADOR_SISTEMA | ADMINISTRATIVO | DIRECTIVO | OPERATIVO.
-      - grupo_id/rol_id: deben corresponder al grupo del perfil objetivo.
-      - municipalidad_ids: obligatorio cuando el perfil objetivo es ADMINISTRATIVO
-        (solo municipalidades del alcance del solicitante).
-      - comedor_ids: obligatorio cuando el perfil objetivo es DIRECTIVO u OPERATIVO
-        (solo comedores del alcance del solicitante; cargos no repetibles se validan).
+    COM-26: creación de usuario según el perfil del creador. COM-27: agrega la
+    ubicación geográfica del usuario (departamento, provincia, distrito, municipalidad)
+    para el personal que no es administrador de sistema.
     """
     tipo_documento: str = "DNI"
     documento_identidad: str
@@ -65,25 +75,32 @@ class UsuarioCreate(BaseModel):
     municipalidad_ids: List[int] = []
     comedor_ids: List[int] = []
     usuario_solicitante_id: int
+    # COM-27: ubicación geográfica del usuario (solo personal no-admin-de-sistema)
+    departamento_id: Optional[int] = None
+    provincia_id: Optional[int] = None
+    distrito_id: Optional[int] = None
+    municipalidad_id: Optional[int] = None
 
 
 class UsuarioUpdate(BaseModel):
-    """
-    COM-26: edición de usuario (datos personales + reemplazo de las membresías del
-    grupo del perfil objetivo). Las membresías de otros grupos no se alteran.
-    """
+    """COM-26/COM-27: edición de usuario (datos personales, perfil, alcance y ubicación)."""
     tipo_documento: Optional[str] = None
     documento_identidad: Optional[str] = None
     nombres: Optional[str] = None
     apellido_paterno: Optional[str] = None
     apellido_materno: Optional[str] = None
     fecha_nacimiento: Optional[str] = None
-    perfil_objetivo: str
-    grupo_id: int
-    rol_id: int
+    perfil_objetivo: Optional[str] = None
+    grupo_id: Optional[int] = None
+    rol_id: Optional[int] = None
     municipalidad_ids: List[int] = []
     comedor_ids: List[int] = []
     usuario_solicitante_id: int
+    # COM-27: ubicación geográfica del usuario
+    departamento_id: Optional[int] = None
+    provincia_id: Optional[int] = None
+    distrito_id: Optional[int] = None
+    municipalidad_id: Optional[int] = None
 
 
 class CambiarEstadoCuentaInput(BaseModel):
@@ -97,9 +114,6 @@ class DesbloqueoReintentosInput(BaseModel):
     usuario_solicitante_id: int
 
 
-# ==========================================
-# POLÍTICA DE CONTRASEÑAS (editable)
-# ==========================================
 class PoliticaClaveUpdate(BaseModel):
     """Modificación de la política de contraseñas (privilegio GESTION_POLITICAS_CLAVE)."""
     longitud_min: Optional[int] = None
@@ -109,9 +123,6 @@ class PoliticaClaveUpdate(BaseModel):
     usuario_solicitante_id: int
 
 
-# ==========================================
-# ROLES TEMPORALES (vigencia definida)
-# ==========================================
 class RolTemporalInput(BaseModel):
     """Otorga un rol de comedor por tiempo definido a un usuario con membresía activa."""
     usuario_id: int
@@ -128,9 +139,6 @@ class RevocarRolTemporalInput(BaseModel):
     usuario_solicitante_id: int
 
 
-# ==========================================
-# GRUPOS Y PRIVILEGIOS
-# ==========================================
 class GrupoCreate(BaseModel):
     """Creación de grupo con ámbito (privilegio GESTION_GRUPOS)."""
     nombre: str

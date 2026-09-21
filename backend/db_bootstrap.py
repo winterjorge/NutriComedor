@@ -8,23 +8,19 @@ Uso: Importar en main.py y ejecutar `asegurar_esquema()` durante el startup (lif
 Nota: Todas las sentencias son idempotentes (IF NOT EXISTS / ON CONFLICT DO NOTHING),
       por lo que pueden ejecutarse en cada arranque sin efectos secundarios.
 
-Historial de correcciones:
- - FIX (error 500 en /parametros y /planificar): creación de parametros_sistema (+seed),
-   planificacion_dia y columnas de planificación en presupuesto_semanal.
- - FIX COM-17: columna recetas_almuerzo.raciones con valor por defecto 4.
- - COM-19 (Login): columnas de seguridad en usuarios, migración de hashes legacy a
-   PBKDF2 y usuario admin de respaldo (DNI 0000000).
- - COM-21 (Multi-comedor): tablas comedores y usuario_comedor, migración de roles
-   legacy a 'Administrador Sistema', comedor default y asociación inicial.
- - COM-22 (Grupos de usuario): tablas grupos_usuario, roles_grupo y usuario_grupo;
-   seed del catálogo cerrado (Sistema / Administrativo / Directivo / Operativo con sus
-   roles) y migración idempotente de membresías legacy de COM-21 al modelo de grupos.
- - COM-23 (Gestión de usuarios): esquema del módulo delegado a
-   `esquema_gestion_usuarios` (municipalidades, privilegios, roles temporales y
-   parámetros editables de política de contraseñas).
- - COM-25 (Permisos por vistas): esquema delegado a `esquema_permisos_vistas`
-   (catálogo de módulos del sistema y matriz rol -> módulos permitidos con la
-   semilla de la matriz base del negocio).
+Historial de integraciones:
+ - COM-17: tabla parametros_sistema + seed de parámetros operativos.
+ - COM-19: columnas de seguridad en usuarios, migración de hashes legacy a PBKDF2
+           y usuario administrador de respaldo (DNI 0000000).
+ - COM-21: tablas comedores y usuario_comedor, migración de roles legacy,
+           comedor default y asociación inicial de usuarios.
+ - COM-22: tablas grupos_usuario, roles_grupo y usuario_grupo; seed del catálogo
+           cerrado y migración de membresías legacy.
+ - COM-23: esquema de gestión de usuarios (municipalidades, usuario_municipalidad).
+ - COM-25: esquema de permisos por vistas (modulos_sistema, roles_modulos).
+ - COM-26: esquema del flujo CRUD de usuarios por perfil (esquema_flujo_usuario).
+ - COM-27: esquema de ubicación geográfica (departamentos, provincias, distritos,
+           ubigeos) + importación del CSV oficial de municipalidades.
 """
 import time
 import psycopg2
@@ -35,23 +31,25 @@ from seguridad import (
     DNI_ADMIN_RESPALDO,
     CLAVE_INICIAL_ADMIN,
 )
-# COM-23: esquema del módulo de gestión de usuarios (nombres por funcionalidad)
+# COM-23: esquema del módulo de gestión de usuarios (municipalidades)
 from esquema_gestion_usuarios import aplicar_esquema_gestion_usuarios
-# COM-25: esquema de permisos por vistas (módulos del sistema por rol)
+# COM-25: esquema de permisos por vistas (módulos del sistema)
 from esquema_permisos_vistas import aplicar_esquema_permisos_vistas
-# COM-26: esquema del flujo de creación/edición de usuarios por perfil
+# COM-26: esquema del flujo CRUD de usuarios por perfil
 from esquema_flujo_usuario import aplicar_esquema_flujo_usuario
+# COM-27: esquema de ubicación geográfica + importación del CSV oficial
+from esquema_ubicaciones import aplicar_esquema_ubicaciones
+from ubicaciones_seed import importar_ubicaciones
 
 # ==========================================
 # CONSTANTES DE ROLES (COM-21)
-# Espejo de routers/comedores.py: rol global de sistema vs roles por comedor.
 # ==========================================
 ROL_SISTEMA = "Administrador Sistema"
 ROL_ADMIN_COMEDOR = "Administrador"
 NOMBRE_COMEDOR_DEFAULT = "Comedor Popular Cruz de Motupe - Grupo 2"
 
 # =========================================================================
-# DDL: Tabla de parámetros dinámicos (espejo de database/parametros.sql)
+# DDL: Tabla de parámetros dinámicos (COM-17)
 # =========================================================================
 DDL_PARAMETROS_SISTEMA = """
 CREATE TABLE IF NOT EXISTS parametros_sistema (
@@ -80,44 +78,6 @@ INSERT INTO parametros_sistema (clave, valor, descripcion, categoria, tipo_dato)
 ('IA_FINDE_AFILIADO', '20', 'Predicción base afiliado para fines de semana', 'IA', 'INTEGER'),
 ('IA_FINDE_NORMAL', '30', 'Predicción base normal para fines de semana', 'IA', 'INTEGER')
 ON CONFLICT (clave) DO NOTHING;
-"""
-
-DDL_PRESUPUESTO_COLUMNAS = """
-ALTER TABLE presupuesto_semanal
-ADD COLUMN IF NOT EXISTS fecha_referencia DATE,
-ADD COLUMN IF NOT EXISTS costo_total_semana NUMERIC(10, 2),
-ADD COLUMN IF NOT EXISTS recoleccion_total_proyectada NUMERIC(10, 2),
-ADD COLUMN IF NOT EXISTS margen NUMERIC(10, 2),
-ADD COLUMN IF NOT EXISTS viable BOOLEAN DEFAULT TRUE;
-"""
-
-DDL_PLANIFICACION_DIA = """
-CREATE TABLE IF NOT EXISTS planificacion_dia (
-    id SERIAL PRIMARY KEY,
-    presupuesto_semanal_id INT REFERENCES presupuesto_semanal(id) ON DELETE CASCADE,
-    dia INT NOT NULL,
-    dia_nombre VARCHAR(50) NOT NULL,
-    comensales_social INT DEFAULT 0,
-    comensales_afiliado INT DEFAULT 0,
-    comensales_normal INT DEFAULT 0,
-    total_comensales INT NOT NULL,
-    receta_id INT REFERENCES recetas_almuerzo(id),
-    nombre_receta VARCHAR(150) NOT NULL,
-    costo_racion NUMERIC(8, 2) NOT NULL,
-    costo_total NUMERIC(10, 2) NOT NULL,
-    recoleccion_proyectada NUMERIC(10, 2) NOT NULL,
-    fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP - INTERVAL '5 hours'
-);
-CREATE INDEX IF NOT EXISTS idx_planificacion_dia_presupuesto
-ON planificacion_dia(presupuesto_semanal_id);
-"""
-
-# =========================================================================
-# DDL: FIX COM-17 - Columna 'raciones' en recetas_almuerzo.
-# =========================================================================
-DDL_RECETAS_RACIONES = """
-ALTER TABLE recetas_almuerzo
-ADD COLUMN IF NOT EXISTS raciones INT NOT NULL DEFAULT 4;
 """
 
 # =========================================================================
@@ -232,7 +192,7 @@ CREATE INDEX IF NOT EXISTS idx_usuario_grupo_grupo ON usuario_grupo(grupo_id);
 """
 
 # =========================================================================
-# SEED: COM-22 - Catálogo cerrado de grupos (base del modelo de roles).
+# SEED: COM-22 - Catálogo cerrado de grupos.
 # =========================================================================
 SEED_GRUPOS = """
 INSERT INTO grupos_usuario (nombre, ambito, descripcion) VALUES
@@ -244,8 +204,7 @@ ON CONFLICT (nombre) DO NOTHING;
 """
 
 # =========================================================================
-# SEED: COM-22 - Roles por grupo (Auditor/Reportería; Presidente/Secretario/
-# Tesorero; Cocinero; y el rol único del grupo de sistemas).
+# SEED: COM-22 - Roles por grupo.
 # =========================================================================
 SEED_ROLES_GRUPO = """
 INSERT INTO roles_grupo (grupo_id, nombre, descripcion)
@@ -413,45 +372,41 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
         try:
             conn = psycopg2.connect(DB_URL)
             cur = conn.cursor()
-            # 1. Tabla de parámetros + seed idempotente
+            # 1. COM-17: tabla de parámetros + seed idempotente
             cur.execute(DDL_PARAMETROS_SISTEMA)
             cur.execute(SEED_PARAMETROS)
-            # 2. Columnas de planificación en presupuesto_semanal
-            cur.execute(DDL_PRESUPUESTO_COLUMNAS)
-            # 3. Tabla de días planificados + índice
-            cur.execute(DDL_PLANIFICACION_DIA)
-            # 4. FIX COM-17: columna raciones en recetas_almuerzo
-            cur.execute(DDL_RECETAS_RACIONES)
-            # 5. COM-19: columnas de seguridad en usuarios
+            # 2. COM-19: columnas de seguridad en usuarios
             cur.execute(DDL_USUARIOS_SEGURIDAD)
-            # 6. COM-19: migración de hashes legacy a PBKDF2 (clave provisoria)
             migrados = _migrar_claves_legacy(cur)
-            # 7. COM-19: usuario administrador de respaldo (DNI 0000000)
             admin_creado = _asegurar_usuario_admin(cur)
-            # 8. COM-21: tablas de comedores y asociación usuario-comedor
+            # 3. COM-21: tablas de comedores y asociación usuario-comedor
             cur.execute(DDL_COMEDORES)
             cur.execute(DDL_USUARIO_COMEDOR)
-            # 9. COM-21: comedor default (piloto) y migración de roles globales
             cur.execute(SEED_COMEDOR_DEFAULT, (NOMBRE_COMEDOR_DEFAULT,))
             roles_migrados = _migrar_roles_legacy(cur)
-            # 10. COM-21: asociación inicial de usuarios sin comedor
             asociados = _asociar_usuarios_existentes(cur)
-            # 11. COM-22: tablas de grupos, roles y membresías
+            # 4. COM-22: tablas de grupos, roles y membresías
             cur.execute(DDL_GRUPOS_USUARIO)
             cur.execute(DDL_ROLES_GRUPO)
             cur.execute(DDL_USUARIO_GRUPO)
-            # 12. COM-22: seed del catálogo cerrado de grupos y roles
             cur.execute(SEED_GRUPOS)
             cur.execute(SEED_ROLES_GRUPO)
-            # 13. COM-22: migración de membresías legacy COM-21 al modelo de grupos
             membresias_migradas = _migrar_membresias_legacy(cur)
-            # 14. COM-23: esquema del módulo de gestión de usuarios (municipalidades,
-            #     privilegios, roles temporales y política de claves editable)
+            # 5. COM-23: esquema de gestión de usuarios (municipalidades)
             aplicar_esquema_gestion_usuarios(cur)
-            # 15. COM-25: catálogo de módulos del sistema y matriz rol -> módulos
+            # 6. COM-25: esquema de permisos por vistas (módulos del sistema)
             aplicar_esquema_permisos_vistas(cur)
-            # 16. COM-26: asociación usuario -> municipalidad (flujo CRUD por perfil)
+            # COM-26: esquema del flujo CRUD de usuarios por perfil.
+            # (Si tu versión local ya tenía esta línea del intento anterior, mantenla;
+            #  NO fue parte del COM-27 rechazado.)
             aplicar_esquema_flujo_usuario(cur)
+            # 7. COM-27: esquema de ubicación geográfica (departamentos, provincias,
+            #    distritos, ubigeos). Debe ejecutarse DESPUÉS de que existan
+            #    municipalidades, comedores y usuarios.
+            aplicar_esquema_ubicaciones(cur)
+            # 8. COM-27: importación idempotente del CSV oficial de municipalidades.
+            #    Solo carga datos si las tablas geográficas están vacías.
+            importadas = importar_ubicaciones(cur)
             conn.commit()
             cur.close()
             if migrados:
@@ -464,7 +419,9 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
                 print(f"[BOOTSTRAP] COM-21: {asociados} usuario(s) asociados al comedor default como administradores.")
             if membresias_migradas:
                 print(f"[BOOTSTRAP] COM-22: {membresias_migradas} membresía(s) migradas al modelo de grupos.")
-            print("[BOOTSTRAP] Esquema dinámico verificado/creado correctamente (incluye permisos por vistas COM-25).")
+            if importadas:
+                print(f"[BOOTSTRAP] COM-27: {importadas} municipalidades importadas del CSV oficial.")
+            print("[BOOTSTRAP] Esquema dinámico verificado/creado correctamente (incluye ubicación geográfica COM-27).")
             return True
         except Exception as e:
             print(f"[BOOTSTRAP] Intento {intento}/{reintentos} fallido: {e}")
