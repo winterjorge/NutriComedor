@@ -407,6 +407,30 @@ export const api = {
     },
 
     // ==========================================
+    // UBICACIÓN GEOGRÁFICA (COM-27)
+    // ==========================================
+    getDepartamentos: async () => {
+        const response = await fetch(`${API_BASE}/ubicaciones/departamentos`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener departamentos'));
+        return response.json();
+    },
+    getProvincias: async (departamentoId) => {
+        const response = await fetch(`${API_BASE}/ubicaciones/provincias?departamento_id=${departamentoId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener provincias'));
+        return response.json();
+    },
+    getDistritos: async (provinciaId) => {
+        const response = await fetch(`${API_BASE}/ubicaciones/distritos?provincia_id=${provinciaId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener distritos'));
+        return response.json();
+    },
+    getMunicipalidadesPorDistrito: async (distritoId) => {
+        const response = await fetch(`${API_BASE}/ubicaciones/municipalidades?distrito_id=${distritoId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener municipalidades'));
+        return response.json();
+    },
+        
+    // ==========================================
     // RECETAS
     // ==========================================
     getRecetas: async (params = {}) => {
