@@ -3,31 +3,24 @@
  * Objetivo: Componente raíz de la aplicación. Orquesta la navegación por pestañas,
  *           el proveedor de parámetros dinámicos, la capa de autenticación (COM-19),
  *           la selección de comedor post-login (COM-20), el módulo multi-comedor
- *           (COM-21), grupos de usuario (COM-22), gestión de usuarios (COM-23) y la
- *           diferenciación de vistas por grupo/rol (COM-25): cada pestaña se muestra
- *           solo si el usuario posee el módulo correspondiente en la matriz de permisos.
+ *           (COM-21), grupos de usuario (COM-22), gestión de usuarios (COM-23), la
+ *           diferenciación de vistas por grupo/rol (COM-25) y la pestaña de clusters
+ *           K-means del recetario (COM-5), visible para quien posee el módulo Recetario.
  * Uso: Montado en main.jsx mediante <React.StrictMode>. Envuelve toda la app con
  *      AuthProvider y ParametrosProvider.
  *
  * Historial de cambios:
- *  - Versión base: navegación por pestañas con ParametrosProvider.
- *  - COM-19: flujo de login (AuthContext), modal de cambio de clave obligatorio y
- *    botón de cerrar sesión en el header.
- *  - COM-20: gate de selección de comedor (spinner `validando`, SeleccionComedorView)
- *    y contexto activo en el header.
- *  - COM-21: pestaña "Comedores" con ComedoresView.
- *  - COM-22: pestaña "Grupos" con GruposView.
- *  - COM-23: pestaña "Usuarios" con panel global o de comedor según perfil.
- *  - COM-25: pestañas filtradas por `misModulos` (matriz rol -> módulos); nueva
- *    pestaña "Reportes" (módulo reportes); sub-pestañas del panel de administración
- *    filtradas por módulos (municipalidades / roles / bloqueos / vistas).
+ *  - COM-19/20/21/22/23/25: flujo de login, selección de comedor, pestañas y permisos.
+ *  - COM-27: pestañas filtradas por módulos y formularios con cascada de ubicación.
+ *  - COM-5: nueva pestaña "Clusters K-Means" ligada al módulo 'recetario'.
  */
 import React, { useState, useEffect } from 'react';
 import {
     ChefHat, Calculator, ShoppingCart, Activity, Users, ClipboardList,
-    LogOut, Store, UserCog, Loader2, MapPin, Contact, BarChart3
+    LogOut, Store, UserCog, Loader2, MapPin, Contact, BarChart3, PieChart
 } from 'lucide-react';
 import { RecipesView } from './components/recipes/RecipesView';
+import { ClusterRecetasView } from './components/recipes/ClusterRecetasView';
 import { BudgetView } from './components/budget/BudgetView';
 import { PlanificacionesView } from './components/budget/PlanificacionesView';
 import { CatalogView } from './components/catalog/CatalogView';
@@ -35,11 +28,9 @@ import { POSView } from './components/pos/POSView';
 import { ComedoresView } from './components/comedores/ComedoresView';
 import { GruposView } from './components/grupos/GruposView';
 import { ReportesView } from './components/reportes/ReportesView';
-// COM-23: paneles de gestión de usuarios (global y por comedor)
 import { GestionUsuariosSistemaView } from './components/usuarios/GestionUsuariosSistemaView';
 import { GestionUsuariosComedorView } from './components/usuarios/GestionUsuariosComedorView';
 import { ParametrosProvider } from './context/ParametrosContext';
-// COM-19/COM-20: autenticación, cambio de clave y selección de comedor
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { LoginView } from './components/auth/LoginView';
 import { ModalCambioClave } from './components/auth/ModalCambioClave';
@@ -49,9 +40,10 @@ import { api } from './services/api';
 // COM-25: módulos de administración que abren el panel global de usuarios
 const MODULOS_ADMIN = ['municipalidades', 'roles', 'bloqueos', 'vistas'];
 
-// COM-25: catálogo de pestañas con su módulo requerido (matriz rol -> módulos)
+// COM-25 + COM-5: catálogo de pestañas con su módulo requerido
 const TABS_BASE = [
     { id: 'recipes', label: 'Recetario', icon: ChefHat, color: 'emerald', modulo: 'recetario' },
+    { id: 'clusters', label: 'Clusters K-Means', icon: PieChart, color: 'emerald', modulo: 'recetario' }, // COM-5
     { id: 'budget', label: 'Presupuesto', icon: Calculator, color: 'emerald', modulo: 'presupuesto' },
     { id: 'planificaciones', label: 'Planificaciones', icon: ClipboardList, color: 'blue', modulo: 'planificaciones' },
     { id: 'comedores', label: 'Comedores', icon: Store, color: 'emerald', modulo: 'comedores' },
@@ -60,6 +52,9 @@ const TABS_BASE = [
     { id: 'catalog', label: 'Catálogo', icon: ShoppingCart, color: 'emerald', modulo: 'catalogo' },
     { id: 'pos', label: 'Ventas y Demanda', icon: Users, color: 'blue', modulo: 'ventas' },
 ];
+
+// COM-25: pestaña de gestión de usuarios (panel global o de comedor)
+const TAB_USUARIOS = { id: 'usuarios', label: 'Usuarios', icon: Contact, color: 'blue', modulo: null };
 
 /**
  * COM-20: describe el contexto de trabajo activo para exhibirlo en el header.
@@ -77,15 +72,12 @@ function AppContent() {
     const [activeTab, setActiveTab] = useState('pos');
     const { usuario, pendienteCambio, completarCambioClave, cerrarSesion, seleccion, validando } = useAuth();
 
-    // COM-25: módulos efectivos del usuario en sesión (membresías activas + roles temporales)
+    // COM-25: módulos efectivos del usuario en sesión
     const [misModulos, setMisModulos] = useState([]);
     const [cargandoModulos, setCargandoModulos] = useState(true);
-
-    // COM-23: perfil de gestión de comedor (fallback para el panel por comedor cuando
-    // el usuario no posee módulos de administración global en la matriz COM-25).
+    // COM-23: perfil de gestión de comedor (panel de usuarios por comedor)
     const [perfilGestion, setPerfilGestion] = useState(null);
 
-    // Carga los módulos permitidos del usuario en sesión (COM-25)
     useEffect(() => {
         if (!usuario) {
             setMisModulos([]);
@@ -107,8 +99,6 @@ function AppContent() {
         return () => { vivo = false; };
     }, [usuario]);
 
-    // COM-23: determina si el usuario puede gestionar usuarios de comedor
-    // (Directivo con rol de gestión o Administrativo con cobertura).
     useEffect(() => {
         if (!usuario) {
             setPerfilGestion(null);
@@ -137,7 +127,7 @@ function AppContent() {
         return <LoginView />;
     }
 
-    // COM-20: mientras se verifica la selección recordada, mostrar spinner
+    // COM-20: verificando comedor recordado
     if (validando) {
         return (
             <div className="min-h-screen bg-gradient-to-br from-emerald-700 to-emerald-900 flex flex-col items-center justify-center gap-3">
@@ -147,7 +137,7 @@ function AppContent() {
         );
     }
 
-    // COM-20: con sesión pero sin selección => pantalla de selección de comedor
+    // COM-20: con sesión pero sin selección => pantalla de selección
     if (!seleccion) {
         return (
             <>
@@ -159,22 +149,22 @@ function AppContent() {
         );
     }
 
-    // COM-25: pestañas visibles según los módulos permitidos del usuario
+    // COM-25: pestañas visibles según módulos permitidos
     const tieneModulosAdmin = MODULOS_ADMIN.some(m => misModulos.includes(m));
     const puedeVerUsuarios = tieneModulosAdmin || perfilGestion === 'COMEDOR_ADMIN';
 
     const tabs = TABS_BASE.filter(t => misModulos.includes(t.modulo));
     if (puedeVerUsuarios) {
-        tabs.splice(3, 0, { id: 'usuarios', label: 'Usuarios', icon: Contact, color: 'blue', modulo: null });
+        const idx = tabs.findIndex(t => t.id === 'comedores');
+        tabs.splice(idx === -1 ? tabs.length : idx, 0, TAB_USUARIOS);
     }
 
-    // Mantener activa una pestaña visible (ajuste cuando cambian los permisos)
+    // Mantiene activa una pestaña visible
     if (tabs.length > 0 && !tabs.some(t => t.id === activeTab)) {
-        // Se difiere al render para no mutar estado durante el render
         setTimeout(() => setActiveTab(tabs[0].id), 0);
     }
 
-    // Sin módulos asignados: mensaje informativo (sin pestañas)
+    // Sin módulos asignados
     if (!cargandoModulos && tabs.length === 0) {
         return (
             <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
@@ -199,7 +189,7 @@ function AppContent() {
     return (
         <>
             <div className="min-h-screen bg-slate-50 text-slate-800 font-sans pb-10">
-                {/* Header con identidad del sistema, contexto activo y cierre de sesión */}
+                {/* Header */}
                 <header className="bg-emerald-700 text-white p-4 shadow-md">
                     <div className="max-w-6xl mx-auto flex items-center gap-3">
                         <Activity size={28} />
@@ -210,7 +200,6 @@ function AppContent() {
                                 {usuario.rol === 'Administrador Sistema' && ' · Admin Sistema'}
                             </p>
                         </div>
-                        {/* COM-20: comedor o alcance de trabajo activo (recordado hasta logout) */}
                         <span
                             className="text-xs bg-emerald-800 px-3 py-1 rounded-full border border-emerald-600 shadow-inner items-center gap-1 hidden md:flex max-w-[260px]"
                             title={descripcionContexto(seleccion)}
@@ -221,7 +210,6 @@ function AppContent() {
                         <span className="text-sm bg-emerald-800 px-3 py-1 rounded-full border border-emerald-600 shadow-inner hidden lg:inline-block">
                             Módulo Predictivo Activo
                         </span>
-                        {/* COM-19: logout manual (olvida sesión y comedor recordado) */}
                         <button
                             onClick={cerrarSesion}
                             className="flex items-center gap-2 bg-emerald-800 hover:bg-emerald-900 px-3 py-2 rounded-lg text-sm font-medium transition-colors border border-emerald-600"
@@ -235,14 +223,13 @@ function AppContent() {
 
                 <main className="max-w-6xl mx-auto mt-8 p-4">
                     {cargandoModulos ? (
-                        // COM-25: mientras se calculan los módulos permitidos
                         <div className="p-16 text-center text-emerald-600">
                             <Loader2 className="animate-spin mx-auto" size={32} />
                             <p className="text-sm mt-2 text-slate-500">Cargando sus módulos permitidos...</p>
                         </div>
                     ) : (
                         <>
-                            {/* Barra de pestañas (solo módulos permitidos) */}
+                            {/* Barra de pestañas */}
                             <div className="flex gap-2 mb-6 border-b border-slate-200 pb-2 overflow-x-auto">
                                 {tabs.map(tab => {
                                     const Icon = tab.icon;
@@ -263,9 +250,10 @@ function AppContent() {
                                 })}
                             </div>
 
-                            {/* Contenedor de vistas por pestaña */}
+                            {/* Contenedor de vistas */}
                             <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 min-h-[500px]">
                                 {activeTab === 'recipes' && <RecipesView />}
+                                {activeTab === 'clusters' && <ClusterRecetasView />} {/* COM-5 */}
                                 {activeTab === 'budget' && <BudgetView />}
                                 {activeTab === 'planificaciones' && <PlanificacionesView />}
                                 {activeTab === 'comedores' && <ComedoresView />}
@@ -273,7 +261,6 @@ function AppContent() {
                                 {activeTab === 'reportes' && <ReportesView />}
                                 {activeTab === 'catalog' && <CatalogView />}
                                 {activeTab === 'pos' && <POSView />}
-                                {/* COM-23/COM-25: panel de gestión según módulos y perfil */}
                                 {activeTab === 'usuarios' && tieneModulosAdmin && (
                                     <GestionUsuariosSistemaView modulosPermitidos={misModulos} />
                                 )}
@@ -286,21 +273,14 @@ function AppContent() {
                 </main>
             </div>
 
-            {/* COM-19: modal bloqueante de cambio obligatorio de clave */}
+            {/* COM-19: cambio obligatorio de clave */}
             {pendienteCambio && (
-                <ModalCambioClave
-                    usuario={usuario}
-                    onExito={completarCambioClave}
-                    onSalir={cerrarSesion}
-                />
+                <ModalCambioClave usuario={usuario} onExito={completarCambioClave} onSalir={cerrarSesion} />
             )}
         </>
     );
 }
 
-/**
- * Componente raíz exportado: envuelve AppContent con los providers globales.
- */
 export default function App() {
     return (
         <AuthProvider>

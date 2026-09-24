@@ -40,6 +40,9 @@ from esquema_flujo_usuario import aplicar_esquema_flujo_usuario
 # COM-27: esquema de ubicación geográfica + importación del CSV oficial
 from esquema_ubicaciones import aplicar_esquema_ubicaciones
 from ubicaciones_seed import importar_ubicaciones
+# COM-5: esquema del módulo K-means y seed nutricional de ingredientes
+from esquema_kmeans import aplicar_esquema_kmeans
+from nutricion_seed import seedar_nutricion
 
 # ==========================================
 # CONSTANTES DE ROLES (COM-21)
@@ -404,6 +407,12 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
             #    distritos, ubigeos). Debe ejecutarse DESPUÉS de que existan
             #    municipalidades, comedores y usuarios.
             aplicar_esquema_ubicaciones(cur)
+            # COM-5: esquema K-means (nutrición por ingrediente, modelos y asignación)
+            aplicar_esquema_kmeans(cur)
+            nutricion_seed = seedar_nutricion(cur)
+            if nutricion_seed:
+                print(f"[BOOTSTRAP] COM-5: {nutricion_seed} ingredientes nutricionales sembrados.")
+
             # 8. COM-27: importación idempotente del CSV oficial de municipalidades.
             #    Solo carga datos si las tablas geográficas están vacías.
             importadas = importar_ubicaciones(cur)

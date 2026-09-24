@@ -19,13 +19,15 @@ from routers import (
     auth,
     comedores,        # COM-21: gestión multi-comedor y asociación de usuarios
     grupos,           # COM-22/COM-23: grupos, privilegios y roles temporales
-    usuarios,         # COM-23: gestión de usuarios, bloqueos y política de claves
+    usuarios,         # COM-23/COM-26: gestión de usuarios y flujo CRUD por perfil
     municipalidades,  # COM-23: registro nacional de municipalidades
     vistas,           # COM-25: permisos por vistas (módulos por grupo/rol)
-    ubicaciones,      # COM-27: catálogo de ubicaciones (departamentos/provincias/distritos)
+    ubicaciones,      # COM-27: catálogo geográfico en cascada
+    kmeans,           # COM-5: clustering nutricional del recetario (K-means k=4)
 )
 # Asegurado de esquema dinámico (parámetros, planificación, raciones, seguridad,
-# comedores, grupos, gestión de usuarios y permisos por vistas) al arrancar
+# comedores, grupos, gestión de usuarios, permisos por vistas, ubicaciones y
+# esquema K-means con seed nutricional) al arrancar
 from db_bootstrap import asegurar_esquema
 
 
@@ -36,7 +38,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="API - NutriComedor", version="2.8.0", lifespan=lifespan)
+app = FastAPI(title="API - NutriComedor", version="2.9.0", lifespan=lifespan)
 
 # Configuración de CORS (Mantiene compatibilidad con tu Frontend)
 app.add_middleware(
@@ -52,10 +54,11 @@ app.include_router(health.router, prefix="/api/v1")
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(comedores.router, prefix="/api/v1")        # COM-21
 app.include_router(grupos.router, prefix="/api/v1")           # COM-22/COM-23
-app.include_router(usuarios.router, prefix="/api/v1")         # COM-23
+app.include_router(usuarios.router, prefix="/api/v1")         # COM-23/COM-26
 app.include_router(municipalidades.router, prefix="/api/v1")  # COM-23
 app.include_router(vistas.router, prefix="/api/v1")           # COM-25
 app.include_router(ubicaciones.router, prefix="/api/v1")      # COM-27
+app.include_router(kmeans.router, prefix="/api/v1")           # COM-5
 app.include_router(parametros.router, prefix="/api/v1")
 app.include_router(presupuesto.router, prefix="/api/v1")
 app.include_router(recetas.router, prefix="/api/v1")
