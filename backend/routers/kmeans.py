@@ -1,14 +1,12 @@
 """
 routers/kmeans.py
 Objetivo: Endpoints del módulo de clustering nutricional del recetario (COM-5):
-          entrenamiento del modelo K-means (k=4) sobre las 4 variables por ración
-          (energía, hierro, proteína y precio), consulta del modelo activo con sus
-          clusters agregados, listado de recetas por cluster y transparencia de
-          recetas aptas/excluidas por las reglas de negocio R1-R3.
+          entrenamiento del modelo K-means (k=4), resumen del modelo activo,
+          recetas por cluster, auditoría de reglas R1-R3 y diagnóstico del esquema
+          detectado por el motor.
 Uso: Registrado en main.py con prefijo /api/v1.
-Permisos: El entrenamiento (POST /entrenar) queda restringido al Administrador de
-          Sistemas y al perfil Directivo (Presidente/Tesorero), que son quienes
-          gestionan el recetario según la matriz de módulos (COM-25).
+Permisos: El entrenamiento queda restringido al Administrador de Sistemas y al perfil
+          Directivo (Presidente/Tesorero), que gestionan el recetario.
 Referencia: ticket COM-5 (solo trazabilidad; los nombres obedecen a la funcionalidad).
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -24,6 +22,7 @@ from ml.kmeans_recetas import (
     obtener_modelo_activo,
     obtener_recetas_por_cluster,
     listar_candidatas,
+    diagnosticar_esquema,
 )
 
 router = APIRouter(prefix="/kmeans", tags=["K-Means Recetas"])
@@ -33,14 +32,28 @@ router = APIRouter(prefix="/kmeans", tags=["K-Means Recetas"])
 # HELPERS INTERNOS
 # ==========================================
 def _puede_entrenar(cur, usuario_id: int) -> bool:
-    """
-    COM-5: El re-entrenamiento del modelo es una acción de gestión del recetario:
-    se permite al Administrador de Sistemas y al perfil Directivo.
-    """
+    """El re-entrenamiento es una acción de gestión del recetario."""
     if not usuario_id:
         return False
     perfil = obtener_perfil_usuario(cur, usuario_id)
     return perfil in (PERFIL_ADMIN_SISTEMA, PERFIL_DIRECTIVO)
+
+
+# ==========================================
+# DIAGNÓSTICO DEL ESQUEMA (auditoría del motor)
+# ==========================================
+@router.get("/diagnostico")
+def diagnostico(db=Depends(get_db)):
+    """
+    Reporte de las tablas y columnas que el motor detectó en la base (puente
+    receta-ingrediente, catálogo, recetas, precios, unidades y nutrición).
+    Útil para verificar la configuración sin entrenar el modelo.
+    """
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        return diagnosticar_esquema(cur)
+    finally:
+        cur.close()
 
 
 # ==========================================
@@ -52,8 +65,6 @@ def entrenar_modelo(usuario_solicitante_id: int, db=Depends(get_db)):
     Entrena el modelo K-means (k=4) con las recetas aptas tras aplicar las reglas
     R1 (proteína permitida), R2 (veto a res/cerdo) y R3 (sin precio alto), etiqueta
     los centroides semánticamente y persiste el nuevo modelo como activo.
-    Retorna el resumen: métricas (inercia, silhouette), clusters con centroide y
-    ejemplos, y el detalle de recetas excluidas con su motivo.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -84,7 +95,8 @@ def entrenar_modelo(usuario_solicitante_id: int, db=Depends(get_db)):
 def resumen_modelo(db=Depends(get_db)):
     """
     Metadatos del modelo activo (k, métricas, centroides, parámetros) junto con el
-    agregado por cluster: número de recetas y promedios de las 4 variables.
+    agregado por cluster. Responde 404 mientras no exista modelo entrenado (estado
+    esperado antes del primer entrenamiento).
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -138,10 +150,7 @@ def recetas_por_cluster(
                                 description="Código de cluster (1-4). Si se omite, devuelve todos."),
     db=Depends(get_db),
 ):
-    """
-    Recetas asignadas al modelo activo con su snapshot de features por ración
-    (energía, proteína, hierro, fibra, precio y nivel de precio).
-    """
+    """Recetas asignadas al modelo activo con su snapshot de features por ración."""
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         modelo = obtener_modelo_activo(cur)
@@ -161,9 +170,7 @@ def recetas_por_cluster(
 def recetas_candidatas(db=Depends(get_db)):
     """
     Recalcula el dataset con los parámetros vigentes sin persistir nada: recetas
-    aptas (con sus 4 variables por ración) y recetas excluidas con su motivo
-    (contiene_res_o_cerdo, sin_proteina_permitida, sin_datos_nutricion, sin_precio,
-    precio_alto, sin_ingredientes). Útil para auditar las reglas R1-R3.
+    aptas (con sus 4 variables por ración) y excluidas con su motivo (R1-R3).
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
