@@ -431,6 +431,38 @@ export const api = {
     },
         
     // ==========================================
+    // CLUSTERING K-MEANS DEL RECETARIO (COM-5)
+    // ==========================================
+    // Entrena el modelo k=4 sobre recetas aptas (reglas R1-R3) y lo deja activo
+    entrenarKmeans: async (usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/kmeans/entrenar?usuario_solicitante_id=${usuarioSolicitanteId}`, {
+            method: 'POST',
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al entrenar el modelo'));
+        return response.json();
+    },
+    // Resumen del modelo activo; retorna null si aún no existe modelo (404)
+    getResumenKmeans: async () => {
+        const response = await fetch(`${API_BASE}/kmeans/resumen`);
+        if (response.status === 404) return null;
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el resumen del modelo'));
+        return response.json();
+    },
+    // Recetas asignadas al modelo activo (opcionalmente por cluster 1-4)
+    getClustersKmeans: async (clusterCodigo) => {
+        const qs = clusterCodigo ? `?cluster_codigo=${clusterCodigo}` : '';
+        const response = await fetch(`${API_BASE}/kmeans/clusters${qs}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener recetas del cluster'));
+        return response.json();
+    },
+    // Auditoría de reglas R1-R3: recetas aptas y excluidas con su motivo
+    getCandidatasKmeans: async () => {
+        const response = await fetch(`${API_BASE}/kmeans/candidatas`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener recetas candidatas'));
+        return response.json();
+    },
+
+    // ==========================================
     // RECETAS
     // ==========================================
     getRecetas: async (params = {}) => {
