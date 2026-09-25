@@ -2,31 +2,37 @@
  * components/budget/PlanificacionesView.jsx
  * Objetivo: Vista de Planificaciones semanales (menús definitivos del comedor). Lista
  *           las planificaciones vigentes/reemplazadas y, al expandirlas, muestra:
- *           (1) tarjetas de resumen con Costo total semanal, Recolección semanal,
- *               MARGEN (ventas - compras) y Kcal promedio/día al mismo nivel visual;
- *           (2) el bloque de comensales en 3 columnas grandes separadas
- *               (Social / Afiliado / Normal) más el total;
- *           (3) el detalle POR DÍA con la RECOLECCIÓN PROYECTADA de cada jornada;
- *           (4) la lista de compras consolidada de la semana.
+ *           (1) tarjetas de resumen con Costo semanal, Recolección semanal, MARGEN
+ *               (ventas - compras), Kcal/día, Hierro/día y Proteína/día;
+ *           (2) el detalle POR DÍA con comensales Social/Afiliado/Normal en columnas
+ *               separadas (anticipación diaria solicitada en COM-8 v4), recolección
+ *               proyectada y nutrición por ración;
+ *           (3) la lista de compras consolidada y la acción de eliminar planificación
+ *               (funcionalidad original de Sprint 2, conservada activa).
  * Historial:
- *  - Sprint 2: versión inicial (listado y detalle de planificaciones).
+ *  - Sprint 2: versión original (api.getPlanificaciones / getPlanificacionDetalle /
+ *    eliminarPlanificacion / getListaCompras).
  *  - COM-8 v2: reconstruida sobre /propuestas/historial y /propuestas/historial/{id}/dias
- *              (tablas presupuesto_semanal + planificacion_dia del Sprint 2, ahora
- *              vinculadas al comedor y a la candidata elegida). Se agregan recolección
- *              por día, comensales en 3 columnas grandes y margen como tarjeta.
- *              Las kcal/día se obtienen del resumen de la candidata COM-8 (sesión);
- *              en planificaciones legacy sin candidata se muestra "—".
+ *              (maestro presupuesto_semanal + detalle planificacion_dia vinculados al
+ *              comedor y a la candidata COM-8).
+ *  - COM-8 v4: comensales por día en columnas separadas; tarjetas de hierro y proteína;
+ *              nutrición por ración en el detalle diario.
+ *  - COM-8 v5 (este archivo): trazabilidad recuperada. Todo lo reemplazado se conserva
+ *              COMENTADO (carga original, detalle original y bloque de comensales
+ *              semanal); eliminar planificación se mantiene ACTIVO.
  * Permisos: módulo 'planificaciones' (Directivo y Operativo del comedor, COM-25/COM-8).
  * Uso: Montada por App.jsx en la pestaña "Planificaciones".
- * Referencia: tickets COM-8 / HU-09 (solo trazabilidad; los nombres obedecen a la funcionalidad).
+ * Referencia: tickets COM-8 / HU-06 / HU-07 (solo trazabilidad).
  */
 import React, { useState, useEffect, useCallback } from 'react';
 import {
     ClipboardList, Loader2, AlertCircle, ChevronDown, ChevronUp,
-    Wallet, Coins, TrendingUp, Flame, Users, ShoppingCart, History
+    Wallet, Coins, TrendingUp, Flame, Users, ShoppingCart, History,
+    Droplet, Trash2
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
+import { ModalConfirmacion } from '../common/ModalConfirmacion';
 
 export const PlanificacionesView = () => {
     const { usuario, seleccion } = useAuth();
@@ -36,7 +42,7 @@ export const PlanificacionesView = () => {
     const [cargando, setCargando] = useState(true);
     const [error, setError] = useState('');
 
-    // Caché por planificación expandida: { id: { dias, resumen, menu } }
+    // Caché por planificación expandida: { id: { dias } }
     const [expandidos, setExpandidos] = useState({});
     const [cache, setCache] = useState({});
     const [cargandoDetalle, setCargandoDetalle] = useState({});
@@ -46,13 +52,19 @@ export const PlanificacionesView = () => {
     const [cargandoCompras, setCargandoCompras] = useState({});
     const [mostrarCompras, setMostrarCompras] = useState({});
 
+    // COM-8 v5: confirmación de eliminación (funcionalidad original de Sprint 2, conservada)
+    const [confEliminar, setConfEliminar] = useState(null);
+
     // ---------- Carga del listado ----------
     const cargar = useCallback(async () => {
         if (!comedorId) return;
         setCargando(true);
         setError('');
         try {
+            // COM-8 v2: lectura filtrada por comedor y con variante/estado/selector.
             setPlanificaciones(await api.getHistorialPropuestas(comedorId, usuario.id));
+            // COM-8 v5 (trazabilidad): carga original de Sprint 2, comentada:
+            // setPlanificaciones(await api.getPlanificaciones());
         } catch (e) {
             setError(e.message);
         } finally {
@@ -62,7 +74,7 @@ export const PlanificacionesView = () => {
 
     useEffect(() => { cargar(); }, [cargar]);
 
-    // ---------- Expansión: días + resumen de la candidata ----------
+    // ---------- Expansión: detalle por día ----------
     const toggleExpandir = async (plan) => {
         if (expandidos[plan.id]) {
             setExpandidos({ ...expandidos, [plan.id]: false });
@@ -72,22 +84,11 @@ export const PlanificacionesView = () => {
         if (cache[plan.id]) return; // ya cargado previamente
         setCargandoDetalle({ ...cargandoDetalle, [plan.id]: true });
         try {
+            // COM-8 v2/v4: detalle con comensales por día, recolección y nutrición por ración.
             const dias = await api.getHistorialDias(plan.id, usuario.id);
-            let resumen = null;
-            let menu = null;
-            if (plan.sesion_id) {
-                try {
-                    const sesion = await api.getSesionPropuestas(plan.sesion_id, usuario.id);
-                    const prop = (sesion.propuestas || []).find(p => p.variante === plan.variante);
-                    if (prop) {
-                        resumen = prop.resumen;
-                        menu = prop.menu;
-                    }
-                } catch (e) {
-                    /* sesión purgada o legacy: las kcal se muestran como "—" */
-                }
-            }
-            setCache(prev => ({ ...prev, [plan.id]: { dias, resumen, menu } }));
+            // COM-8 v5 (trazabilidad): detalle original de Sprint 2, comentado:
+            // const dias = await api.getPlanificacionDetalle(plan.id);
+            setCache(prev => ({ ...prev, [plan.id]: { dias } }));
         } catch (e) {
             setError(e.message);
         } finally {
@@ -95,7 +96,7 @@ export const PlanificacionesView = () => {
         }
     };
 
-    // ---------- Lista de compras ----------
+    // ---------- Lista de compras (Sprint 2, conservada activa) ----------
     const toggleCompras = async (plan) => {
         if (mostrarCompras[plan.id]) {
             setMostrarCompras({ ...mostrarCompras, [plan.id]: false });
@@ -115,10 +116,38 @@ export const PlanificacionesView = () => {
         }
     };
 
+    // ---------- Eliminación (Sprint 2, conservada activa sobre el mismo maestro) ----------
+    const confirmarEliminar = async () => {
+        const plan = confEliminar;
+        setConfEliminar(null);
+        try {
+            await api.eliminarPlanificacion(plan.id);
+            setCache(prev => { const c = { ...prev }; delete c[plan.id]; return c; });
+            setExpandidos(prev => ({ ...prev, [plan.id]: false }));
+            await cargar();
+        } catch (e) {
+            setError(e.message);
+        }
+    };
+
     // ---------- Helpers de render ----------
     const margenDe = (p) => {
         if (p.margen !== null && p.margen !== undefined) return Number(p.margen);
         return Number(p.recoleccion_total_proyectada || 0) - Number(p.costo_total_semana || 0);
+    };
+
+    // COM-8 v4: promedios nutricionales calculados desde los días persistidos
+    const calcularPromedios = (dias) => {
+        if (!dias || dias.length === 0) return { kcal: '—', hierro: '—', proteina: '—' };
+        const n = dias.length;
+        const sumK = dias.reduce((a, d) => a + Number(d.energia_kcal_racion || 0), 0);
+        const sumH = dias.reduce((a, d) => a + Number(d.hierro_mg_racion || 0), 0);
+        const sumP = dias.reduce((a, d) => a + Number(d.proteina_g_racion || 0), 0);
+        return {
+            kcal: sumK > 0 ? (sumK / n).toFixed(1) : '—',
+            hierro: sumH > 0 ? (sumH / n).toFixed(2) : '—',
+            proteina: sumP > 0 ? (sumP / n).toFixed(1) : '—',
+        };
     };
 
     const tarjeta = (icono, valor, etiqueta, colorExtra = 'text-slate-800') => (
@@ -139,8 +168,8 @@ export const PlanificacionesView = () => {
                         <ClipboardList className="text-emerald-600" size={22} /> Planificaciones Semanales
                     </h2>
                     <p className="text-sm text-slate-500">
-                        Menús definitivos seleccionados del motor de propuestas, con su recolección,
-                        margen y detalle por día.
+                        Menús definitivos seleccionados del motor de propuestas, con recolección,
+                        margen, comensales por día y detalle nutricional por ración.
                     </p>
                 </div>
             </div>
@@ -175,7 +204,7 @@ export const PlanificacionesView = () => {
                                 <th className="p-3 font-semibold">Margen</th>
                                 <th className="p-3 font-semibold">Estado</th>
                                 <th className="p-3 font-semibold">Seleccionado por</th>
-                                <th className="p-3 font-semibold text-right">Detalle</th>
+                                <th className="p-3 font-semibold text-right">Acciones</th>
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-200">
@@ -203,14 +232,22 @@ export const PlanificacionesView = () => {
                                                 </span>
                                             </td>
                                             <td className="p-3 text-slate-600">{p.seleccionado_por || '—'}</td>
-                                            <td className="p-3 text-right">
-                                                <button
-                                                    onClick={() => toggleExpandir(p)}
-                                                    className="p-1.5 bg-slate-100 text-slate-700 hover:bg-slate-200 rounded-lg transition-colors"
-                                                    title={abierto ? 'Ocultar detalle' : 'Ver detalle por día'}
-                                                >
-                                                    {abierto ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
-                                                </button>
+                                            <td className="p-3">
+                                                <div className="flex justify-end gap-2">
+                                                    {/* COM-8 v5: eliminar planificación (Sprint 2), conservado activo */}
+                                                    <button
+                                                        onClick={() => setConfEliminar(p)}
+                                                        className="p-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-lg transition-colors"
+                                                        title="Eliminar planificación">
+                                                        <Trash2 size={15} />
+                                                    </button>
+                                                    <button
+                                                        onClick={() => toggleExpandir(p)}
+                                                        className="p-1.5 bg-slate-100 text-slate-700 hover:bg-slate-200 rounded-lg transition-colors"
+                                                        title={abierto ? 'Ocultar detalle' : 'Ver detalle por día'}>
+                                                        {abierto ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+                                                    </button>
+                                                </div>
                                             </td>
                                         </tr>
 
@@ -224,8 +261,10 @@ export const PlanificacionesView = () => {
                                                         </div>
                                                     ) : (
                                                         <>
-                                                        {/* Tarjetas de resumen: costo, recolección, margen y kcal */}
-                                                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                                                        {/* COM-8 v4: tarjetas de resumen (margen = ventas - compras,
+                                                            al mismo nivel visual que costo y kcal; hierro y proteína
+                                                            agregados por ser factor crítico) */}
+                                                        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
                                                             {tarjeta(<Wallet size={12} className="text-slate-500" />,
                                                                 `S/ ${p.costo_total_semana}`, 'Costo total semanal (compras)')}
                                                             {tarjeta(<Coins size={12} className="text-emerald-600" />,
@@ -234,65 +273,80 @@ export const PlanificacionesView = () => {
                                                                 `S/ ${margen}`, 'Margen (ventas − compras)',
                                                                 margen >= 0 ? 'text-emerald-700' : 'text-red-600')}
                                                             {tarjeta(<Flame size={12} className="text-orange-500" />,
-                                                                det.resumen ? `${det.resumen.calorias_promedio_dia} kcal` : '—',
-                                                                'Kcal promedio por día')}
+                                                                `${calcularPromedios(det.dias).kcal} kcal`, 'Kcal promedio por día')}
+                                                            {tarjeta(<Droplet size={12} className="text-red-500" />,
+                                                                `${calcularPromedios(det.dias).hierro} mg`, 'Hierro promedio por día',
+                                                                'text-red-700')}
+                                                            {tarjeta(<Users size={12} className="text-blue-500" />,
+                                                                `${calcularPromedios(det.dias).proteina} g`, 'Proteína promedio por día')}
                                                         </div>
 
-                                                        {/* COM-8 v2: comensales en 3 columnas grandes separadas */}
-                                                        {det.dias && det.dias.length > 0 && (
-                                                            <div className="grid grid-cols-3 gap-3">
-                                                                {[
-                                                                    ['Casos Sociales', det.dias[0].comensales_social, 'bg-red-50 border-red-200 text-red-700'],
-                                                                    ['Afiliados', det.dias[0].comensales_afiliado, 'bg-blue-50 border-blue-200 text-blue-700'],
-                                                                    ['Normales', det.dias[0].comensales_normal, 'bg-emerald-50 border-emerald-200 text-emerald-700'],
-                                                                ].map(([label, valor, estilo]) => (
-                                                                    <div key={label} className={`border rounded-xl p-3 text-center ${estilo}`}>
-                                                                        <p className="text-3xl font-bold">{valor}</p>
-                                                                        <p className="text-xs font-semibold flex items-center justify-center gap-1">
-                                                                            <Users size={12} /> {label} / día
-                                                                        </p>
-                                                                    </div>
-                                                                ))}
+                                                        {/* COM-8 v5 (trazabilidad): bloque de comensales de COM-8 v2,
+                                                            COMENTADO. Mostraba un único número por categoría para toda
+                                                            la semana (tomado del día 1), lo cual era erróneo para
+                                                            anticipar la atención diaria. Reemplazado por las columnas
+                                                            Social/Afiliado/Normal POR DÍA en la tabla siguiente.
+                                                        <div className="grid grid-cols-3 gap-3">
+                                                            <div className="border rounded-xl p-3 text-center bg-red-50 border-red-200 text-red-700">
+                                                                <p className="text-3xl font-bold">{det.dias[0].comensales_social}</p>
+                                                                <p className="text-xs font-semibold">Casos Sociales / día</p>
                                                             </div>
-                                                        )}
+                                                            <div className="border rounded-xl p-3 text-center bg-blue-50 border-blue-200 text-blue-700">
+                                                                <p className="text-3xl font-bold">{det.dias[0].comensales_afiliado}</p>
+                                                                <p className="text-xs font-semibold">Afiliados / día</p>
+                                                            </div>
+                                                            <div className="border rounded-xl p-3 text-center bg-emerald-50 border-emerald-200 text-emerald-700">
+                                                                <p className="text-3xl font-bold">{det.dias[0].comensales_normal}</p>
+                                                                <p className="text-xs font-semibold">Normales / día</p>
+                                                            </div>
+                                                        </div>
+                                                        */}
 
-                                                        {/* Tabla por día con recolección proyectada */}
+                                                        {/* COM-8 v4: tabla por día con comensales en columnas
+                                                            separadas, recolección proyectada y nutrición por ración */}
                                                         <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
                                                             <table className="w-full text-left border-collapse whitespace-nowrap text-sm">
                                                                 <thead>
                                                                     <tr className="bg-slate-100 text-slate-600">
                                                                         <th className="p-2 font-semibold">Día</th>
                                                                         <th className="p-2 font-semibold">Receta</th>
-                                                                        <th className="p-2 font-semibold">Costo/ración</th>
+                                                                        <th className="p-2 font-semibold text-center bg-red-50 text-red-700">Social</th>
+                                                                        <th className="p-2 font-semibold text-center bg-blue-50 text-blue-700">Afiliado</th>
+                                                                        <th className="p-2 font-semibold text-center bg-emerald-50 text-emerald-700">Normal</th>
+                                                                        <th className="p-2 font-semibold text-center">Total</th>
+                                                                        <th className="p-2 font-semibold">Costo/rac.</th>
                                                                         <th className="p-2 font-semibold">Costo del día</th>
                                                                         <th className="p-2 font-semibold">Recolección proyectada</th>
-                                                                        <th className="p-2 font-semibold">Kcal/ración</th>
+                                                                        <th className="p-2 font-semibold">Kcal/rac.</th>
+                                                                        <th className="p-2 font-semibold text-red-700">Fe/rac. (mg)</th>
+                                                                        <th className="p-2 font-semibold">Prot/rac. (g)</th>
                                                                     </tr>
                                                                 </thead>
                                                                 <tbody className="divide-y divide-slate-200">
-                                                                    {det.dias.map(d => {
-                                                                        const diaMenu = (det.menu || []).find(m => m.dia_semana === d.dia);
-                                                                        return (
-                                                                            <tr key={d.id}>
-                                                                                <td className="p-2 font-bold text-slate-700">{d.dia_nombre}</td>
-                                                                                <td className="p-2 text-slate-600">{d.nombre_receta}</td>
-                                                                                <td className="p-2 text-slate-600">S/ {d.costo_racion}</td>
-                                                                                <td className="p-2 text-slate-600">S/ {d.costo_total}</td>
-                                                                                <td className="p-2 font-semibold text-emerald-700">S/ {d.recoleccion_proyectada}</td>
-                                                                                <td className="p-2 text-slate-600">{diaMenu ? diaMenu.energia_kcal : '—'}</td>
-                                                                            </tr>
-                                                                        );
-                                                                    })}
+                                                                    {det.dias.map(d => (
+                                                                        <tr key={d.id}>
+                                                                            <td className="p-2 font-bold text-slate-700">{d.dia_nombre}</td>
+                                                                            <td className="p-2 text-slate-600">{d.nombre_receta}</td>
+                                                                            <td className="p-2 text-center text-lg font-bold text-red-700 bg-red-50/40">{d.comensales_social ?? 0}</td>
+                                                                            <td className="p-2 text-center text-lg font-bold text-blue-700 bg-blue-50/40">{d.comensales_afiliado ?? 0}</td>
+                                                                            <td className="p-2 text-center text-lg font-bold text-emerald-700 bg-emerald-50/40">{d.comensales_normal ?? 0}</td>
+                                                                            <td className="p-2 text-center font-bold text-slate-800">{d.total_comensales}</td>
+                                                                            <td className="p-2 text-slate-600">S/ {d.costo_racion}</td>
+                                                                            <td className="p-2 text-slate-600">S/ {d.costo_total}</td>
+                                                                            <td className="p-2 font-semibold text-emerald-700">S/ {d.recoleccion_proyectada}</td>
+                                                                            <td className="p-2 text-slate-600">{d.energia_kcal_racion ?? '—'}</td>
+                                                                            <td className="p-2 font-semibold text-red-700">{d.hierro_mg_racion ?? '—'}</td>
+                                                                            <td className="p-2 text-slate-600">{d.proteina_g_racion ?? '—'}</td>
+                                                                        </tr>
+                                                                    ))}
                                                                 </tbody>
                                                             </table>
                                                         </div>
 
-                                                        {/* Lista de compras de la semana */}
+                                                        {/* Lista de compras de la semana (Sprint 2, conservada) */}
                                                         <div>
-                                                            <button
-                                                                onClick={() => toggleCompras(p)}
-                                                                className="flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-slate-800 transition-colors"
-                                                            >
+                                                            <button onClick={() => toggleCompras(p)}
+                                                                className="flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-slate-800 transition-colors">
                                                                 <ShoppingCart size={14} />
                                                                 {mostrarCompras[p.id] ? 'Ocultar lista de compras' : 'Ver lista de compras'}
                                                             </button>
@@ -343,6 +397,17 @@ export const PlanificacionesView = () => {
                     </table>
                 </div>
             )}
+
+            {/* COM-8 v5: confirmación de eliminación (Sprint 2, conservada) */}
+            <ModalConfirmacion
+                isOpen={!!confEliminar}
+                onClose={() => setConfEliminar(null)}
+                onConfirm={confirmarEliminar}
+                mensaje={confEliminar
+                    ? `¿Eliminar la planificación de la semana del ${confEliminar.fecha_referencia} (${confEliminar.etiqueta || confEliminar.variante || 'sin variante'})? Se eliminarán también sus días y su lista de compras asociada.`
+                    : ''}
+                tipo="danger"
+            />
         </div>
     );
 };
