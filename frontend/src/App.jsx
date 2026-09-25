@@ -5,8 +5,8 @@
  *           la selección de comedor post-login (COM-20), el módulo multi-comedor
  *           (COM-21), grupos de usuario (COM-22), gestión de usuarios (COM-23), la
  *           diferenciación de vistas por grupo/rol (COM-25), la pestaña de clusters
- *           K-means del recetario (COM-5) y la pestaña de propuestas de menú
- *           semanal del motor greedy (COM-8), filtradas por los módulos permitidos.
+ *           K-means del recetario (COM-5) y la pestaña de propuestas de menú semanal
+ *           del motor greedy (COM-8), filtradas por los módulos permitidos.
  * Uso: Montado en main.jsx mediante <React.StrictMode>. Envuelve toda la app con
  *      AuthProvider y ParametrosProvider.
  *
@@ -14,8 +14,10 @@
  *  - COM-19/20/21/22/23/25: flujo de login, selección de comedor, pestañas y permisos.
  *  - COM-27: pestañas filtradas por módulos y formularios con cascada de ubicación.
  *  - COM-5: nueva pestaña "Clusters K-Means" ligada al módulo 'recetario'.
- *  - COM-8: nueva pestaña "Propuestas de Menú" ligada al módulo 'propuestas'
- *           (sembrado en COM-8 para Directivo y Operativo del comedor).
+ *  - COM-8: nueva pestaña "Propuestas de Menú" ligada al módulo 'propuestas'.
+ *  - COM-8 v2: la pestaña "Presupuesto" (generación aleatoria de menús) se RETIRA y
+ *              se comenta; su función es reemplazada por "Propuestas de Menú" (greedy).
+ *              Quien conservaba el módulo 'presupuesto' mantiene acceso a propuestas.
  */
 import React, { useState, useEffect } from 'react';
 import {
@@ -25,7 +27,10 @@ import {
 } from 'lucide-react';
 import { RecipesView } from './components/recipes/RecipesView';
 import { ClusterRecetasView } from './components/recipes/ClusterRecetasView';
-import { BudgetView } from './components/budget/BudgetView';
+// COM-8 v2: import COMENTADO. La vista de Presupuesto (generación aleatoria de menús)
+// fue reemplazada por GenerarPropuestasView (motor greedy search). Se conserva la
+// línea comentada para trazabilidad; el archivo BudgetView.jsx NO se elimina.
+// import { BudgetView } from './components/budget/BudgetView';
 import { PlanificacionesView } from './components/budget/PlanificacionesView';
 // COM-8: vista de propuestas de menú semanal (motor greedy search)
 import { GenerarPropuestasView } from './components/budget/GenerarPropuestasView';
@@ -50,7 +55,9 @@ const MODULOS_ADMIN = ['municipalidades', 'roles', 'bloqueos', 'vistas'];
 const TABS_BASE = [
     { id: 'recipes', label: 'Recetario', icon: ChefHat, color: 'emerald', modulo: 'recetario' },
     { id: 'clusters', label: 'Clusters K-Means', icon: PieChart, color: 'emerald', modulo: 'recetario' }, // COM-5
-    { id: 'budget', label: 'Presupuesto', icon: Calculator, color: 'emerald', modulo: 'presupuesto' },
+    // COM-8 v2: pestaña RETIRADA (se comenta, no se borra): su esquema de generación
+    // aleatoria de menús fue reemplazado por el motor greedy de "Propuestas de Menú".
+    // { id: 'budget', label: 'Presupuesto', icon: Calculator, color: 'emerald', modulo: 'presupuesto' },
     { id: 'planificaciones', label: 'Planificaciones', icon: ClipboardList, color: 'blue', modulo: 'planificaciones' },
     // COM-8: propuestas del motor greedy; módulo 'propuestas' sembrado para
     // Directivo (Presidente/Tesorero/Secretario) y Operativo (Cocinero)
@@ -162,7 +169,17 @@ function AppContent() {
     const tieneModulosAdmin = MODULOS_ADMIN.some(m => misModulos.includes(m));
     const puedeVerUsuarios = tieneModulosAdmin || perfilGestion === 'COMEDOR_ADMIN';
 
-    const tabs = TABS_BASE.filter(t => misModulos.includes(t.modulo));
+    // COM-8 v2: compatibilidad de módulos. La pestaña "Presupuesto" fue retirada y
+    // reemplazada por "Propuestas de Menú"; quien conservaba el módulo 'presupuesto'
+    // (sembrado en sprints previos para Directivo) mantiene visibilidad de propuestas
+    // aunque el seed del módulo 'propuestas' aún no se le haya aplicado.
+    const modulosEfectivos = (misModulos.includes('presupuesto') && !misModulos.includes('propuestas'))
+        ? [...misModulos, 'propuestas']
+        : misModulos;
+
+    // COM-8 v2: el filtro ahora usa modulosEfectivos (línea anterior comentada abajo).
+    // const tabs = TABS_BASE.filter(t => misModulos.includes(t.modulo));  // COM-8 v2: reemplazada
+    const tabs = TABS_BASE.filter(t => modulosEfectivos.includes(t.modulo));
     if (puedeVerUsuarios) {
         const idx = tabs.findIndex(t => t.id === 'comedores');
         tabs.splice(idx === -1 ? tabs.length : idx, 0, TAB_USUARIOS);
@@ -263,7 +280,10 @@ function AppContent() {
                             <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 min-h-[500px]">
                                 {activeTab === 'recipes' && <RecipesView />}
                                 {activeTab === 'clusters' && <ClusterRecetasView />} {/* COM-5 */}
-                                {activeTab === 'budget' && <BudgetView />}
+                                {/* COM-8 v2: render COMENTADO de la vista Presupuesto retirada.
+                                    Su esquema de generación aleatoria fue reemplazado por el
+                                    motor greedy de Propuestas de Menú. */}
+                                {/* {activeTab === 'budget' && <BudgetView />} */}
                                 {activeTab === 'planificaciones' && <PlanificacionesView />}
                                 {activeTab === 'propuestas' && <GenerarPropuestasView />} {/* COM-8 */}
                                 {activeTab === 'comedores' && <ComedoresView />}

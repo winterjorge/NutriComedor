@@ -1,26 +1,27 @@
 """
 routers/propuestas_menu.py
 Objetivo: Endpoints del flujo COM-8 "Mostrar 3 propuestas de menú semanal":
-          - POST /propuestas/generar: ejecuta el motor greedy (ml/greedy_search.py) y
-            persiste las 3 candidatas (NutriMax / EconoMax / BalanceMax) por sesión.
+          - POST /propuestas/generar: ejecuta el motor greedy con los DÍAS DE COCINA
+            seleccionados (COM-8 v2) y persiste las 3 candidatas.
           - GET  /propuestas/sesion/{sesion_id}: recupera las 3 tarjetas de una sesión.
-          - POST /propuestas/{candidata_id}/seleccionar: fija el menú definitivo
-            escribiendo el maestro presupuesto_semanal y sus 7 filas planificacion_dia
-            (tablas existentes de init.sql, sin modificar su estructura).
-          - GET  /propuestas/historial: menús definitivos del comedor con su variante.
-          - GET  /propuestas/historial/{id}/dias: detalle diario de un menú seleccionado.
-Permisos (regla del ticket COM-8):
-          - Generar/ver propuestas: personal Directivo u Operativo del comedor
-            (y Administrador de Sistemas por soporte).
-          - Seleccionar o cambiar el menú semanal: SOLO personal Directivo del comedor.
+          - POST /propuestas/{candidata_id}/seleccionar: fija el menú definitivo en
+            presupuesto_semanal + planificacion_dia (solo Directivo).
+          - GET  /propuestas/historial y /historial/{id}/dias: historial y detalle.
+Historial:
+ - COM-8 v1: generación de semana completa (7 días).
+ - COM-8 v2: parámetro dias_semana en /generar (por defecto Lun-Vie) para excluir
+   feriados o incluir sábados según la operativa real del comedor.
+Permisos (regla del ticket):
+          - Generar/ver: Directivo u Operativo del comedor (admin de sistemas por soporte).
+          - Seleccionar o cambiar el menú: SOLO Directivo del comedor.
 Uso: Registrado en main.py con prefijo /api/v1.
 Referencia: ticket COM-8 / HU-08 (solo trazabilidad; los nombres obedecen a la funcionalidad).
 """
 from datetime import date, timedelta
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from typing import Optional
 from psycopg2.extras import RealDictCursor
 
 from database import get_db
@@ -42,7 +43,7 @@ PRESUPUESTO_MAXIMO = 10000.0
 
 
 # ==========================================
-# MODELOS DE ENTRADA (locales al router: flujo nuevo, sin schema previo)
+# MODELOS DE ENTRADA
 # ==========================================
 class GenerarPropuestasInput(BaseModel):
     """Parámetros de generación de las 3 propuestas semanales."""
@@ -50,6 +51,8 @@ class GenerarPropuestasInput(BaseModel):
     presupuesto_semanal: float
     fecha_referencia: Optional[str] = None   # YYYY-MM-DD; por defecto hoy
     seed: int = 0                            # jitter del botón "Regenerar"
+    # COM-8 v2: días de cocina (1=Lunes .. 7=Domingo). Por defecto Lun-Vie.
+    dias_semana: Optional[List[int]] = None
     usuario_solicitante_id: int
 
 
@@ -101,7 +104,6 @@ def _comensales_por_tipo(cur):
 
 
 def _lunes_de(fecha: date) -> date:
-    """Lunes de la semana de la fecha dada."""
     return fecha - timedelta(days=fecha.weekday())
 
 
@@ -111,9 +113,9 @@ def _lunes_de(fecha: date) -> date:
 @router.post("/generar", status_code=201)
 def generar_propuestas(data: GenerarPropuestasInput, db=Depends(get_db)):
     """
-    Ejecuta el motor greedy y persiste las 3 propuestas candidatas agrupadas por
-    sesion_id. El botón "Regenerar" del frontend re-llama este endpoint con otro
-    `seed` para obtener combinaciones distintas (jitter de ponderaciones).
+    Ejecuta el motor greedy para los días de cocina indicados y persiste las 3
+    propuestas candidatas agrupadas por sesion_id. El botón "Regenerar" del frontend
+    re-llama este endpoint con otro `seed`.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -124,6 +126,12 @@ def generar_propuestas(data: GenerarPropuestasInput, db=Depends(get_db)):
         if data.presupuesto_semanal > PRESUPUESTO_MAXIMO:
             raise HTTPException(status_code=400,
                             detail="El presupuesto no puede superar los 10,000 soles.")
+
+        # COM-8 v2: validación de días de cocina
+        dias = sorted(set(data.dias_semana or [1, 2, 3, 4, 5]))
+        if not dias or any(d < 1 or d > 7 for d in dias):
+            raise HTTPException(status_code=400,
+                            detail="Los días de cocina deben estar entre 1 (Lunes) y 7 (Domingo).")
 
         fecha = date.fromisoformat(data.fecha_referencia) if data.fecha_referencia else date.today()
 
@@ -141,6 +149,7 @@ def generar_propuestas(data: GenerarPropuestasInput, db=Depends(get_db)):
             creado_por_id=data.usuario_solicitante_id,
             fecha_referencia=fecha,
             seed=data.seed,
+            dias_semana=dias,
         )
         # Flag para que la UI muestre/oculte el botón "Seleccionar esta opción"
         resultado['puede_seleccionar'] = es_directivo_de_comedor(
@@ -205,13 +214,9 @@ def obtener_sesion(sesion_id: str, usuario_solicitante_id: int, db=Depends(get_d
 def seleccionar_propuesta(candidata_id: int, data: SeleccionarPropuestaInput,
                           db=Depends(get_db)):
     """
-    Fija la propuesta como menú definitivo de la semana:
-      1) Valida permiso Directivo del comedor (regla del ticket).
-      2) Marca como REEMPLAZADA la planificación VIGENTE previa de la misma semana
-         (maestro y su candidata origen) para conservar auditoría del cambio.
-      3) Inserta el maestro en presupuesto_semanal (con vínculo comedor/candidata/selector).
-      4) Inserta las 7 filas del día en planificacion_dia.
-      5) Marca la candidata como SELECCIONADA y sus hermanas como DESCARTADAS.
+    Fija la propuesta como menú definitivo: escribe el maestro presupuesto_semanal
+    y una fila en planificacion_dia POR CADA DÍA DE COCINA (COM-8 v2: solo los días
+    seleccionados). Marca la candidata como SELECCIONADA y sus hermanas DESCARTADAS.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -233,7 +238,7 @@ def seleccionar_propuesta(candidata_id: int, data: SeleccionarPropuestaInput,
         social, afiliado, normal = _comensales_por_tipo(cur)
         total_comensales = social + afiliado + normal
 
-        # 2) Planificación VIGENTE previa de la misma semana pasa a REEMPLAZADA
+        # Planificación VIGENTE previa de la misma semana pasa a REEMPLAZADA
         cur.execute("""
             UPDATE presupuesto_semanal
             SET estado = 'REEMPLAZADA'
@@ -248,7 +253,7 @@ def seleccionar_propuesta(candidata_id: int, data: SeleccionarPropuestaInput,
                     WHERE id = %s AND estado = 'SELECCIONADA';
                 """, (fila['candidata_id'],))
 
-        # 3) Maestro de planificación semanal (tablas existentes de init.sql)
+        # Maestro de planificación semanal
         cur.execute("""
             INSERT INTO presupuesto_semanal
                 (fondo_total, dias_operativos, fecha_referencia,
@@ -271,7 +276,7 @@ def seleccionar_propuesta(candidata_id: int, data: SeleccionarPropuestaInput,
         ))
         presupuesto_id = cur.fetchone()['id']
 
-        # 4) Detalle diario en planificacion_dia
+        # Detalle diario (solo los días de cocina seleccionados)
         for dia in menu:
             cur.execute("""
                 INSERT INTO planificacion_dia
@@ -292,7 +297,7 @@ def seleccionar_propuesta(candidata_id: int, data: SeleccionarPropuestaInput,
                 dia['recoleccion_proyectada'],
             ))
 
-        # 5) Estados de las candidatas de la sesión
+        # Estados de las candidatas de la sesión
         cur.execute("""
             UPDATE planificaciones_candidatas SET estado = 'SELECCIONADA'
             WHERE id = %s;
@@ -307,9 +312,11 @@ def seleccionar_propuesta(candidata_id: int, data: SeleccionarPropuestaInput,
             'presupuesto_semanal_id': presupuesto_id,
             'comedor_id': comedor_id,
             'semana_inicio': fecha_inicio.isoformat(),
+            'dias_cocina': sorted({d['dia_semana'] for d in menu}),
             'variante': cand['variante'],
             'etiqueta': cand['etiqueta'],
             'costo_total_semana': resumen.get('costo_total_semana'),
+            'recoleccion_total_semana': resumen.get('recoleccion_total_semana'),
             'margen_proyectado': resumen.get('margen_proyectado'),
             'viable': bool(resumen.get('dentro_de_presupuesto', True)),
             'estado': 'SELECCIONADA',
@@ -357,7 +364,7 @@ def historial_propuestas(comedor_id: int, usuario_solicitante_id: int,
 
 @router.get("/historial/{presupuesto_id}/dias")
 def historial_dias(presupuesto_id: int, usuario_solicitante_id: int, db=Depends(get_db)):
-    """Detalle diario (planificacion_dia) de un menú semanal seleccionado."""
+    """Detalle diario (planificacion_dia) de un menú seleccionado, con recolección y comensales."""
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("SELECT comedor_id FROM presupuesto_semanal WHERE id = %s;",
