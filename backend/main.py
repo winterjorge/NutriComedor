@@ -24,10 +24,11 @@ from routers import (
     vistas,           # COM-25: permisos por vistas (módulos por grupo/rol)
     ubicaciones,      # COM-27: catálogo geográfico en cascada
     kmeans,           # COM-5: clustering nutricional del recetario (K-means k=4)
+    propuestas_menu,  # COM-8: propuestas de menú semanal (motor greedy search)
 )
 # Asegurado de esquema dinámico (parámetros, planificación, raciones, seguridad,
-# comedores, grupos, gestión de usuarios, permisos por vistas, ubicaciones y
-# esquema K-means con seed nutricional) al arrancar
+# comedores, grupos, gestión de usuarios, permisos por vistas, ubicaciones,
+# esquema K-means con seed nutricional y esquema de propuestas COM-8) al arrancar
 from db_bootstrap import asegurar_esquema
 
 
@@ -38,7 +39,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="API - NutriComedor", version="2.9.0", lifespan=lifespan)
+app = FastAPI(title="API - NutriComedor", version="2.10.0", lifespan=lifespan)
 
 # Configuración de CORS (Mantiene compatibilidad con tu Frontend)
 app.add_middleware(
@@ -59,6 +60,7 @@ app.include_router(municipalidades.router, prefix="/api/v1")  # COM-23
 app.include_router(vistas.router, prefix="/api/v1")           # COM-25
 app.include_router(ubicaciones.router, prefix="/api/v1")      # COM-27
 app.include_router(kmeans.router, prefix="/api/v1")           # COM-5
+app.include_router(propuestas_menu.router, prefix="/api/v1")  # COM-8
 app.include_router(parametros.router, prefix="/api/v1")
 app.include_router(presupuesto.router, prefix="/api/v1")
 app.include_router(recetas.router, prefix="/api/v1")
