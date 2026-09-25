@@ -1,18 +1,21 @@
 """
 esquema_planificaciones.py
 Objetivo: DDL y seeds del módulo de propuestas de menú semanal (COM-8). Crea la tabla
-          de propuestas candidatas (las 3 tarjetas del motor greedy), siembra los
-          parámetros de ponderación/rotación/comensales, registra el módulo 'propuestas'
-          en la matriz de permisos por vistas (COM-25) y vincula el maestro existente
-          presupuesto_semanal con el comedor, la candidata elegida y quién la seleccionó.
+          de propuestas candidatas (las 3 tarjetas del motor greedy), agrega columnas
+          aditivas al maestro presupuesto_semanal (vínculo con comedor, candidata y
+          selector) y a planificacion_dia (nutrición por ración), siembra los parámetros
+          de ponderación/rotación/comensales y registra el módulo 'propuestas' en la
+          matriz de permisos por vistas (COM-25).
 Uso: Importado por db_bootstrap.py, que ejecuta `aplicar_esquema_planificaciones(cur)`.
 Nota: Idempotente (IF NOT EXISTS / ON CONFLICT DO NOTHING). NO modifica ni elimina las
       tablas existentes presupuesto_semanal ni planificacion_dia: solo les AGREGA
-      columnas nullable/defaults para el flujo multi-comedor de COM-8.
+      columnas nullable/defaults para el flujo multi-comedor y nutricional de COM-8.
 Historial:
  - COM-8 Parte 1: tabla planificaciones_candidatas + parámetros del motor + módulo.
  - COM-8 Parte 3: vínculo de presupuesto_semanal (comedor_id, candidata_id,
    seleccionado_por_id, fecha_seleccion, estado) para historial por comedor.
+ - COM-8 v4: columnas nutricionales por día en planificacion_dia
+   (energia_kcal_racion, hierro_mg_racion, proteina_g_racion).
 Referencia: ticket COM-8 (solo trazabilidad; los nombres obedecen a la funcionalidad).
 """
 
@@ -56,6 +59,19 @@ ADD COLUMN IF NOT EXISTS fecha_seleccion TIMESTAMP,
 ADD COLUMN IF NOT EXISTS estado VARCHAR(20) NOT NULL DEFAULT 'VIGENTE';
 CREATE INDEX IF NOT EXISTS idx_presupuesto_semanal_comedor
 ON presupuesto_semanal(comedor_id, fecha_referencia DESC);
+"""
+
+# =========================================================================
+# COM-8 v4: Columnas nutricionales POR DÍA en planificacion_dia (Kcal, Hierro y
+# Proteína por ración). Se agregan como ADD COLUMN IF NOT EXISTS para no tocar los
+# datos existentes; el motor greedy las llena al insertar y PlanificacionesView las
+# muestra aunque la sesión candidata ya se haya purgado.
+# =========================================================================
+DDL_PLANIFICACION_DIA_NUTRICIONAL = """
+ALTER TABLE planificacion_dia
+ADD COLUMN IF NOT EXISTS energia_kcal_racion NUMERIC(8,2),
+ADD COLUMN IF NOT EXISTS hierro_mg_racion    NUMERIC(8,2),
+ADD COLUMN IF NOT EXISTS proteina_g_racion   NUMERIC(8,2);
 """
 
 # =========================================================================
@@ -103,15 +119,17 @@ ON CONFLICT (rol_id, modulo_id) DO NOTHING;
 def aplicar_esquema_planificaciones(cur):
     """
     COM-8: crea la tabla de propuestas candidatas, agrega el vínculo comedor/candidata/
-    selector al maestro presupuesto_semanal, siembra parámetros del motor y registra
-    el módulo 'propuestas' en la matriz de vistas. Idempotente.
-    El caller (db_bootstrap) es responsable del commit.
+    selector al maestro presupuesto_semanal, agrega las columnas nutricionales por día
+    a planificacion_dia, siembra parámetros del motor y registra el módulo 'propuestas'
+    en la matriz de vistas. Idempotente. El caller (db_bootstrap) hace el commit.
     """
     # 1) Tabla de candidatas (debe existir antes del FK candidata_id del paso 2)
     cur.execute(DDL_PLANIFICACIONES_CANDIDATAS)
     # 2) COM-8 Parte 3: vínculo del maestro existente con comedor/candidata/selector
     cur.execute(DDL_PRESUPUESTO_VINCULO_COMEDOR)
-    # 3) Parámetros del motor greedy
+    # 3) COM-8 v4: columnas nutricionales por día (Kcal/Hierro/Proteína por ración)
+    cur.execute(DDL_PLANIFICACION_DIA_NUTRICIONAL)
+    # 4) Parámetros del motor greedy
     cur.execute(SEED_PARAMETROS_PLANIFICACION)
-    # 4) Módulo de vistas y su asignación a roles Directivo/Operativo
+    # 5) Módulo de vistas y su asignación a roles Directivo/Operativo
     cur.execute(SEED_MODULO_PROPUESTAS)
