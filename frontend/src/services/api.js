@@ -463,6 +463,48 @@ export const api = {
     },
 
     // ==========================================
+    // PROPUESTAS DE MENÚ SEMANAL (COM-8)
+    // ==========================================
+    // Genera las 3 propuestas (NutriMax / EconoMax / BalanceMax) con el motor greedy
+    generarPropuestas: async (data) => {
+        const response = await fetch(`${API_BASE}/propuestas/generar`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar las propuestas'));
+        return response.json();
+    },
+    // Recupera las 3 tarjetas de una sesión de generación previa
+    getSesionPropuestas: async (sesionId, usuarioId) => {
+        const response = await fetch(`${API_BASE}/propuestas/sesion/${sesionId}?usuario_solicitante_id=${usuarioId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener la sesión de propuestas'));
+        return response.json();
+    },
+    // Fija el menú definitivo (solo Directivo; el backend lo valida)
+    seleccionarPropuesta: async (candidataId, data) => {
+        const response = await fetch(`${API_BASE}/propuestas/${candidataId}/seleccionar`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al seleccionar la propuesta'));
+        return response.json();
+    },
+    // Historial de menús semanales definitivos del comedor
+    getHistorialPropuestas: async (comedorId, usuarioId) => {
+        const response = await fetch(`${API_BASE}/propuestas/historial?comedor_id=${comedorId}&usuario_solicitante_id=${usuarioId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el historial de propuestas'));
+        return response.json();
+    },
+    // Detalle diario (planificacion_dia) de un menú seleccionado
+    getHistorialDias: async (presupuestoId, usuarioId) => {
+        const response = await fetch(`${API_BASE}/propuestas/historial/${presupuestoId}/dias?usuario_solicitante_id=${usuarioId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el detalle del menú'));
+        return response.json();
+    },
+        
+    // ==========================================
     // RECETAS
     // ==========================================
     getRecetas: async (params = {}) => {
