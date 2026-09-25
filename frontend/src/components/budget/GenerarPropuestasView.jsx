@@ -2,25 +2,27 @@
  * components/budget/GenerarPropuestasView.jsx
  * Objetivo: Vista COM-8 "Propuestas de Menú": genera y muestra 3 propuestas de menú
  *           semanal (NutriMax, EconoMax, BalanceMax) del motor greedy, cada una con
- *           costo total, calorías promedio/día, RECOLECCIÓN PROYECTADA y MARGEN
+ *           costo total, calorías promedio/día, recolección proyectada y margen
  *           (ventas - compras), top 3 de ingredientes (solo vegetales/frutas/proteínas)
  *           y el listado de platos por día. El personal Directivo fija una propuesta
- *           ("Seleccionar esta opción"); "Regenerar" pide 3 opciones nuevas (jitter).
- *           Incluye historial de menús seleccionados con detalle expandible por día.
+ *           ("Seleccionar esta opción"). Incluye historial de menús seleccionados.
  * Historial:
- *  - COM-8 v1: 3 tarjetas, selección solo Directivo, regenerar e historial.
- *  - COM-8 v2: (a) selector de DÍAS DE COCINA en chips (Lun-Dom, por defecto Lun-Vie)
- *              enviado al motor como dias_semana, para excluir feriados o incluir
- *              sábados según la operativa real; (b) tarjetas de recolección proyectada
- *              y margen al mismo nivel visual que costo total y kcal/día.
- * Permisos: vista para Directivo y Operativo (módulo 'propuestas', COM-25). El botón
- *           de selección solo aparece si el backend responde puede_seleccionar=true.
+ *  - COM-8 v1: 3 tarjetas, selección solo Directivo, historial.
+ *  - COM-8 v2: selector de días de cocina (chips Lun-Dom) y tarjetas de recolección/margen.
+ *  - COM-8 v4: se retira el botón independiente "Regenerar"; al pulsar "Generar 3
+ *              propuestas" con una sesión activa se abre un modal de confirmación.
+ *  - COM-8 v5 (este archivo): trazabilidad recuperada. Todas las líneas reemplazadas en
+ *              versiones anteriores se conservan COMENTADAS (no borradas).
+ * Permisos: vista para Directivo y Operativo (módulo 'propuestas', COM-25). El botón de
+ *           selección solo aparece si el backend responde puede_seleccionar=true.
  * Uso: Montada por App.jsx en la pestaña "Propuestas de Menú".
  * Referencia: ticket COM-8 / HU-08 (solo trazabilidad; los nombres obedecen a la funcionalidad).
  */
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-    Sparkles, RefreshCw, Loader2, AlertCircle, Wallet, Flame,
+    Sparkles,
+    // RefreshCw, // COM-8 v5 (trazabilidad): icono del botón "Regenerar" retirado en COM-8 v4; se conserva comentado.
+    Loader2, AlertCircle, Wallet, Flame,
     ShoppingBasket, CalendarDays, History, ChevronDown, ChevronUp, Lock,
     CheckCircle2, TrendingUp, Coins
 } from 'lucide-react';
@@ -68,6 +70,8 @@ export const GenerarPropuestasView = () => {
     const [error, setError] = useState('');
     const [exito, setExito] = useState('');
     const [confSeleccion, setConfSeleccion] = useState(null);
+    // COM-8 v4: modal de confirmación al regenerar con el botón "Generar 3 propuestas"
+    const [confRegenerar, setConfRegenerar] = useState(false);
 
     // Historial de menús definitivos
     const [historial, setHistorial] = useState([]);
@@ -79,11 +83,8 @@ export const GenerarPropuestasView = () => {
 
     const cargarHistorial = useCallback(async () => {
         if (!comedorId) return;
-        try {
-            setHistorial(await api.getHistorialPropuestas(comedorId, usuario.id));
-        } catch (e) {
-            /* sección opcional: no bloquea la vista */
-        }
+        try { setHistorial(await api.getHistorialPropuestas(comedorId, usuario.id)); }
+        catch (e) { /* sección opcional: no bloquea la vista */ }
     }, [comedorId, usuario.id]);
 
     useEffect(() => { cargarHistorial(); }, [cargarHistorial]);
@@ -99,24 +100,14 @@ export const GenerarPropuestasView = () => {
         });
     };
 
-    // ---------- Generación / regeneración ----------
-    const generar = async (nuevoSeed) => {
-        if (!comedorId) {
-            setError('No hay un comedor seleccionado en su sesión.');
-            return;
-        }
+    // COM-8 v4: función interna que hace la llamada real al motor
+    const ejecutarGeneracion = async (nuevoSeed) => {
+        if (!comedorId) { setError('No hay un comedor seleccionado en su sesión.'); return; }
         const pres = Number(presupuesto);
-        if (!pres || pres <= 0) {
-            setError('Ingrese un presupuesto semanal válido (mayor a 0).');
-            return;
-        }
-        if (diasSel.length === 0) {
-            setError('Seleccione al menos un día de cocina.');
-            return;
-        }
-        setCargando(true);
-        setError('');
-        setSeleccionadaId(null);
+        if (!pres || pres <= 0) { setError('Ingrese un presupuesto semanal válido (mayor a 0).'); return; }
+        if (diasSel.length === 0) { setError('Seleccione al menos un día de cocina.'); return; }
+
+        setCargando(true); setError(''); setSeleccionadaId(null);
         try {
             const res = await api.generarPropuestas({
                 comedor_id: comedorId,
@@ -135,14 +126,31 @@ export const GenerarPropuestasView = () => {
         }
     };
 
-    const regenerar = () => generar(seed + 1);
+    // COM-8 v4: al pulsar "Generar 3 propuestas":
+    //   - Si NO hay sesión activa -> genera directamente.
+    //   - Si YA hay una sesión -> abre modal de confirmación (las propuestas actuales se perderán).
+    const onClickGenerar = () => {
+        if (sesion) {
+            setConfRegenerar(true);
+        } else {
+            ejecutarGeneracion(seed);
+        }
+    };
+
+    const confirmarRegenerar = async () => {
+        setConfRegenerar(false);
+        await ejecutarGeneracion(seed + 1);
+    };
+
+    // COM-8 v5 (trazabilidad): función "regenerar" independiente de COM-8 v1/v2, comentada.
+    // La regeneración ahora pasa por el modal de confirmación (confirmarRegenerar).
+    // const regenerar = () => generar(seed + 1);
 
     // ---------- Selección del menú definitivo ----------
     const confirmarSeleccion = async () => {
         const propuesta = confSeleccion;
         setConfSeleccion(null);
-        setCargando(true);
-        setError('');
+        setCargando(true); setError('');
         try {
             const res = await api.seleccionarPropuesta(propuesta.candidata_id, {
                 usuario_solicitante_id: usuario.id,
@@ -159,18 +167,13 @@ export const GenerarPropuestasView = () => {
 
     // ---------- Historial expandible ----------
     const toggleDias = async (id) => {
-        if (expandidos[id]) {
-            setExpandidos({ ...expandidos, [id]: false });
-            return;
-        }
+        if (expandidos[id]) { setExpandidos({ ...expandidos, [id]: false }); return; }
         setExpandidos({ ...expandidos, [id]: true });
         if (!diasHistorial[id]) {
             try {
                 const dias = await api.getHistorialDias(id, usuario.id);
                 setDiasHistorial(prev => ({ ...prev, [id]: dias }));
-            } catch (e) {
-                setError(e.message);
-            }
+            } catch (e) { setError(e.message); }
         }
     };
 
@@ -183,19 +186,24 @@ export const GenerarPropuestasView = () => {
                         <Sparkles className="text-emerald-600" size={22} /> Propuestas de Menú Semanal
                     </h2>
                     <p className="text-sm text-slate-500">
-                        El motor genera 3 opciones con distintos criterios (nutrición, costo y balance).
-                        Elija la que mejor se adapte a su experiencia.
+                        El motor genera 3 opciones con distintos criterios. Si ya hay propuestas
+                        visibles, pulsar "Generar" las reemplazará previa confirmación.
                     </p>
                 </div>
-                {sesion && (
-                    <button
-                        onClick={regenerar}
-                        disabled={cargando}
-                        className="flex items-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
-                    >
-                        <RefreshCw size={16} /> Regenerar
-                    </button>
-                )}
+
+                {/* COM-8 v5 (trazabilidad): botón independiente "Regenerar" de COM-8 v1/v2,
+                    comentado por requerimiento COM-8 v4 (la regeneración se pide desde
+                    "Generar 3 propuestas" con modal de confirmación).
+                    {sesion && (
+                        <button
+                            onClick={regenerar}
+                            disabled={cargando}
+                            className="flex items-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+                        >
+                            <RefreshCw size={16} /> Regenerar
+                        </button>
+                    )}
+                */}
             </div>
 
             {/* Formulario de generación */}
@@ -204,29 +212,21 @@ export const GenerarPropuestasView = () => {
                     <label className="flex items-center gap-1 text-xs font-semibold text-slate-600 mb-1">
                         <Wallet size={12} /> Presupuesto semanal (S/)
                     </label>
-                    <input
-                        type="number" min="1" step="50"
-                        value={presupuesto}
+                    <input type="number" min="1" step="50" value={presupuesto}
                         onChange={(e) => setPresupuesto(e.target.value)}
-                        className="w-40 px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500"
-                    />
+                        className="w-40 px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
                 </div>
                 <div>
                     <label className="flex items-center gap-1 text-xs font-semibold text-slate-600 mb-1">
                         <CalendarDays size={12} /> Semana de referencia
                     </label>
-                    <input
-                        type="date"
-                        value={fechaRef}
+                    <input type="date" value={fechaRef}
                         onChange={(e) => setFechaRef(e.target.value)}
-                        className="px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500"
-                    />
+                        className="px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
                 </div>
-                <button
-                    onClick={() => generar(seed)}
-                    disabled={cargando}
-                    className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
-                >
+                {/* COM-8 v4: único botón de generación; si ya hay sesión pide confirmación */}
+                <button onClick={onClickGenerar} disabled={cargando}
+                    className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50">
                     {cargando ? <Loader2 className="animate-spin" size={16} /> : <Sparkles size={16} />}
                     Generar 3 propuestas
                 </button>
@@ -244,16 +244,10 @@ export const GenerarPropuestasView = () => {
                     {DIAS_OPCIONES.map(d => {
                         const activo = diasSel.includes(d.id);
                         return (
-                            <button
-                                key={d.id}
-                                type="button"
-                                onClick={() => toggleDia(d.id)}
+                            <button key={d.id} type="button" onClick={() => toggleDia(d.id)}
                                 className={`px-3 py-2 rounded-lg text-xs font-bold transition-colors border ${
-                                    activo
-                                        ? 'bg-emerald-600 text-white border-emerald-600'
-                                        : 'bg-white text-slate-500 border-slate-300 hover:bg-slate-100'
-                                }`}
-                            >
+                                    activo ? 'bg-emerald-600 text-white border-emerald-600'
+                                           : 'bg-white text-slate-500 border-slate-300 hover:bg-slate-100'}`}>
                                 {d.label}
                             </button>
                         );
@@ -278,9 +272,7 @@ export const GenerarPropuestasView = () => {
                     <p className="text-xs text-slate-500 mb-3">
                         Semana del <b>{sesion.semana_inicio}</b> · {sesion.propuestas.length} propuestas ·
                         Días de cocina:{' '}
-                        <b>
-                            {(sesion.dias_seleccionados || []).map(d => DIAS_OPCIONES[d - 1]?.label).join(', ')}
-                        </b>
+                        <b>{(sesion.dias_seleccionados || []).map(d => DIAS_OPCIONES[d - 1]?.label).join(', ')}</b>
                         {!puedeSeleccionar && (
                             <span className="ml-2 inline-flex items-center gap-1 text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full font-semibold">
                                 <Lock size={11} /> Solo el personal directivo puede fijar el menú
@@ -369,11 +361,8 @@ export const GenerarPropuestasView = () => {
 
                                     {/* Acción de selección (solo Directivo) */}
                                     {puedeSeleccionar && !elegida && seleccionadaId === null && (
-                                        <button
-                                            onClick={() => setConfSeleccion(p)}
-                                            disabled={cargando}
-                                            className="w-full px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
-                                        >
+                                        <button onClick={() => setConfSeleccion(p)} disabled={cargando}
+                                            className="w-full px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50">
                                             Seleccionar esta opción
                                         </button>
                                     )}
@@ -395,10 +384,8 @@ export const GenerarPropuestasView = () => {
             )}
 
             {/* Historial de menús seleccionados */}
-            <button
-                onClick={() => setMostrarHistorial(!mostrarHistorial)}
-                className="flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-slate-800 transition-colors mb-2"
-            >
+            <button onClick={() => setMostrarHistorial(!mostrarHistorial)}
+                className="flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-slate-800 transition-colors mb-2">
                 <History size={14} />
                 {mostrarHistorial ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                 Historial de menús semanales ({historial.length})
@@ -428,9 +415,7 @@ export const GenerarPropuestasView = () => {
                                         <td className="p-3 text-slate-600">{h.etiqueta || h.variante || '—'}</td>
                                         <td className="p-3 text-slate-600">S/ {h.costo_total_semana}</td>
                                         <td className="p-3 text-slate-600">S/ {h.recoleccion_total_proyectada}</td>
-                                        <td className={`p-3 font-semibold ${h.margen >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
-                                            S/ {h.margen}
-                                        </td>
+                                        <td className={`p-3 font-semibold ${h.margen >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>S/ {h.margen}</td>
                                         <td className="p-3">
                                             <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${
                                                 h.estado === 'VIGENTE' ? 'bg-emerald-100 text-emerald-700'
@@ -441,34 +426,28 @@ export const GenerarPropuestasView = () => {
                                         </td>
                                         <td className="p-3 text-slate-600">{h.seleccionado_por || '—'}</td>
                                         <td className="p-3 text-right">
-                                            <button
-                                                onClick={() => toggleDias(h.id)}
+                                            <button onClick={() => toggleDias(h.id)}
                                                 className="p-1.5 bg-slate-100 text-slate-700 hover:bg-slate-200 rounded-lg transition-colors"
-                                                title="Ver menú por día"
-                                            >
+                                                title="Ver menú por día">
                                                 {expandidos[h.id] ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
                                             </button>
                                         </td>
                                     </tr>
                                     {expandidos[h.id] && (
-                                        <tr>
-                                            <td colSpan="8" className="p-3 bg-slate-50">
-                                                {!diasHistorial[h.id] ? (
-                                                    <Loader2 className="animate-spin mx-auto text-emerald-600" size={18} />
-                                                ) : (
-                                                    <ul className="space-y-1 text-xs text-slate-600">
-                                                        {diasHistorial[h.id].map(d => (
-                                                            <li key={d.id} className="flex justify-between gap-4">
-                                                                <span><b>{d.dia_nombre}:</b> {d.nombre_receta}</span>
-                                                                <span>
-                                                                    costo S/ {d.costo_total} · recolección S/ {d.recoleccion_proyectada}
-                                                                </span>
-                                                            </li>
-                                                        ))}
-                                                    </ul>
-                                                )}
-                                            </td>
-                                        </tr>
+                                        <tr><td colSpan="8" className="p-3 bg-slate-50">
+                                            {!diasHistorial[h.id] ? (
+                                                <Loader2 className="animate-spin mx-auto text-emerald-600" size={18} />
+                                            ) : (
+                                                <ul className="space-y-1 text-xs text-slate-600">
+                                                    {diasHistorial[h.id].map(d => (
+                                                        <li key={d.id} className="flex justify-between gap-4">
+                                                            <span><b>{d.dia_nombre}:</b> {d.nombre_receta}</span>
+                                                            <span>costo S/ {d.costo_total} · recolección S/ {d.recoleccion_proyectada}</span>
+                                                        </li>
+                                                    ))}
+                                                </ul>
+                                            )}
+                                        </td></tr>
                                     )}
                                 </React.Fragment>
                             ))}
@@ -477,7 +456,7 @@ export const GenerarPropuestasView = () => {
                 </div>
             )}
 
-            {/* Confirmación y éxito */}
+            {/* Confirmación de selección */}
             <ModalConfirmacion
                 isOpen={!!confSeleccion}
                 onClose={() => setConfSeleccion(null)}
@@ -485,6 +464,14 @@ export const GenerarPropuestasView = () => {
                 mensaje={confSeleccion
                     ? `¿Fijar el menú "${confSeleccion.etiqueta}" (costo S/ ${confSeleccion.resumen.costo_total_semana}, margen S/ ${confSeleccion.resumen.margen_proyectado}) como definitivo para la semana del ${sesion?.semana_inicio}? Solo el personal directivo podrá cambiarlo después.`
                     : ''}
+                tipo="warning"
+            />
+            {/* COM-8 v4: confirmación para regenerar (las propuestas actuales se perderán) */}
+            <ModalConfirmacion
+                isOpen={confRegenerar}
+                onClose={() => setConfRegenerar(false)}
+                onConfirm={confirmarRegenerar}
+                mensaje="¿Generar 3 nuevas propuestas? Las propuestas actuales se perderán. Si ya seleccionó una como definitiva, esta no se verá afectada."
                 tipo="warning"
             />
             <ModalExito isOpen={!!exito} onClose={() => setExito('')} mensaje={exito} />

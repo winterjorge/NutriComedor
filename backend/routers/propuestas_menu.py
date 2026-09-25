@@ -5,12 +5,15 @@ Objetivo: Endpoints del flujo COM-8 "Mostrar 3 propuestas de menú semanal":
             seleccionados (COM-8 v2) y persiste las 3 candidatas.
           - GET  /propuestas/sesion/{sesion_id}: recupera las 3 tarjetas de una sesión.
           - POST /propuestas/{candidata_id}/seleccionar: fija el menú definitivo en
-            presupuesto_semanal + planificacion_dia (solo Directivo).
-          - GET  /propuestas/historial y /historial/{id}/dias: historial y detalle.
+            presupuesto_semanal + planificacion_dia (solo Directivo), persistiendo
+            también la nutrición por ración de cada día (COM-8 v4).
+          - GET  /propuestas/historial y /historial/{id}/dias: historial y detalle
+            diario con comensales por tipo, recolección y nutrición por ración.
 Historial:
  - COM-8 v1: generación de semana completa (7 días).
- - COM-8 v2: parámetro dias_semana en /generar (por defecto Lun-Vie) para excluir
-   feriados o incluir sábados según la operativa real del comedor.
+ - COM-8 v2: parámetro dias_semana en /generar (por defecto Lun-Vie).
+ - COM-8 v4: persistencia y exposición de energia_kcal_racion, hierro_mg_racion y
+   proteina_g_racion en planificacion_dia.
 Permisos (regla del ticket):
           - Generar/ver: Directivo u Operativo del comedor (admin de sistemas por soporte).
           - Seleccionar o cambiar el menú: SOLO Directivo del comedor.
@@ -104,6 +107,7 @@ def _comensales_por_tipo(cur):
 
 
 def _lunes_de(fecha: date) -> date:
+    """Lunes de la semana de la fecha dada."""
     return fecha - timedelta(days=fecha.weekday())
 
 
@@ -114,8 +118,8 @@ def _lunes_de(fecha: date) -> date:
 def generar_propuestas(data: GenerarPropuestasInput, db=Depends(get_db)):
     """
     Ejecuta el motor greedy para los días de cocina indicados y persiste las 3
-    propuestas candidatas agrupadas por sesion_id. El botón "Regenerar" del frontend
-    re-llama este endpoint con otro `seed`.
+    propuestas candidatas agrupadas por sesion_id. El frontend re-llama este endpoint
+    con otro `seed` cuando el usuario confirma regenerar (COM-8 v4: sin botón aparte).
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -215,8 +219,9 @@ def seleccionar_propuesta(candidata_id: int, data: SeleccionarPropuestaInput,
                           db=Depends(get_db)):
     """
     Fija la propuesta como menú definitivo: escribe el maestro presupuesto_semanal
-    y una fila en planificacion_dia POR CADA DÍA DE COCINA (COM-8 v2: solo los días
-    seleccionados). Marca la candidata como SELECCIONADA y sus hermanas DESCARTADAS.
+    y una fila en planificacion_dia POR CADA DÍA DE COCINA, incluyendo la nutrición
+    por ración (COM-8 v4). Marca la candidata como SELECCIONADA y sus hermanas
+    DESCARTADAS; la planificación VIGENTE previa de la misma semana pasa a REEMPLAZADA.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -276,15 +281,16 @@ def seleccionar_propuesta(candidata_id: int, data: SeleccionarPropuestaInput,
         ))
         presupuesto_id = cur.fetchone()['id']
 
-        # Detalle diario (solo los días de cocina seleccionados)
+        # Detalle diario (solo los días de cocina seleccionados), con nutrición por ración
         for dia in menu:
             cur.execute("""
                 INSERT INTO planificacion_dia
                     (presupuesto_semanal_id, dia, dia_nombre,
                      comensales_social, comensales_afiliado, comensales_normal,
                      total_comensales, receta_id, nombre_receta,
-                     costo_racion, costo_total, recoleccion_proyectada)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                     costo_racion, costo_total, recoleccion_proyectada,
+                     energia_kcal_racion, hierro_mg_racion, proteina_g_racion)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
             """, (
                 presupuesto_id,
                 dia['dia_semana'],
@@ -295,6 +301,9 @@ def seleccionar_propuesta(candidata_id: int, data: SeleccionarPropuestaInput,
                 dia['costo_racion'],
                 dia['costo_total_dia'],
                 dia['recoleccion_proyectada'],
+                dia.get('energia_kcal'),   # COM-8 v4: kcal por ración
+                dia.get('hierro_mg'),      # COM-8 v4: hierro por ración
+                dia.get('proteina_g'),     # COM-8 v4: proteína por ración
             ))
 
         # Estados de las candidatas de la sesión
@@ -364,7 +373,10 @@ def historial_propuestas(comedor_id: int, usuario_solicitante_id: int,
 
 @router.get("/historial/{presupuesto_id}/dias")
 def historial_dias(presupuesto_id: int, usuario_solicitante_id: int, db=Depends(get_db)):
-    """Detalle diario (planificacion_dia) de un menú seleccionado, con recolección y comensales."""
+    """
+    Detalle diario (planificacion_dia) de un menú seleccionado: comensales por tipo,
+    costo, recolección proyectada y nutrición por ración (COM-8 v4).
+    """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("SELECT comedor_id FROM presupuesto_semanal WHERE id = %s;",
@@ -376,7 +388,8 @@ def historial_dias(presupuesto_id: int, usuario_solicitante_id: int, db=Depends(
         cur.execute("""
             SELECT id, dia, dia_nombre, comensales_social, comensales_afiliado,
                    comensales_normal, total_comensales, receta_id, nombre_receta,
-                   costo_racion, costo_total, recoleccion_proyectada
+                   costo_racion, costo_total, recoleccion_proyectada,
+                   energia_kcal_racion, hierro_mg_racion, proteina_g_racion
             FROM planificacion_dia
             WHERE presupuesto_semanal_id = %s
             ORDER BY dia;
@@ -387,4 +400,4 @@ def historial_dias(presupuesto_id: int, usuario_solicitante_id: int, db=Depends(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al obtener el detalle: {e}")
     finally:
-        cur.close()
+        cur.close() 
