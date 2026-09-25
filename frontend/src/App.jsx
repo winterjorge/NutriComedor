@@ -4,8 +4,9 @@
  *           el proveedor de parámetros dinámicos, la capa de autenticación (COM-19),
  *           la selección de comedor post-login (COM-20), el módulo multi-comedor
  *           (COM-21), grupos de usuario (COM-22), gestión de usuarios (COM-23), la
- *           diferenciación de vistas por grupo/rol (COM-25) y la pestaña de clusters
- *           K-means del recetario (COM-5), visible para quien posee el módulo Recetario.
+ *           diferenciación de vistas por grupo/rol (COM-25), la pestaña de clusters
+ *           K-means del recetario (COM-5) y la pestaña de propuestas de menú
+ *           semanal del motor greedy (COM-8), filtradas por los módulos permitidos.
  * Uso: Montado en main.jsx mediante <React.StrictMode>. Envuelve toda la app con
  *      AuthProvider y ParametrosProvider.
  *
@@ -13,16 +14,21 @@
  *  - COM-19/20/21/22/23/25: flujo de login, selección de comedor, pestañas y permisos.
  *  - COM-27: pestañas filtradas por módulos y formularios con cascada de ubicación.
  *  - COM-5: nueva pestaña "Clusters K-Means" ligada al módulo 'recetario'.
+ *  - COM-8: nueva pestaña "Propuestas de Menú" ligada al módulo 'propuestas'
+ *           (sembrado en COM-8 para Directivo y Operativo del comedor).
  */
 import React, { useState, useEffect } from 'react';
 import {
     ChefHat, Calculator, ShoppingCart, Activity, Users, ClipboardList,
-    LogOut, Store, UserCog, Loader2, MapPin, Contact, BarChart3, PieChart
+    LogOut, Store, UserCog, Loader2, MapPin, Contact, BarChart3, PieChart,
+    Sparkles // COM-8: ícono de la pestaña "Propuestas de Menú"
 } from 'lucide-react';
 import { RecipesView } from './components/recipes/RecipesView';
 import { ClusterRecetasView } from './components/recipes/ClusterRecetasView';
 import { BudgetView } from './components/budget/BudgetView';
 import { PlanificacionesView } from './components/budget/PlanificacionesView';
+// COM-8: vista de propuestas de menú semanal (motor greedy search)
+import { GenerarPropuestasView } from './components/budget/GenerarPropuestasView';
 import { CatalogView } from './components/catalog/CatalogView';
 import { POSView } from './components/pos/POSView';
 import { ComedoresView } from './components/comedores/ComedoresView';
@@ -40,12 +46,15 @@ import { api } from './services/api';
 // COM-25: módulos de administración que abren el panel global de usuarios
 const MODULOS_ADMIN = ['municipalidades', 'roles', 'bloqueos', 'vistas'];
 
-// COM-25 + COM-5: catálogo de pestañas con su módulo requerido
+// COM-25 + COM-5 + COM-8: catálogo de pestañas con su módulo requerido
 const TABS_BASE = [
     { id: 'recipes', label: 'Recetario', icon: ChefHat, color: 'emerald', modulo: 'recetario' },
     { id: 'clusters', label: 'Clusters K-Means', icon: PieChart, color: 'emerald', modulo: 'recetario' }, // COM-5
     { id: 'budget', label: 'Presupuesto', icon: Calculator, color: 'emerald', modulo: 'presupuesto' },
     { id: 'planificaciones', label: 'Planificaciones', icon: ClipboardList, color: 'blue', modulo: 'planificaciones' },
+    // COM-8: propuestas del motor greedy; módulo 'propuestas' sembrado para
+    // Directivo (Presidente/Tesorero/Secretario) y Operativo (Cocinero)
+    { id: 'propuestas', label: 'Propuestas de Menú', icon: Sparkles, color: 'emerald', modulo: 'propuestas' },
     { id: 'comedores', label: 'Comedores', icon: Store, color: 'emerald', modulo: 'comedores' },
     { id: 'grupos', label: 'Grupos', icon: UserCog, color: 'blue', modulo: 'grupos' },
     { id: 'reportes', label: 'Reportes', icon: BarChart3, color: 'blue', modulo: 'reportes' },
@@ -256,6 +265,7 @@ function AppContent() {
                                 {activeTab === 'clusters' && <ClusterRecetasView />} {/* COM-5 */}
                                 {activeTab === 'budget' && <BudgetView />}
                                 {activeTab === 'planificaciones' && <PlanificacionesView />}
+                                {activeTab === 'propuestas' && <GenerarPropuestasView />} {/* COM-8 */}
                                 {activeTab === 'comedores' && <ComedoresView />}
                                 {activeTab === 'grupos' && <GruposView />}
                                 {activeTab === 'reportes' && <ReportesView />}

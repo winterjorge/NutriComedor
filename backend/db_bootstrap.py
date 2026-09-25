@@ -43,6 +43,8 @@ from ubicaciones_seed import importar_ubicaciones
 # COM-5: esquema del módulo K-means y seed nutricional de ingredientes
 from esquema_kmeans import aplicar_esquema_kmeans
 from nutricion_seed import seedar_nutricion
+# COM-8: esquema de propuestas de menú semanal (candidatas + parámetros + módulo)
+from esquema_planificaciones import aplicar_esquema_planificaciones
 
 # ==========================================
 # CONSTANTES DE ROLES (COM-21)
@@ -407,6 +409,8 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
             #    distritos, ubigeos). Debe ejecutarse DESPUÉS de que existan
             #    municipalidades, comedores y usuarios.
             aplicar_esquema_ubicaciones(cur)
+            # COM-8: propuestas de menú semanal (tabla candidatas, parámetros y módulo)
+            aplicar_esquema_planificaciones(cur)
             # COM-5: esquema K-means (nutrición por ingrediente, modelos y asignación)
             aplicar_esquema_kmeans(cur)
             nutricion_seed = seedar_nutricion(cur)
