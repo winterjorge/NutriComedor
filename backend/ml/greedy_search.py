@@ -3,24 +3,25 @@ ml/greedy_search.py
 Objetivo: Motor de búsqueda heurística (Greedy Search) del ticket COM-8. Genera 3
           propuestas de menú semanal (NutriMax, EconoMax, BalanceMax) combinando valor
           nutricional y precio, respetando la rotación de clusters K-means (COM-5),
-          la variedad de platos y el presupuesto semanal del comedor.
+          la variedad de platos y el presupuesto del comedor.
+Historial:
+ - COM-8 v1: semana completa de 7 días, top-3 de ingredientes sin filtro.
+ - COM-8 v2: (a) días de cocina seleccionables (dias_semana; por defecto Lun-Vie) porque
+             el comedor puede no abrir feriados o abrir sábados; (b) top de ingredientes
+             restringido a categorías Vegetales y Hortalizas / Frutas / Proteínas (se
+             excluyen especias, cereales, grasas y lácteos); (c) el presupuesto y la
+             recolección se calculan solo sobre los días seleccionados.
 Entradas:
   - Nutrición por receta: columnas hierro_mg / proteina_g / energia_kcal de
     recetas_almuerzo (valores de la receta completa), divididas entre raciones.
-  - Costo real por gramo: insumos -> historial_precios (última fecha disponible,
-    mínimo entre insumos del mismo ingrediente), convertido a gramos con
-    unidades_medida.factor_a_base (masa/volumen) o ingredientes.peso_estimado_g
-    (unidades discretas).
+  - Costo real por gramo: insumos -> historial_precios (última fecha, mínimo entre
+    insumos del mismo ingrediente), convertido a gramos con unidades_medida.
   - Clusters: recetas_clusters del modelo K-means activo (COM-5).
-  - Parámetros: PLANIFICACION_* de parametros_sistema (ponderaciones, rotación,
-    comensales por tipo) y PRECIO_SOCIAL/AFILIADO/NORMAL para la recolección.
-Salida: 3 menús de 7 días persistidos en planificaciones_candidatas (misma sesion_id),
-        con resumen de costo total, calorías promedio/día y top 3 de ingredientes.
-Jitter: el parámetro `seed` desplaza ligeramente las ponderaciones para que el botón
-        "Regenerar" produzca propuestas distintas sin cambiar la lógica del motor.
-Uso: Importado por routers/propuestas_menu.py (Parte 3). Todas las funciones reciben
-     un cursor psycopg2 (RealDictCursor); el caller gestiona la transacción.
-Referencia: ticket COM-8 (solo trazabilidad; los nombres obedecen a la funcionalidad).
+  - Parámetros: PLANIFICACION_* (ponderaciones, rotación, comensales) y
+    PRECIO_SOCIAL/AFILIADO/NORMAL para la recolección proyectada.
+Uso: Importado por routers/propuestas_menu.py. Todas las funciones reciben un cursor
+     psycopg2 (RealDictCursor); el caller gestiona la transacción.
+Referencia: ticket COM-8 / HU-08 (solo trazabilidad; los nombres obedecen a la funcionalidad).
 """
 import json
 import hashlib
@@ -54,6 +55,13 @@ VARIANTES = {
 DIAS_NOMBRE = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
 CLAVES_PESOS = ['hierro', 'proteina', 'energia', 'precio', 'variedad']
 TOLERANCIA_PRESUPUESTO = 1.05   # margen del 5% sobre el presupuesto semanal
+
+# COM-8 v2: el top de ingredientes solo considera estas categorías (nunca especias,
+# cereales, grasas ni lácteos), según requerimiento de la administradora.
+CATEGORIAS_TOP_INGREDIENTE = ('Vegetales y Hortalizas', 'Frutas', 'Proteinas')
+
+# COM-8 v2: días de cocina por defecto (Lun-Vie); el comedor puede ampliar/reducir.
+DIAS_DEFAULT = [1, 2, 3, 4, 5]
 
 
 # ==========================================
@@ -97,7 +105,7 @@ def _cargar_parametros(cur) -> dict:
     """)
     p = {r['clave']: r['valor'] for r in cur.fetchall()}
     ponderaciones = {}
-    for i, (codigo, meta) in enumerate(VARIANTES.items()):
+    for codigo, meta in VARIANTES.items():
         try:
             base = json.loads(p.get(meta['parametro'], '{}'))
         except Exception:
@@ -176,7 +184,7 @@ def _cargar_recetas_cluster(cur):
             'proteina_g': float(r['proteina_g'] or 0) / rac,
             'energia_kcal': float(r['energia_kcal'] or 0) / rac,
             'costo_racion': 0.0,   # se completa en _costear_recetas
-            'ingredientes': [],    # nombres, para el top-3 semanal
+            'ingredientes': [],    # dicts {nombre, categoria} para el top-3
         })
     return recetas, modelo_id
 
@@ -184,7 +192,7 @@ def _cargar_recetas_cluster(cur):
 def _costear_recetas(cur, recetas, precios_gramo: dict):
     """
     Calcula el costo por ración de cada receta sumando sus ingredientes a precios
-    reales por gramo, y recoge los nombres de ingredientes para el top-3.
+    reales por gramo, y recoge nombres+categorías de ingredientes para el top-3.
     """
     ids = [r['receta_id'] for r in recetas]
     if not ids:
@@ -192,10 +200,12 @@ def _costear_recetas(cur, recetas, precios_gramo: dict):
     cur.execute("""
         SELECT ri.receta_id, ri.ingrediente_id, ri.cantidad_requerida,
                um.tipo_magnitud, um.factor_a_base,
-               ing.peso_estimado_g, ing.nombre AS ing_nombre
+               ing.peso_estimado_g, ing.nombre AS ing_nombre,
+               ca.nombre AS categoria
         FROM receta_ingrediente ri
         JOIN unidades_medida um ON um.id = ri.unidad_medida_id
         JOIN ingredientes ing ON ing.id = ri.ingrediente_id
+        LEFT JOIN categorias_alimentos ca ON ca.id = ing.categoria_id
         WHERE ri.receta_id = ANY(%s);
     """, (ids,))
     costo_acum = {}
@@ -208,7 +218,8 @@ def _costear_recetas(cur, recetas, precios_gramo: dict):
         ppg = precios_gramo.get(fila['ingrediente_id'])
         if ppg is not None:
             costo_acum[fila['receta_id']] = costo_acum.get(fila['receta_id'], 0.0) + gramos * ppg
-        nombres_acum.setdefault(fila['receta_id'], []).append(fila['ing_nombre'])
+        nombres_acum.setdefault(fila['receta_id'], []).append(
+            {'nombre': fila['ing_nombre'], 'categoria': fila['categoria'] or ''})
     for r in recetas:
         total = costo_acum.get(r['receta_id'], 0.0)
         r['costo_racion'] = round(total / r['raciones'], 2)
@@ -245,11 +256,12 @@ def _score(rec, pesos, mm, usada: bool) -> float:
 
 
 def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
-                           presupuesto_semanal, fecha_inicio):
+                           presupuesto_semanal, fecha_inicio, dias):
     """
-    Greedy por día: elige la receta de mayor score del cluster objetivo de la
-    rotación (fallback: todas), sin repetir platos mientras haya alternativas y
-    respetando el presupuesto semanal acumulado (con tolerancia del 5%).
+    COM-8 v2: Greedy por DÍA SELECCIONADO: elige la receta de mayor score del cluster
+    objetivo de la rotación (fallback: todas), sin repetir platos mientras haya
+    alternativas y respetando el presupuesto acumulado (con tolerancia del 5%).
+    `dias` es la lista de días de cocina (1=Lunes .. 7=Domingo).
     Retorna (menu, sobrepaso_presupuesto).
     """
     mm = _minmax(todas)
@@ -263,9 +275,9 @@ def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
                        params['com_normal'] * params['precio_normal'])
     limite = presupuesto_semanal * TOLERANCIA_PRESUPUESTO
 
-    for d in range(params['dias']):
-        cluster_obj = params['rotacion'][d % len(params['rotacion'])]
-        candidatas = [r for r in recetas_por_cluster.get(cluster_obj, [])] or list(todas)
+    for d in dias:
+        cluster_obj = params['rotacion'][(d - 1) % len(params['rotacion'])]
+        candidatas = list(recetas_por_cluster.get(cluster_obj, [])) or list(todas)
 
         # Ordena por score descendente; las no usadas primero (variedad)
         candidatas.sort(key=lambda r: (_score(r, pesos, mm, r['receta_id'] in usadas),
@@ -283,17 +295,16 @@ def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
         if elegida is None:
             # Ninguna cabe en el presupuesto restante: la más barata disponible
             elegida = min(candidatas, key=lambda r: r['costo_racion'])
-            acumulado_check = acumulado + elegida['costo_racion'] * total_comensales
-            if acumulado_check > limite:
+            if acumulado + elegida['costo_racion'] * total_comensales > limite:
                 sobrepaso = True
 
         costo_dia = round(elegida['costo_racion'] * total_comensales, 2)
         acumulado += costo_dia
         usadas.add(elegida['receta_id'])
         menu.append({
-            'dia_semana': d + 1,
-            'dia_nombre': DIAS_NOMBRE[d % 7],
-            'fecha': (fecha_inicio + timedelta(days=d)).isoformat(),
+            'dia_semana': d,
+            'dia_nombre': DIAS_NOMBRE[(d - 1) % 7],
+            'fecha': (fecha_inicio + timedelta(days=d - 1)).isoformat(),
             'receta_id': elegida['receta_id'],
             'receta_nombre': elegida['nombre'],
             'cluster_codigo': elegida['cluster_codigo'],
@@ -308,24 +319,21 @@ def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
     return menu, sobrepaso
 
 
-def _top_ingredientes(menu, recetas_por_id, n=3):
-    """Top N ingredientes más usados en la semana (por frecuencia en los 7 platos)."""
+def _top_ingredientes(menu, ingredientes_por_id, n=3):
+    """
+    COM-8 v2: Top N ingredientes más usados en la semana, SOLO de las categorías
+    Vegetales y Hortalizas / Frutas / Proteínas (se excluyen especias y demás).
+    """
     contador = Counter()
+    nombres_vistos = {}
     for dia in menu:
-        for nombre in recetas_por_id[dia['receta_id']]['ingredientes']:
-            contador[nombre.lower()] += 1
-    top = []
-    for nombre_min, _ in contador.most_common(n):
-        original = next((nm for nm in recetas_por_id[menu[0]['receta_id']]['ingredientes']
-                         if nm.lower() == nombre_min), nombre_min)
-        # recupera el nombre original desde cualquier receta que lo contenga
-        for rec in recetas_por_id.values():
-            hit = next((nm for nm in rec['ingredientes'] if nm.lower() == nombre_min), None)
-            if hit:
-                original = hit
-                break
-        top.append(original)
-    return top
+        for ing in ingredientes_por_id.get(dia['receta_id'], []):
+            if ing['categoria'] not in CATEGORIAS_TOP_INGREDIENTE:
+                continue
+            clave = ing['nombre'].lower()
+            contador[clave] += 1
+            nombres_vistos[clave] = ing['nombre']
+    return [nombres_vistos[k] for k, _ in contador.most_common(n)]
 
 
 # ==========================================
@@ -333,15 +341,21 @@ def _top_ingredientes(menu, recetas_por_id, n=3):
 # ==========================================
 def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
                             creado_por_id: int, fecha_referencia: date = None,
-                            seed: int = 0):
+                            seed: int = 0, dias_semana: list = None):
     """
-    Genera y persiste las 3 propuestas de menú semanal (NUTRI, ECONO, BALANCE)
-    agrupadas por un sesion_id. Retorna el payload completo para el frontend.
+    COM-8 v2: Genera y persiste las 3 propuestas de menú semanal (NUTRI, ECONO,
+    BALANCE) para los DÍAS DE COCINA indicados (1=Lunes..7=Domingo; por defecto
+    Lun-Vie). Retorna el payload completo para el frontend.
     """
     if presupuesto_semanal is None or float(presupuesto_semanal) <= 0:
         raise ValueError("El presupuesto semanal debe ser mayor a cero.")
     presupuesto_semanal = float(presupuesto_semanal)
     fecha_referencia = fecha_referencia or date.today()
+
+    # COM-8 v2: validación de días seleccionados
+    dias = sorted(set(int(d) for d in (dias_semana or DIAS_DEFAULT)))
+    if not dias or any(d < 1 or d > 7 for d in dias):
+        raise ValueError("Los días de cocina deben estar entre 1 (Lunes) y 7 (Domingo).")
 
     params = _cargar_parametros(cur)
     recetas, modelo_id = _cargar_recetas_cluster(cur)
@@ -353,10 +367,10 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
     precios_gramo = _precios_por_gramo(cur)
     _costear_recetas(cur, recetas, precios_gramo)
     recetas = [r for r in recetas if r['costo_racion'] > 0]
-    if len(recetas) < params['dias']:
+    if len(recetas) < len(dias):
         raise ValueError(
             f"Solo hay {len(recetas)} recetas con costo y nutrición completos; se "
-            f"requieren al menos {params['dias']} para cubrir la semana.")
+            f"requieren al menos {len(dias)} para cubrir los días seleccionados.")
 
     recetas_por_cluster = {}
     for r in recetas:
@@ -364,7 +378,7 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
     recetas_por_id = {r['receta_id']: r for r in recetas}
 
     fecha_inicio = _lunes_de(fecha_referencia)
-    marca = f"{comedor_id}|{fecha_inicio.isoformat()}|{creado_por_id}|{seed}"
+    marca = f"{comedor_id}|{fecha_inicio.isoformat()}|{creado_por_id}|{seed}|{'-'.join(map(str, dias))}"
     sesion_id = hashlib.sha256(marca.encode()).hexdigest()[:32]
 
     total_comensales = params['com_social'] + params['com_afiliado'] + params['com_normal']
@@ -372,7 +386,8 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
     for idx, (codigo, meta) in enumerate(VARIANTES.items()):
         pesos = _jitter_weights(params['ponderaciones'].get(codigo, {}), seed, idx)
         menu, sobrepaso = _generar_menu_variante(
-            recetas_por_cluster, recetas, pesos, params, presupuesto_semanal, fecha_inicio)
+            recetas_por_cluster, recetas, pesos, params,
+            presupuesto_semanal, fecha_inicio, dias)
 
         costo_total = round(sum(d['costo_total_dia'] for d in menu), 2)
         recoleccion_total = round(sum(d['recoleccion_proyectada'] for d in menu), 2)
@@ -384,8 +399,11 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
             'proteina_promedio_dia': round(sum(d['proteina_g'] for d in menu) / max(len(menu), 1), 2),
             'top_ingredientes': _top_ingredientes(menu, recetas_por_id, n=3),
             'presupuesto_semanal': presupuesto_semanal,
+            'dias_seleccionados': dias,
             'total_comensales_dia': total_comensales,
             'recoleccion_total_semana': recoleccion_total,
+            # COM-8 v2: margen = recolección proyectada (lo que se gana vendiendo)
+            # menos costo de insumos (lo que se gasta comprando)
             'margen_proyectado': round(recoleccion_total - costo_total, 2),
             'dentro_de_presupuesto': not sobrepaso and costo_total <= presupuesto_semanal,
             'n_dias': len(menu),
@@ -415,6 +433,7 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
         'sesion_id': sesion_id,
         'comedor_id': comedor_id,
         'semana_inicio': fecha_inicio.isoformat(),
+        'dias_seleccionados': dias,
         'modelo_kmeans_id': modelo_id,
         'seed': seed,
         'propuestas': propuestas,
@@ -422,7 +441,7 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
 
 
 # ==========================================
-# CONSULTAS DE APOYO PARA EL ROUTER (PARTE 3)
+# CONSULTAS DE APOYO PARA EL ROUTER
 # ==========================================
 def obtener_candidatas_sesion(cur, sesion_id: str):
     """Recupera las 3 propuestas persistidas de una sesión de generación."""
