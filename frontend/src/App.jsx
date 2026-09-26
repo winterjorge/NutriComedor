@@ -10,7 +10,6 @@
  *           todas filtradas por los módulos permitidos del usuario.
  * Uso: Montado en main.jsx mediante <React.StrictMode>. Envuelve toda la app con
  *      AuthProvider y ParametrosProvider.
- *
  * Historial de cambios:
  *  - COM-19/20/21/22/23/25: flujo de login, selección de comedor, pestañas y permisos.
  *  - COM-27: pestañas filtradas por módulos y formularios con cascada de ubicación.
@@ -22,18 +21,26 @@
  *              al módulo 'clusters' (EXCLUSIVO del Admin de Sistemas; la línea anterior
  *              queda comentada por trazabilidad) y se agrega la pestaña "Modelos ML"
  *              (módulo 'modelos_ml', también exclusiva del Admin), montando ModelosMLView.
+ *  - COM-37 (este archivo): se AGREGA la pestaña "Gestión de Ingredientes" (módulo
+ *              'gestion_ingredientes', exclusivo del Admin de Sistemas) montando
+ *              GestionIngredientesView. Solo hay 4 adiciones marcadas COM-37 (ícono,
+ *              import de vista, entrada en TABS_BASE y línea de render); ninguna línea
+ *              existente se elimina ni se comenta.
  */
 import React, { useState, useEffect } from 'react';
 import {
     ChefHat, Calculator, ShoppingCart, Activity, Users, ClipboardList,
     LogOut, Store, UserCog, Loader2, MapPin, Contact, BarChart3, PieChart,
     Sparkles,  // COM-8: ícono de la pestaña "Propuestas de Menú"
-    LineChart  // COM-5 v4: ícono de la pestaña "Modelos ML"
+    LineChart, // COM-5 v4: ícono de la pestaña "Modelos ML"
+    Package    // COM-37: ícono de la pestaña "Gestión de Ingredientes"
 } from 'lucide-react';
 import { RecipesView } from './components/recipes/RecipesView';
 import { ClusterRecetasView } from './components/recipes/ClusterRecetasView';
 // COM-5 v4: panel de gráficos de Machine Learning (exclusivo Admin de Sistemas)
 import { ModelosMLView } from './components/ml/ModelosMLView';
+// COM-37: gestión de ingredientes y precios manuales con vigencia (exclusivo Admin)
+import { GestionIngredientesView } from './components/ingredients/GestionIngredientesView';
 // COM-8 v2: import COMENTADO. La vista de Presupuesto (generación aleatoria de menús)
 // fue reemplazada por GenerarPropuestasView (motor greedy search). Se conserva la
 // línea comentada para trazabilidad; el archivo BudgetView.jsx NO se elimina.
@@ -68,6 +75,8 @@ const TABS_BASE = [
     { id: 'clusters', label: 'Clusters K-Means', icon: PieChart, color: 'emerald', modulo: 'clusters' }, // COM-5 v4: solo Admin
     // COM-5 v4: panel de gráficos de validación de los modelos ML (solo Admin)
     { id: 'modelos_ml', label: 'Modelos ML', icon: LineChart, color: 'blue', modulo: 'modelos_ml' },
+    // COM-37: gestión de ingredientes y precios manuales con vigencia (solo Admin)
+    { id: 'gestion_ingredientes', label: 'Gestión de Ingredientes', icon: Package, color: 'amber', modulo: 'gestion_ingredientes' },
     // COM-8 v2: pestaña RETIRADA (se comenta, no se borra): su esquema de generación
     // aleatoria de menús fue reemplazado por el motor greedy de "Propuestas de Menú".
     // { id: 'budget', label: 'Presupuesto', icon: Calculator, color: 'emerald', modulo: 'presupuesto' },
@@ -293,6 +302,8 @@ function AppContent() {
                                 {activeTab === 'recipes' && <RecipesView />}
                                 {activeTab === 'clusters' && <ClusterRecetasView />} {/* COM-5 / COM-5 v4: módulo 'clusters' */}
                                 {activeTab === 'modelos_ml' && <ModelosMLView />} {/* COM-5 v4: panel ML solo Admin */}
+                                {/* COM-37: gestión de ingredientes y precios manuales (solo Admin) */}
+                                {activeTab === 'gestion_ingredientes' && <GestionIngredientesView />}
                                 {/* COM-8 v2: render COMENTADO de la vista Presupuesto retirada.
                                     Su esquema de generación aleatoria fue reemplazado por el
                                     motor greedy de Propuestas de Menú. */}

@@ -3,6 +3,14 @@ optimizador.py
 Objetivo: Motor de cálculo de costos de recetas con predicción de precios basada en histórico.
 Uso: Importar desde routers de FastAPI para calcular costos dinámicos de recetas en cualquier fecha.
 Nota: Utiliza Random Forest para predicción de precios (consistente con ai_engine.py)
+Historial:
+ - Sprint 2: versión original (mejor insumo por precio del día, predicción RF con R²).
+ - COM-37 (este archivo): fallback de PRECIO MANUAL vigente (precios_manuales.py) cuando
+   no hay insumos emparejados o la predicción RF falla. El detalle marca
+   insumo_comprado="Obtenido de la Base de Datos" y es_manual=True para que el frontend
+   conserve los colores actuales del caso "sin insumos" mostrando el texto requerido.
+   Precedencia: precio real del día > predicción RF > precio manual. Ninguna rama
+   existente se elimina: el intento manual se intercala antes de declarar error.
 """
 import os
 import psycopg2
@@ -10,7 +18,11 @@ import psycopg2.extras
 from datetime import datetime, timedelta
 import math
 
+# COM-37: helper único de precios manuales con vigencia
+from precios_manuales import obtener_precio_manual_por_gramo
+
 DB_URL = os.getenv("DATABASE_URL", "postgresql://nutri_admin:Nutri2026Secure!@db:5432/nutricomedor")
+
 
 def redondear_hacia_arriba_010(valor):
     """Redondea hacia arriba al múltiplo de 0.10 más cercano."""
@@ -18,25 +30,23 @@ def redondear_hacia_arriba_010(valor):
         return 0.0
     return math.ceil(valor * 10) / 10
 
+
 def evaluar_mejor_insumo(opciones_insumos, peso_estimado_g):
     """Selecciona el mejor insumo y calcula el costo redondeado."""
     mejor_opcion = None
     menor_costo_real = float('inf')
-    
     for insumo in opciones_insumos:
         precio_kg = float(insumo['precio_prom'])
         precio_por_gramo = precio_kg / 1000.0
         costo_sin_redondear = precio_por_gramo * peso_estimado_g
         costo_redondeado = redondear_hacia_arriba_010(costo_sin_redondear)
-        
         insumo['costo_calculado'] = costo_redondeado
         insumo['costo_sin_redondear'] = costo_sin_redondear
-        
         if costo_redondeado < menor_costo_real:
             menor_costo_real = costo_redondeado
             mejor_opcion = insumo
-    
     return mejor_opcion
+
 
 def predecir_precio_con_confianza(insumo_id, fecha_objetivo, conn, cur):
     """
@@ -54,19 +64,15 @@ def predecir_precio_con_confianza(insumo_id, fecha_objetivo, conn, cur):
         ORDER BY fecha ASC
     """, (insumo_id, fecha_objetivo - timedelta(days=90), fecha_objetivo))
     registros = cur.fetchall()
-    
     # Necesitamos al menos 5 registros para Random Forest
     if len(registros) < 5:
         return None, 0, False
-    
     try:
         import numpy as np
         from sklearn.ensemble import RandomForestRegressor
         from sklearn.metrics import r2_score
-        
         X = np.array([[i] for i in range(len(registros))])
         y = np.array([float(r['precio_prom']) for r in registros])
-        
         # Random Forest con parámetros ajustados para series de precios
         model = RandomForestRegressor(
             n_estimators=100,
@@ -77,46 +83,65 @@ def predecir_precio_con_confianza(insumo_id, fecha_objetivo, conn, cur):
             n_jobs=-1
         )
         model.fit(X, y)
-        
         y_pred = model.predict(X)
         r2 = r2_score(y, y_pred)
         confianza = max(0, r2 * 100)
-        
         dias_desde_ultimo = len(registros)
         precio_predicho = model.predict([[dias_desde_ultimo]])[0]
         precio_predicho = max(0.01, precio_predicho)
-        
         return round(precio_predicho, 2), round(confianza, 1), True
     except ImportError:
         # Fallback: usar promedio si no hay sklearn
         precio_promedio = sum(float(r['precio_prom']) for r in registros) / len(registros)
         return round(precio_promedio, 2), 50.0, True
 
+
+def _detalle_precio_manual(cur, ingrediente_id, fecha_objetivo, peso_total_g, unidad_display, nombre_ingrediente):
+    """
+    COM-37: intenta costear con el precio manual vigente. Retorna (detalle, costo) o
+    (None, 0.0) si no hay período manual aplicable. El texto de la columna
+    'insumo_comprado' es exactamente "Obtenido de la Base de Datos" (requerimiento).
+    """
+    manual = obtener_precio_manual_por_gramo(cur, ingrediente_id, fecha_objetivo)
+    if not manual:
+        return None, 0.0
+    costo_sin_redondear = manual['precio_por_gramo'] * peso_total_g
+    costo_ingrediente = redondear_hacia_arriba_010(costo_sin_redondear)
+    detalle = {
+        "ingrediente": nombre_ingrediente,
+        "insumo_comprado": "Obtenido de la Base de Datos",
+        "cantidad_usada": unidad_display,
+        "costo_parcial": round(costo_ingrediente, 2),
+        "peso_usado_g": peso_total_g,
+        "es_prediccion": False,
+        "es_manual": True,
+        "detalle_manual": manual['detalle'],
+    }
+    return detalle, costo_ingrediente
+
+
 def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
     """
     Calcula el costo real de una receta considerando:
     1. La unidad de medida de cada ingrediente
     2. El número de raciones que produce la receta
+    COM-37: si no hay insumo con precio ni predicción RF posible, se usa el precio
+    manual vigente (marca es_manual / 'Obtenido de la Base de Datos').
     Retorna el costo POR RACIÓN
     """
     conn = None
     cur = None
-    
     try:
         conn = psycopg2.connect(DB_URL)
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        
         # Obtener número de raciones de la receta
         cur.execute("""
             SELECT raciones FROM recetas_almuerzo WHERE id = %s
         """, (receta_id,))
         receta_info = cur.fetchone()
-        
         if not receta_info:
             return {"error": "La receta no existe"}
-        
         raciones_receta = receta_info['raciones'] if receta_info['raciones'] and receta_info['raciones'] > 0 else 1
-        
         # Extraer ingredientes con la UNIDAD DE MEDIDA DE LA RECETA
         cur.execute("""
             SELECT 
@@ -137,24 +162,19 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
             WHERE ri.receta_id = %s
             ORDER BY ri.id;
         """, (receta_id,))
-        
         ingredientes_receta = cur.fetchall()
-        
         if not ingredientes_receta:
             return {"error": "La receta no tiene ingredientes asignados"}
-        
         costo_total_receta = 0.0
         detalle_costos = []
         fecha_objetivo = datetime.strptime(fecha_evaluacion, "%Y-%m-%d").date()
-        
         for req in ingredientes_receta:
             categoria = req['categoria_nombre'] or ''
             unidad_abrev = (req['receta_unidad_abrev'] or '').lower()
-            unidad_nombre = req['receta_unidad_nombre'] or ''
+            unidad_nombre = (req['receta_unidad_nombre'] or '')
             cantidad_requerida = float(req['cantidad_requerida'])
             factor_receta = float(req['receta_factor_a_base'])
             peso_estimado_base = float(req['peso_estimado_g'])
-            
             # Determinar peso total en gramos según la unidad de la receta
             if unidad_abrev in ['und', 'unidad', 'u']:
                 peso_total_g = cantidad_requerida * peso_estimado_base
@@ -198,7 +218,6 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
             else:
                 peso_total_g = cantidad_requerida * factor_receta
                 unidad_display = f"{cantidad_requerida} {unidad_nombre.lower()}"
-            
             # Buscar insumos disponibles para esta fecha
             cur.execute("""
                 SELECT 
@@ -213,9 +232,7 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
                 JOIN unidades_medida um ON ins.unidad_medida_id = um.id
                 WHERE ins.ingrediente_id = %s
             """, (fecha_evaluacion, req['ingrediente_id']))
-            
             opciones = cur.fetchall()
-            
             if not opciones:
                 # No hay insumos registrados para este ingrediente
                 cur.execute("""
@@ -226,18 +243,15 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
                     LIMIT 1
                 """, (req['ingrediente_id'],))
                 insumo_base = cur.fetchone()
-                
                 if insumo_base:
                     # Intentar predecir SIEMPRE, no solo para fechas futuras
                     precio_predicho, confianza, es_prediccion = predecir_precio_con_confianza(
                         insumo_base['id'], fecha_objetivo, conn, cur
                     )
-                    
                     if precio_predicho:
                         costo_sin_redondear = (precio_predicho / 1000.0) * peso_total_g
                         costo_ingrediente = redondear_hacia_arriba_010(costo_sin_redondear)
                         costo_total_receta += costo_ingrediente
-                        
                         detalle_costos.append({
                             "ingrediente": req['ingrediente_nombre'],
                             "insumo_comprado": f"{insumo_base['nombre']} (PREDICHO {confianza}%)",
@@ -248,8 +262,16 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
                             "confianza_prediccion": f"{confianza}%"
                         })
                         continue
-                
-                # Si no se pudo predecir
+                # COM-37: fallback de precio manual antes de declarar "Sin insumos"
+                detalle_manual, costo_manual = _detalle_precio_manual(
+                    cur, req['ingrediente_id'], fecha_objetivo, peso_total_g,
+                    unidad_display, req['ingrediente_nombre']
+                )
+                if detalle_manual:
+                    costo_total_receta += costo_manual
+                    detalle_costos.append(detalle_manual)
+                    continue
+                # Si no se pudo predecir ni hay manual vigente (comportamiento original)
                 detalle_costos.append({
                     "ingrediente": req['ingrediente_nombre'],
                     "insumo_comprado": "Sin insumo disponible",
@@ -260,22 +282,18 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
                     "es_prediccion": False
                 })
                 continue
-            
             # Hay insumos, verificar si tienen precio
             opciones_con_precio = [o for o in opciones if o['precio_prom'] is not None]
-            
             if not opciones_con_precio:
                 # No hay precios para esta fecha, intentar predecir
                 primera_opcion = opciones[0]
                 precio_predicho, confianza, es_prediccion = predecir_precio_con_confianza(
                     primera_opcion['insumo_id'], fecha_objetivo, conn, cur
                 )
-                
                 if precio_predicho:
                     costo_sin_redondear = (precio_predicho / 1000.0) * peso_total_g
                     costo_ingrediente = redondear_hacia_arriba_010(costo_sin_redondear)
                     costo_total_receta += costo_ingrediente
-                    
                     detalle_costos.append({
                         "ingrediente": req['ingrediente_nombre'],
                         "insumo_comprado": f"{primera_opcion['insumo_nombre']} (PREDICHO {confianza}%)",
@@ -286,8 +304,16 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
                         "confianza_prediccion": f"{confianza}%"
                     })
                     continue
-                
-                # Si no se pudo predecir
+                # COM-37: fallback de precio manual antes de declarar "Sin precios"
+                detalle_manual, costo_manual = _detalle_precio_manual(
+                    cur, req['ingrediente_id'], fecha_objetivo, peso_total_g,
+                    unidad_display, req['ingrediente_nombre']
+                )
+                if detalle_manual:
+                    costo_total_receta += costo_manual
+                    detalle_costos.append(detalle_manual)
+                    continue
+                # Si no se pudo predecir ni hay manual vigente (comportamiento original)
                 detalle_costos.append({
                     "ingrediente": req['ingrediente_nombre'],
                     "insumo_comprado": "Sin precios disponibles",
@@ -298,12 +324,10 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
                     "es_prediccion": False
                 })
                 continue
-            
             # Hay precios disponibles, usar el mejor
             mejor_insumo = evaluar_mejor_insumo(opciones_con_precio, peso_total_g)
             costo_ingrediente = mejor_insumo.get('costo_calculado', 0.0)
             costo_total_receta += costo_ingrediente
-            
             detalle_costos.append({
                 "ingrediente": req['ingrediente_nombre'],
                 "insumo_comprado": mejor_insumo['insumo_nombre'],
@@ -312,10 +336,8 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
                 "peso_usado_g": peso_total_g,
                 "es_prediccion": False
             })
-        
         # CALCULAR COSTO POR RACIÓN (dividir costo total entre número de raciones)
         costo_por_racion = costo_total_receta / raciones_receta
-        
         return {
             "receta_id": receta_id,
             "fecha_calculo": fecha_evaluacion,
@@ -326,9 +348,10 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
             "total_ingredientes": len(detalle_costos),
             "ingredientes_con_precio": sum(1 for d in detalle_costos if d['costo_parcial'] > 0),
             "ingredientes_sin_precio": sum(1 for d in detalle_costos if d['costo_parcial'] == 0),
-            "ingredientes_predichos": sum(1 for d in detalle_costos if d.get('es_prediccion', False))
+            "ingredientes_predichos": sum(1 for d in detalle_costos if d.get('es_prediccion', False)),
+            # COM-37: cuántos ingredientes se costearon con precio manual de la BD
+            "ingredientes_manuales": sum(1 for d in detalle_costos if d.get('es_manual', False))
         }
-        
     except Exception as e:
         print(f"Error en el motor de optimización: {e}")
         import traceback
