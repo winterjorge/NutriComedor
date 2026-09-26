@@ -3,23 +3,25 @@
  * Objetivo: Panel del administrador de sistemas: usuarios y bloqueos (creación con
  *           formulario dinámico por perfil y edición con precarga de membresías según
  *           la corrección COM-26), municipalidades, grupos y privilegios, política de
- *           contraseñas y editor de permisos por vistas. Las sub-pestañas visibles se
- *           filtran según los módulos permitidos del usuario en sesión.
+ *           contraseñas, editor de permisos por vistas y, desde COM-39, gestión de
+ *           directivos por comedor. Las sub-pestañas visibles se filtran según los
+ *           módulos permitidos del usuario en sesión.
  * Uso: Renderizado por App.jsx en la pestaña "Usuarios" cuando el usuario posee al
  *      menos uno de los módulos de administración; recibe `modulosPermitidos`.
  * Historial:
  *  - COM-23/COM-25/COM-26: versión original (sub-pestañas, payloads con
  *    usuario_solicitante_id, estado_activo y claves de política).
- *  - COM-38 (este archivo): se AGREGA el botón "Resetear contraseña" por fila de
- *    usuario y el montaje de ModalResetClave (reset aleatorio o clave específica,
- *    exclusivo Admin de Sistemas). Se RESTAURAN verbatim los handlers y payloads
- *    originales que una reconstrucción previa había alterado (causa del 400
- *    "Debe indicar el usuario solicitante"). Nada existente se elimina.
+ *  - COM-38: botón "Resetear contraseña" por fila de usuario y montaje de ModalResetClave.
+ *  - COM-39 (este archivo): se AGREGA la sub-pestaña "Directivos de Comedor"
+ *    (módulo 'comedores') que monta GestionDirectivosComedorView. Nada existente se
+ *    elimina: solo adiciones marcadas COM-39 (import del icono Store, import de la
+ *    vista, entrada en SUBTABS y bloque de render).
  */
 import React, { useState, useEffect, useCallback } from 'react';
 import {
     Users, Building2, ShieldCheck, KeyRound, Plus, Lock, Unlock,
-    RefreshCw, Loader2, AlertCircle, Edit3, Eye
+    RefreshCw, Loader2, AlertCircle, Edit3, Eye,
+    Store // COM-39: ícono de la sub-pestaña "Directivos de Comedor"
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
@@ -32,10 +34,14 @@ import { ModalGrupoPrivilegios } from './ModalGrupoPrivilegios';
 import { VistaPermisosView } from './VistaPermisosView';
 // COM-38: modal de reseteo/cambio de contraseña por Admin de Sistemas
 import { ModalResetClave } from './ModalResetClave';
+// COM-39: panel de gestión de directivos por comedor
+import { GestionDirectivosComedorView } from './GestionDirectivosComedorView';
 
 // Sub-pestañas con su módulo requerido (matriz de permisos por rol)
 const SUBTABS = [
     { id: 'usuarios', label: 'Usuarios y Bloqueos', icon: Users, modulo: 'bloqueos' },
+    // COM-39: gestión de directivos por comedor (exclusiva del Admin de Sistemas)
+    { id: 'directivos', label: 'Directivos de Comedor', icon: Store, modulo: 'comedores' },
     { id: 'municipalidades', label: 'Municipalidades', icon: Building2, modulo: 'municipalidades' },
     { id: 'grupos', label: 'Grupos y Privilegios', icon: ShieldCheck, modulo: 'roles' },
     { id: 'politica', label: 'Política de Claves', icon: KeyRound, modulo: 'bloqueos' },
@@ -223,7 +229,7 @@ export const GestionUsuariosSistemaView = ({ modulosPermitidos = [] }) => {
                     <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
                         <ShieldCheck className="text-emerald-600" size={22} /> Gestión de Usuarios y Configuración
                     </h2>
-                    <p className="text-sm text-slate-500">Administración global: usuarios, municipalidades, grupos y política de claves.</p>
+                    <p className="text-sm text-slate-500">Administración global: usuarios, directivos, municipalidades, grupos y política de claves.</p>
                 </div>
             </div>
 
@@ -353,6 +359,11 @@ export const GestionUsuariosSistemaView = ({ modulosPermitidos = [] }) => {
                         </table>
                     </div>
                 </div>
+            )}
+
+            {/* ============ SUB-PESTAÑA: DIRECTIVOS DE COMEDOR (COM-39) ============ */}
+            {subtab === 'directivos' && (
+                <GestionDirectivosComedorView />
             )}
 
             {/* ============ SUB-PESTAÑA: MUNICIPALIDADES ============ */}
