@@ -2,19 +2,17 @@
 -- 03_seed.sql (antes seed.sql) - Poblado de Datos Maestros - NutriComedor OSB
 -- =========================================================================
 -- Historial:
---  - Sprint 1: categorías, unidades, ingredientes, insumos, precios seed,
---    presupuesto, usuario, comensales y padrón inicial.
---  - COM-36 v2 (este archivo):
---      1) Se CORRIGE el INSERT de presupuesto_semanal: init.sql elimina las columnas
---         comensales_diarios y presupuesto_por_racion (la versión rota queda comentada).
---      2) Se ELIMINA el seed de historial_precios (queda comentado): los precios reales
---         los trae el scraper SISAP; no se quieren precios irreales en la BD.
---      3) Se ELIMINA el seed de insumos (queda comentado): el catálogo de insumos lo
---         genera/actualiza el scraper al correr. Si tu scraper esperara el catálogo
---         pre-existente, descomenta el bloque 4.
---      4) Se corrigen subconsultas corruptas ('ingre dientes', 'SELE CT', ...) y se
---         vuelve idempotente todo lo maesto con ON CONFLICT DO NOTHING.
---      5) El padrón inicial usa subconsultas por documento (no ids hardcodeados).
+--  - Sprint 1: categorías, unidades, ingredientes, insumos, precios, presupuesto,
+--    usuario piloto, comensales y padrón inicial.
+--  - COM-36 v2: se comentan los bloques de insumos e historial_precios (los trae el
+--    scraper) y se corrige el INSERT de presupuesto_semanal (columnas eliminadas).
+--  - COM-40: el usuario piloto se creaba con rol explícito de comedor.
+--  - COM-40 v2 (este archivo): la carga inicial YA NO crea usuarios de comedor.
+--    El INSERT de usuarios queda COMENTADO: los únicos usuarios de arranque son los
+--    dos administradores de sistema canónicos (DNI 00000000 y 99999999), que crea el
+--    db_bootstrap; todos los demás usuarios se crean manualmente desde la interfaz
+--    (flujos COM-26 y COM-39). Los comensales y el padrón inicial se conservan
+--    (son datos de negocio, no cuentas de acceso).
 -- =========================================================================
 
 -- ------------------------------------------
@@ -127,39 +125,42 @@ ON CONFLICT (nombre) DO NOTHING;
 -- ------------------------------------------
 -- 4) INSUMOS: BLOQUE COMENTADO (COM-36 v2).
 --    El catálogo de insumos lo crea/actualiza el scraper SISAP al correr.
---    Si tu scraper esperara el catálogo pre-existente, descomenta este bloque.
--- INSERT INTO insumos (ingrediente_id, nombre, unidad_medida_id) VALUES
--- ((SELECT id FROM ingredientes WHERE nombre = 'Pollo'), 'Pollo (pierna)', 1),
--- ((SELECT id FROM ingredientes WHERE nombre = 'Arroz'), 'Arroz corriente', 1),
--- ... (catálogo completo de insumos SISAP) ...
--- ON CONFLICT (nombre) DO NOTHING;
+--    (El bloque original con ~70 insumos quedó comentado en COM-36 v2 para no
+--     sembrar datos que el scraper trae reales; se conserva en el historial git.)
+-- ------------------------------------------
 
 -- ------------------------------------------
 -- 5) HISTORIAL DE PRECIOS: BLOQUE COMENTADO (COM-36 v2).
---    NO se siembran precios ficticios: los precios reales los trae el scraper SISAP
---    (historial_precios se llena con la corrida diaria del cron).
--- INSERT INTO historial_precios (insumo_id, fecha, precio_prom) VALUES
--- (1, CURRENT_DATE, 8.50), (2, CURRENT_DATE, 6.00), ... ;
+--    NO se siembran precios ficticios: los precios reales los trae el scraper.
+-- ------------------------------------------
 
 -- ------------------------------------------
 -- 6) Presupuesto semanal inicial
--- COM-36 v2 (trazabilidad): versión ROTA comentada (usaba columnas que init.sql elimina):
+-- COM-36 v2 (trazabilidad): versión ROTA comentada (columnas eliminadas por init.sql):
 -- INSERT INTO presupuesto_semanal (fondo_total, dias_operativos, comensales_diarios, presupuesto_por_racion) VALUES
 -- (500.00, 5, 100, 1.00);
--- Versión compatible con el esquema actual (HU-02 + COM-8):
+-- ------------------------------------------
 INSERT INTO presupuesto_semanal (fondo_total, dias_operativos, fecha_referencia)
 VALUES (500.00, 5, CURRENT_DATE);
 
 -- ------------------------------------------
--- 7) Usuario administrador inicial
---    (clave_hash legacy: db_bootstrap COM-19 lo migra a PBKDF2 con clave provisoria)
+-- 7) USUARIOS: BLOQUE COMENTADO (COM-40 v2).
+--    La carga inicial YA NO crea usuarios de comedor (antes: usuario piloto DNI
+--    43604221 como 'Administrador'/'Administradora'). Los únicos usuarios de arranque
+--    son los administradores de sistema canónicos DNI 00000000 y 99999999, creados por
+--    db_bootstrap con clave provisoria Admin2026. Todos los demás usuarios se crean
+--    manualmente desde la interfaz (COM-26 / COM-39).
+-- COM-40 (trazabilidad): versión con rol explícito de comedor, comentada:
+-- INSERT INTO usuarios (documento_identidad, nombres, apellido_paterno, apellido_materno, fecha_nacimiento, clave_hash, rol) VALUES
+-- ('43604221', 'Jorge luis', 'Winter', 'Arboleda', '1986-04-23', 'hash_123456', 'Administrador')
+-- ON CONFLICT (documento_identidad) DO NOTHING;
+-- Sprint 1 (trazabilidad): versión original sin rol, comentada:
+-- INSERT INTO usuarios (documento_identidad, nombres, apellido_paterno, apellido_materno, fecha_nacimiento, clave_hash) VALUES
+-- ('43604221', 'Jorge luis', 'Winter', 'Arboleda', '1986-04-23', 'hash_123456');
 -- ------------------------------------------
-INSERT INTO usuarios (documento_identidad, nombres, apellido_paterno, apellido_materno, fecha_nacimiento, clave_hash) VALUES
-('43604221', 'Jorge luis', 'Winter', 'Arboleda', '1986-04-23', 'hash_123456')
-ON CONFLICT (documento_identidad) DO NOTHING;
 
 -- ------------------------------------------
--- 8) Comensales iniciales del padrón
+-- 8) Comensales iniciales del padrón (datos de negocio, no cuentas de acceso)
 -- ------------------------------------------
 INSERT INTO comensales (tipo_documento, documento_identidad, nombres, tipo_comensal) VALUES
 ('DNI', '10203040', 'Maria lopez', 'Afiliado'),
