@@ -20,12 +20,13 @@
  *           buscarMunicipalidades y buscarComedores para el autocompletado.
  *   COM-5:  bloque KMEANS (clustering nutricional del recetario).
  *   COM-8:  bloque PROPUESTAS (motor greedy de menú semanal).
- *   COM-5 v4 / COM-8 v7 (este archivo): los métodos del bloque KMEANS ahora reciben
- *           `usuarioSolicitanteId` (el router v4 valida Admin de Sistemas) y se agregan
- *           dos métodos nuevos para configurar proteínas (R1/R2) vía GET/PUT
- *           /kmeans/proteinas. Además se añade el bloque MODELOS_ML con los endpoints
- *           del panel de gráficos exclusivo del Admin de Sistemas (estado, random-forest,
- *           kmeans-scatter, greedy).
+ *   COM-5 v4 / COM-8 v7: los métodos del bloque KMEANS reciben `usuarioSolicitanteId`
+ *           (el router v4 valida Admin de Sistemas) y se agregan getProteinasKmeans /
+ *           updateProteinasKmeans (R1/R2). Se añade el bloque MODELOS_ML con los
+ *           endpoints del panel de gráficos exclusivo del Admin de Sistemas.
+ *   COM-38 (este archivo): se agrega `resetearClaveUsuario` (POST /usuarios/{id}/reset-clave)
+ *           para el reseteo/cambio de contraseña de cualquier usuario por el Admin de
+ *           Sistemas (modo random o clave específica). Ningún método existente se modifica.
  */
 
 const API_BASE = '/api/v1';
@@ -355,6 +356,18 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al desbloquear por intentos'));
         return response.json();
     },
+    // COM-38: reseteo/cambio de contraseña de CUALQUIER usuario por Admin de Sistemas.
+    // data: { usuario_solicitante_id, modo: 'random'|'especifica', clave_nueva?, forzar_cambio }
+    // En modo 'random' la respuesta incluye clave_temporal (visible una sola vez).
+    resetearClaveUsuario: async (usuarioId, data) => {
+        const response = await fetch(`${API_BASE}/usuarios/${usuarioId}/reset-clave`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al resetear la clave'));
+        return response.json();
+    },
     getPoliticaClave: async () => {
         const response = await fetch(`${API_BASE}/usuarios/politica-clave`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener la política de claves'));
@@ -441,8 +454,6 @@ export const api = {
     // ==========================================
     // CLUSTERING K-MEANS DEL RECETARIO (COM-5 / COM-5 v4)
     // ==========================================
-    // Entrena el modelo k=4 sobre recetas aptas (reglas R1-R3) y lo deja activo.
-    // COM-5 v4: exclusivo Admin de Sistemas; el backend valida usuario_solicitante_id.
     entrenarKmeans: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/kmeans/entrenar?usuario_solicitante_id=${usuarioSolicitanteId}`, {
             method: 'POST',
@@ -450,16 +461,12 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al entrenar el modelo'));
         return response.json();
     },
-    // Resumen del modelo activo; retorna null si aún no existe modelo (404).
-    // COM-5 v4: ahora requiere usuarioSolicitanteId (el router valida Admin).
     getResumenKmeans: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/kmeans/resumen?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (response.status === 404) return null;
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el resumen del modelo'));
         return response.json();
     },
-    // Recetas asignadas al modelo activo (opcionalmente por cluster 1-4).
-    // COM-5 v4: ahora requiere usuarioSolicitanteId (el router valida Admin).
     getClustersKmeans: async (usuarioSolicitanteId, clusterCodigo) => {
         const params = new URLSearchParams({ usuario_solicitante_id: String(usuarioSolicitanteId) });
         if (clusterCodigo) params.append('cluster_codigo', String(clusterCodigo));
@@ -467,27 +474,22 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener recetas del cluster'));
         return response.json();
     },
-    // Auditoría de reglas R1-R3: recetas aptas y excluidas con su motivo.
-    // COM-5 v4: ahora requiere usuarioSolicitanteId (el router valida Admin).
     getCandidatasKmeans: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/kmeans/candidatas?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener recetas candidatas'));
         return response.json();
     },
-    // COM-5 v4: diagnóstico defensivo del esquema (auditoría de tablas/columnas detectadas).
     getDiagnosticoKmeans: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/kmeans/diagnostico?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el diagnóstico'));
         return response.json();
     },
-    // COM-5 v4: LISTAS CONFIGURABLES DE PROTEÍNAS (R1 / R2)
-    // Lee las listas vigentes de proteínas permitidas e ingredientes vetados.
+    // COM-5 v4: listas configurables de proteínas permitidas (R1) e ingredientes vetados (R2)
     getProteinasKmeans: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/kmeans/proteinas?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener la configuración de proteínas'));
         return response.json();
     },
-    // COM-5 v4: actualiza las listas configurables (aplican en el próximo entrenamiento).
     updateProteinasKmeans: async (data) => {
         const response = await fetch(`${API_BASE}/kmeans/proteinas`, {
             method: 'PUT',
@@ -502,25 +504,21 @@ export const api = {
     // PANEL DE GRÁFICOS DE MACHINE LEARNING (COM-5 v4 / COM-8 v7)
     // Exclusivo del Administrador de Sistemas (módulo 'modelos_ml')
     // ==========================================
-    // Estado/disponibilidad de los 3 modelos (sin entrenar nada)
     getEstadoModelosML: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/modelos-ml/estado?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al consultar el estado de los modelos'));
         return response.json();
     },
-    // Dispersión REAL vs PREDICHO de demanda (Random Forest) + métricas + importancias
     getScatterRandomForest: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/modelos-ml/random-forest?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar el gráfico de Random Forest'));
         return response.json();
     },
-    // Dispersión PCA-2D de recetas por cluster + centroides + cargas de variables
     getScatterKmeans: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/modelos-ml/kmeans-scatter?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar el gráfico de K-means'));
         return response.json();
     },
-    // Serie diaria y totales por variante de la última sesión del Greedy Search
     getGreedyML: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/modelos-ml/greedy?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar el gráfico del Greedy Search'));
@@ -530,7 +528,6 @@ export const api = {
     // ==========================================
     // PROPUESTAS DE MENÚ SEMANAL (COM-8)
     // ==========================================
-    // Genera las 3 propuestas (NutriMax / EconoMax / BalanceMax) con el motor greedy
     generarPropuestas: async (data) => {
         const response = await fetch(`${API_BASE}/propuestas/generar`, {
             method: 'POST',
@@ -540,13 +537,11 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar las propuestas'));
         return response.json();
     },
-    // Recupera las 3 tarjetas de una sesión de generación previa
     getSesionPropuestas: async (sesionId, usuarioId) => {
         const response = await fetch(`${API_BASE}/propuestas/sesion/${sesionId}?usuario_solicitante_id=${usuarioId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener la sesión de propuestas'));
         return response.json();
     },
-    // Fija el menú definitivo (solo Directivo; el backend lo valida)
     seleccionarPropuesta: async (candidataId, data) => {
         const response = await fetch(`${API_BASE}/propuestas/${candidataId}/seleccionar`, {
             method: 'POST',
@@ -556,13 +551,11 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al seleccionar la propuesta'));
         return response.json();
     },
-    // Historial de menús semanales definitivos del comedor
     getHistorialPropuestas: async (comedorId, usuarioId) => {
         const response = await fetch(`${API_BASE}/propuestas/historial?comedor_id=${comedorId}&usuario_solicitante_id=${usuarioId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el historial de propuestas'));
         return response.json();
     },
-    // Detalle diario (planificacion_dia) de un menú seleccionado
     getHistorialDias: async (presupuestoId, usuarioId) => {
         const response = await fetch(`${API_BASE}/propuestas/historial/${presupuestoId}/dias?usuario_solicitante_id=${usuarioId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el detalle del menú'));

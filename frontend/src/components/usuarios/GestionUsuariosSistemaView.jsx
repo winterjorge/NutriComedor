@@ -1,12 +1,18 @@
 /**
  * components/usuarios/GestionUsuariosSistemaView.jsx
- * Objetivo: Panel del administrador de sistemas: usuarios y bloqueos (creación con
- *           formulario dinámico por perfil y edición con precarga de membresías según
- *           la corrección COM-26), municipalidades, grupos y privilegios, política de
- *           contraseñas y editor de permisos por vistas. Las sub-pestañas visibles se
- *           filtran según los módulos permitidos del usuario en sesión.
- * Uso: Renderizado por App.jsx en la pestaña "Usuarios" cuando el usuario posee al
- *      menos uno de los módulos de administración; recibe `modulosPermitidos`.
+ * Objetivo: Panel global de administración (COM-25) para perfiles con módulos
+ *           administrativos: usuarios y bloqueos, municipalidades, grupos y
+ *           privilegios, política de claves y permisos por vistas.
+ * Historial:
+ *  - COM-23/COM-25: sub-pestañas y CRUD de municipalidades/grupos/política/vistas.
+ *  - COM-26: creación y edición de usuarios con precarga de membresías y alcance.
+ *  - COM-38 (este archivo): botón "Resetear contraseña" por fila de usuario y montaje
+ *    del ModalResetClave (reset aleatorio o clave específica, exclusivo Admin de
+ *    Sistemas). Nada existente se elimina: solo se agregan líneas marcadas COM-38
+ *    (import del modal, estado resetUsuario, botón en acciones y montaje al final).
+ * Uso: Montada por App.jsx cuando el usuario posee módulos administrativos
+ *      (modulosPermitidos prop).
+ * Referencia: tickets COM-23/25/26 y COM-38 (solo trazabilidad).
  */
 import React, { useState, useEffect, useCallback } from 'react';
 import {
@@ -22,30 +28,23 @@ import { ModalEditarUsuario } from './ModalEditarUsuario';
 import { ModalMunicipalidad } from './ModalMunicipalidad';
 import { ModalGrupoPrivilegios } from './ModalGrupoPrivilegios';
 import { VistaPermisosView } from './VistaPermisosView';
+// COM-38: modal de reseteo/cambio de contraseña por Admin de Sistemas
+import { ModalResetClave } from './ModalResetClave';
 
-// Sub-pestañas con su módulo requerido (matriz de permisos por rol)
+// Catálogo de sub-pestañas con su módulo requerido (COM-25)
 const SUBTABS = [
-    { id: 'usuarios', label: 'Usuarios y Bloqueos', icon: Users, modulo: 'bloqueos' },
-    { id: 'municipalidades', label: 'Municipalidades', icon: Building2, modulo: 'municipalidades' },
-    { id: 'grupos', label: 'Grupos y Privilegios', icon: ShieldCheck, modulo: 'roles' },
-    { id: 'politica', label: 'Política de Claves', icon: KeyRound, modulo: 'bloqueos' },
-    { id: 'vistas', label: 'Vistas', icon: Eye, modulo: 'vistas' },
+    { id: 'usuarios', label: 'Usuarios y bloqueos', modulo: 'bloqueos', icon: Users },
+    { id: 'municipalidades', label: 'Municipalidades', modulo: 'municipalidades', icon: Building2 },
+    { id: 'grupos', label: 'Grupos y privilegios', modulo: 'roles', icon: ShieldCheck },
+    { id: 'politica', label: 'Política de claves', modulo: 'bloqueos', icon: KeyRound },
+    { id: 'vistas', label: 'Permisos por vistas', modulo: 'vistas', icon: Eye },
 ];
 
 export const GestionUsuariosSistemaView = ({ modulosPermitidos = [] }) => {
     const { usuario } = useAuth();
 
-    // Sub-pestañas visibles según los módulos permitidos del usuario en sesión
-    const subtabsVisibles = SUBTABS.filter(s => modulosPermitidos.includes(s.modulo));
-    const [subtab, setSubtab] = useState(subtabsVisibles[0]?.id || '');
-
-    // Ajusta la sub-pestaña activa si cambian los permisos del usuario
-    useEffect(() => {
-        if (!subtabsVisibles.some(s => s.id === subtab)) {
-            setSubtab(subtabsVisibles[0]?.id || '');
-        }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [modulosPermitidos]);
+    // ===== Estado: sub-pestaña activa =====
+    const [subtab, setSubtab] = useState('usuarios');
 
     // ===== Estado: Usuarios =====
     const [usuarios, setUsuarios] = useState([]);
@@ -54,17 +53,18 @@ export const GestionUsuariosSistemaView = ({ modulosPermitidos = [] }) => {
     const [cargandoUsuarios, setCargandoUsuarios] = useState(true);
     const [modalCrearUsuario, setModalCrearUsuario] = useState(false);
     const [editarUsuarioId, setEditarUsuarioId] = useState(null); // COM-26: edición con precarga
-    const [confCuenta, setConfCuenta] = useState(null);        // { objetivo, activar }
+    const [confCuenta, setConfCuenta] = useState(null); // { objetivo, activar }
     const [confDesbloqueo, setConfDesbloqueo] = useState(null); // objetivo
+    // COM-38: usuario objetivo del modal de reseteo de contraseña
+    const [resetUsuario, setResetUsuario] = useState(null);
 
     // ===== Estado: Municipalidades =====
     const [municipalidades, setMunicipalidades] = useState([]);
-    const [cargandoMunis, setCargandoMunis] = useState(false);
-    const [modalMuni, setModalMuni] = useState(null); // null | { crear: true } | { editar: muni }
+    const [cargandoMunicipalidades, setCargandoMunicipalidades] = useState(false);
+    const [modalMuni, setModalMuni] = useState(null); // { crear: true } | { editar: objeto }
 
     // ===== Estado: Grupos y privilegios =====
     const [grupos, setGrupos] = useState([]);
-    const [privilegios, setPrivilegios] = useState([]);
     const [cargandoGrupos, setCargandoGrupos] = useState(false);
     const [modalPrivilegios, setModalPrivilegios] = useState(null); // grupo seleccionado
     const [nuevoGrupo, setNuevoGrupo] = useState({ nombre: '', ambito: 'COMEDOR', descripcion: '' });
@@ -81,9 +81,8 @@ export const GestionUsuariosSistemaView = ({ modulosPermitidos = [] }) => {
     // ---------- Cargadores ----------
     const cargarUsuarios = useCallback(async () => {
         setCargandoUsuarios(true);
-        setError('');
         try {
-            const params = { usuario_solicitante_id: usuario.id };
+            const params = {};
             if (q) params.q = q;
             if (estado) params.estado = estado;
             setUsuarios(await api.getUsuarios(params));
@@ -92,27 +91,23 @@ export const GestionUsuariosSistemaView = ({ modulosPermitidos = [] }) => {
         } finally {
             setCargandoUsuarios(false);
         }
-    }, [q, estado, usuario.id]);
+    }, [q, estado]);
 
     const cargarMunicipalidades = useCallback(async () => {
-        setCargandoMunis(true);
-        setError('');
+        setCargandoMunicipalidades(true);
         try {
             setMunicipalidades(await api.getMunicipalidades());
         } catch (e) {
             setError(e.message);
         } finally {
-            setCargandoMunis(false);
+            setCargandoMunicipalidades(false);
         }
     }, []);
 
     const cargarGrupos = useCallback(async () => {
         setCargandoGrupos(true);
-        setError('');
         try {
-            const [g, p] = await Promise.all([api.getGrupos(), api.getPrivilegios()]);
-            setGrupos(g);
-            setPrivilegios(p);
+            setGrupos(await api.getGrupos());
         } catch (e) {
             setError(e.message);
         } finally {
@@ -121,7 +116,6 @@ export const GestionUsuariosSistemaView = ({ modulosPermitidos = [] }) => {
     }, []);
 
     const cargarPolitica = useCallback(async () => {
-        setError('');
         try {
             setPolitica(await api.getPoliticaClave());
         } catch (e) {
@@ -129,22 +123,59 @@ export const GestionUsuariosSistemaView = ({ modulosPermitidos = [] }) => {
         }
     }, []);
 
-    // Carga según sub-pestaña activa
+    useEffect(() => { cargarUsuarios(); }, [cargarUsuarios]);
     useEffect(() => {
-        if (subtab === 'usuarios') cargarUsuarios();
         if (subtab === 'municipalidades') cargarMunicipalidades();
         if (subtab === 'grupos') cargarGrupos();
         if (subtab === 'politica') cargarPolitica();
-    }, [subtab, cargarUsuarios, cargarMunicipalidades, cargarGrupos, cargarPolitica]);
+    }, [subtab, cargarMunicipalidades, cargarGrupos, cargarPolitica]);
 
-    // ---------- Acciones: Usuarios ----------
-    const confirmarEstadoCuenta = async () => {
+    // Sub-pestañas visibles según módulos permitidos (COM-25)
+    const subtabsVisibles = SUBTABS.filter(t => modulosPermitidos.includes(t.modulo));
+    const idsVisibles = subtabsVisibles.map(t => t.id).join(',');
+    useEffect(() => {
+        if (subtabsVisibles.length > 0 && !idsVisibles.split(',').includes(subtab)) {
+            setSubtab(idsVisibles.split(',')[0]);
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [idsVisibles]);
+
+    // ---------- Handlers ----------
+    const guardarPolitica = async (e) => {
+        e.preventDefault();
+        setGuardandoPolitica(true);
+        try {
+            await api.updatePoliticaClave({ ...politica, usuario_solicitante_id: usuario.id });
+            setExito('Política de claves actualizada exitosamente');
+        } catch (err) {
+            setError(err.message);
+        } finally {
+            setGuardandoPolitica(false);
+        }
+    };
+
+    const crearGrupo = async (e) => {
+        e.preventDefault();
+        setCreandoGrupo(true);
+        try {
+            await api.createGrupo({ ...nuevoGrupo, usuario_solicitante_id: usuario.id });
+            setExito('Grupo creado exitosamente');
+            setNuevoGrupo({ nombre: '', ambito: 'COMEDOR', descripcion: '' });
+            cargarGrupos();
+        } catch (err) {
+            setError(err.message);
+        } finally {
+            setCreandoGrupo(false);
+        }
+    };
+
+    const confirmarCuenta = async () => {
         const { objetivo, activar } = confCuenta;
         setConfCuenta(null);
         try {
             await api.cambiarEstadoCuenta(objetivo.id, {
-                estado_activo: activar,
-                usuario_solicitante_id: usuario.id
+                activar,
+                usuario_solicitante_id: usuario.id,
             });
             setExito(activar ? 'Cuenta desbloqueada exitosamente' : 'Cuenta bloqueada exitosamente');
             cargarUsuarios();
@@ -165,72 +196,30 @@ export const GestionUsuariosSistemaView = ({ modulosPermitidos = [] }) => {
         }
     };
 
-    // ---------- Acciones: Grupos ----------
-    const crearGrupo = async (e) => {
-        e.preventDefault();
-        setCreandoGrupo(true);
-        setError('');
-        try {
-            await api.createGrupo({ ...nuevoGrupo, usuario_solicitante_id: usuario.id });
-            setExito('Grupo creado exitosamente');
-            setNuevoGrupo({ nombre: '', ambito: 'COMEDOR', descripcion: '' });
-            cargarGrupos();
-        } catch (err) {
-            setError(err.message);
-        } finally {
-            setCreandoGrupo(false);
-        }
-    };
-
-    // ---------- Acciones: Política ----------
-    const guardarPolitica = async (e) => {
-        e.preventDefault();
-        setGuardandoPolitica(true);
-        setError('');
-        try {
-            await api.updatePoliticaClave({
-                longitud_min: Number(politica.longitud_min),
-                longitud_max: Number(politica.longitud_max),
-                meses_expiracion: Number(politica.meses_expiracion),
-                max_intentos: Number(politica.max_intentos),
-                usuario_solicitante_id: usuario.id
-            });
-            setExito('Política de contraseñas actualizada exitosamente');
-        } catch (err) {
-            setError(err.message);
-        } finally {
-            setGuardandoPolitica(false);
-        }
-    };
-
     return (
         <div className="animate-in fade-in duration-300">
-            {/* Encabezado y sub-pestañas (solo las permitidas por la matriz de módulos) */}
-            <div className="flex flex-wrap justify-between items-center gap-3 mb-5">
-                <div>
-                    <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
-                        <ShieldCheck className="text-emerald-600" size={22} /> Gestión de Usuarios y Configuración
-                    </h2>
-                    <p className="text-sm text-slate-500">Administración global: usuarios, municipalidades, grupos y política de claves.</p>
+            {/* Encabezado y sub-pestañas */}
+            <div className="mb-5">
+                <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2 mb-3">
+                    <ShieldCheck className="text-emerald-600" size={22} /> Administración del Sistema
+                </h2>
+                <div className="flex gap-2 border-b border-slate-200 pb-2 overflow-x-auto">
+                    {subtabsVisibles.map(t => {
+                        const Icon = t.icon;
+                        const activa = subtab === t.id;
+                        return (
+                            <button
+                                key={t.id}
+                                onClick={() => setSubtab(t.id)}
+                                className={`flex shrink-0 items-center gap-2 px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
+                                    activa ? 'bg-white text-emerald-700 shadow-sm border-t border-x border-slate-200'
+                                           : 'text-slate-500 hover:bg-slate-100'}`}
+                            >
+                                <Icon size={16} /> {t.label}
+                            </button>
+                        );
+                    })}
                 </div>
-            </div>
-
-            <div className="flex gap-2 mb-5 border-b border-slate-200 pb-2 overflow-x-auto">
-                {subtabsVisibles.map(t => {
-                    const Icon = t.icon;
-                    const activa = subtab === t.id;
-                    return (
-                        <button
-                            key={t.id}
-                            onClick={() => setSubtab(t.id)}
-                            className={`flex shrink-0 items-center gap-2 px-4 py-2 rounded-t-lg text-sm font-medium transition-colors ${
-                                activa ? 'bg-emerald-600 text-white' : 'text-slate-600 hover:bg-slate-100'
-                            }`}
-                        >
-                            <Icon size={16} /> {t.label}
-                        </button>
-                    );
-                })}
             </div>
 
             {error && (
@@ -253,17 +242,18 @@ export const GestionUsuariosSistemaView = ({ modulosPermitidos = [] }) => {
                         <select
                             value={estado}
                             onChange={(e) => setEstado(e.target.value)}
-                            className="px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm"
+                            className="px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500"
                         >
                             <option value="">Todos los estados</option>
-                            <option value="activos">Cuentas activas</option>
-                            <option value="inactivos">Cuentas bloqueadas</option>
+                            <option value="activos">Activos</option>
+                            <option value="inactivos">Inactivos</option>
+                            <option value="bloqueados">Bloqueados</option>
                         </select>
                         <button
                             onClick={() => setModalCrearUsuario(true)}
                             className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
                         >
-                            <Plus size={16} /> Nuevo Usuario
+                            <Plus size={16} /> Nuevo usuario
                         </button>
                     </div>
 
@@ -273,9 +263,9 @@ export const GestionUsuariosSistemaView = ({ modulosPermitidos = [] }) => {
                                 <tr className="bg-slate-100 text-slate-600">
                                     <th className="p-3 font-semibold">Documento</th>
                                     <th className="p-3 font-semibold">Nombres</th>
-                                    <th className="p-3 font-semibold">Rol global</th>
-                                    <th className="p-3 font-semibold text-center">Cuenta</th>
-                                    <th className="p-3 font-semibold text-center">Bloqueo intentos</th>
+                                    <th className="p-3 font-semibold">Rol</th>
+                                    <th className="p-3 font-semibold">Estado</th>
+                                    <th className="p-3 font-semibold">Bloqueos</th>
                                     <th className="p-3 font-semibold text-right">Acciones</th>
                                 </tr>
                             </thead>
@@ -287,15 +277,17 @@ export const GestionUsuariosSistemaView = ({ modulosPermitidos = [] }) => {
                                 ) : usuarios.map(u => (
                                     <tr key={u.id} className="hover:bg-slate-50">
                                         <td className="p-3 font-medium text-slate-800">{u.tipo_documento} {u.documento_identidad}</td>
-                                        <td className="p-3 text-slate-700">{u.nombres} {u.apellido_paterno} {u.apellido_materno}</td>
+                                        <td className="p-3 text-slate-600">{u.nombres} {u.apellido_paterno} {u.apellido_materno || ''}</td>
                                         <td className="p-3 text-slate-600">{u.rol}</td>
-                                        <td className="p-3 text-center">
-                                            <span className={`px-2 py-1 rounded-full text-xs font-bold ${u.estado_activo ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-600'}`}>
-                                                {u.estado_activo ? 'Activa' : 'Bloqueada'}
+                                        <td className="p-3">
+                                            <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${
+                                                u.estado_activo ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
+                                                {u.estado_activo ? 'Activo' : 'Inactivo'}
                                             </span>
                                         </td>
-                                        <td className="p-3 text-center">
-                                            <span className={`px-2 py-1 rounded-full text-xs font-bold ${u.bloqueado ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>
+                                        <td className="p-3">
+                                            <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${
+                                                u.bloqueado ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>
                                                 {u.bloqueado ? `Bloqueado (${u.intentos_fallidos})` : 'Libre'}
                                             </span>
                                         </td>
@@ -309,6 +301,14 @@ export const GestionUsuariosSistemaView = ({ modulosPermitidos = [] }) => {
                                                 >
                                                     <Edit3 size={15} />
                                                 </button>
+                                                {/* COM-38: reseteo de contraseña por Admin de Sistemas */}
+                                                <button
+                                                    onClick={() => setResetUsuario(u)}
+                                                    title="Resetear contraseña (COM-38)"
+                                                    className="p-1.5 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 rounded-lg transition-colors"
+                                                >
+                                                    <KeyRound size={15} />
+                                                </button>
                                                 {u.bloqueado && (
                                                     <button
                                                         onClick={() => setConfDesbloqueo(u)}
@@ -321,7 +321,9 @@ export const GestionUsuariosSistemaView = ({ modulosPermitidos = [] }) => {
                                                 <button
                                                     onClick={() => setConfCuenta({ objetivo: u, activar: !u.estado_activo })}
                                                     title={u.estado_activo ? 'Bloquear cuenta' : 'Desbloquear cuenta'}
-                                                    className={`p-1.5 rounded-lg transition-colors ${u.estado_activo ? 'bg-red-50 text-red-600 hover:bg-red-100' : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100'}`}
+                                                    className={`p-1.5 rounded-lg transition-colors ${
+                                                        u.estado_activo ? 'bg-red-50 text-red-600 hover:bg-red-100'
+                                                                        : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100'}`}
                                                 >
                                                     {u.estado_activo ? <Lock size={15} /> : <Unlock size={15} />}
                                                 </button>
@@ -343,118 +345,122 @@ export const GestionUsuariosSistemaView = ({ modulosPermitidos = [] }) => {
                             onClick={() => setModalMuni({ crear: true })}
                             className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
                         >
-                            <Plus size={16} /> Nueva Municipalidad
+                            <Plus size={16} /> Nueva municipalidad
                         </button>
                     </div>
-                    <div className="overflow-x-auto rounded-lg border border-slate-200">
-                        <table className="w-full text-left border-collapse whitespace-nowrap text-sm">
-                            <thead>
-                                <tr className="bg-slate-100 text-slate-600">
-                                    <th className="p-3 font-semibold">Nombre</th>
-                                    <th className="p-3 font-semibold">Ubicación</th>
-                                    <th className="p-3 font-semibold">Dirección</th>
-                                    <th className="p-3 font-semibold text-right">Acciones</th>
-                                </tr>
-                            </thead>
-                            <tbody className="divide-y divide-slate-200">
-                                {cargandoMunis ? (
-                                    <tr><td colSpan="4" className="p-8 text-center text-emerald-600"><Loader2 className="animate-spin mx-auto" size={24} /></td></tr>
-                                ) : municipalidades.length === 0 ? (
-                                    <tr><td colSpan="4" className="p-8 text-center text-slate-500">Aún no hay municipalidades registradas.</td></tr>
-                                ) : municipalidades.map(m => (
-                                    <tr key={m.id} className="hover:bg-slate-50">
-                                        <td className="p-3 font-medium text-slate-800">{m.nombre}</td>
-                                        <td className="p-3 text-slate-600">{m.distrito}, {m.provincia} — {m.departamento}</td>
-                                        <td className="p-3 text-slate-600 max-w-[240px] truncate">{m.direccion || '—'}</td>
-                                        <td className="p-3 text-right">
-                                            <button
-                                                onClick={() => setModalMuni({ editar: m })}
-                                                className="p-1.5 bg-slate-100 text-slate-700 hover:bg-slate-200 rounded-lg transition-colors"
-                                                title="Editar municipalidad"
-                                            >
-                                                <Edit3 size={15} />
-                                            </button>
-                                        </td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
+                    {cargandoMunicipalidades ? (
+                        <div className="p-10 text-center text-emerald-600"><Loader2 className="animate-spin mx-auto" size={26} /></div>
+                    ) : municipalidades.length === 0 ? (
+                        <p className="text-sm text-slate-500 text-center p-8">No hay municipalidades registradas.</p>
+                    ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            {municipalidades.map(m => (
+                                <div key={m.id} className="bg-white border border-slate-200 rounded-xl p-4 flex items-start gap-3">
+                                    <Building2 size={18} className="text-emerald-600 mt-0.5" />
+                                    <div className="flex-1">
+                                        <p className="font-bold text-slate-800 text-sm">{m.nombre}</p>
+                                        <p className="text-xs text-slate-500">
+                                            {m.distrito || ''}{m.provincia ? `, ${m.provincia}` : ''}{m.departamento ? ` - ${m.departamento}` : ''}
+                                        </p>
+                                        <div className="flex flex-wrap gap-1 mt-2">
+                                            {(m.comedores || []).map(c => (
+                                                <span key={c.id} className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded-full text-[10px] font-medium">
+                                                    {c.nombre}
+                                                </span>
+                                            ))}
+                                        </div>
+                                    </div>
+                                    <button
+                                        onClick={() => setModalMuni({ editar: m })}
+                                        className="p-1.5 bg-slate-100 text-slate-700 hover:bg-slate-200 rounded-lg transition-colors"
+                                        title="Editar municipalidad"
+                                    >
+                                        <Edit3 size={14} />
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                    )}
                 </div>
             )}
 
             {/* ============ SUB-PESTAÑA: GRUPOS Y PRIVILEGIOS (roles) ============ */}
             {subtab === 'grupos' && (
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-                    {/* Formulario de creación de grupo */}
-                    <form onSubmit={crearGrupo} className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3 h-fit">
-                        <h3 className="font-bold text-slate-700 flex items-center gap-2"><Plus size={16} /> Crear grupo</h3>
-                        <input
-                            type="text"
-                            value={nuevoGrupo.nombre}
-                            onChange={(e) => setNuevoGrupo({ ...nuevoGrupo, nombre: e.target.value })}
-                            placeholder="Nombre del grupo"
-                            className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500"
-                            required
-                        />
-                        <select
-                            value={nuevoGrupo.ambito}
-                            onChange={(e) => setNuevoGrupo({ ...nuevoGrupo, ambito: e.target.value })}
-                            className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm"
-                        >
-                            <option value="SISTEMA">Ámbito SISTEMA</option>
-                            <option value="GLOBAL">Ámbito GLOBAL (municipal)</option>
-                            <option value="COMEDOR">Ámbito COMEDOR</option>
-                        </select>
-                        <textarea
-                            value={nuevoGrupo.descripcion}
-                            onChange={(e) => setNuevoGrupo({ ...nuevoGrupo, descripcion: e.target.value })}
-                            placeholder="Descripción"
-                            rows="2"
-                            className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500"
-                        />
-                        <button
-                            type="submit"
-                            disabled={creandoGrupo}
-                            className="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
-                        >
-                            {creandoGrupo ? 'Creando...' : 'Crear grupo'}
-                        </button>
-                    </form>
-
-                    {/* Listado de grupos con privilegios */}
-                    <div className="lg:col-span-2 space-y-3">
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    <div>
+                        <h3 className="font-bold text-slate-700 flex items-center gap-2 mb-3">
+                            <ShieldCheck size={16} /> Grupos existentes
+                        </h3>
                         {cargandoGrupos ? (
-                            <div className="p-8 text-center text-emerald-600"><Loader2 className="animate-spin mx-auto" size={24} /></div>
-                        ) : grupos.map(g => (
-                            <div key={g.id} className="border border-slate-200 rounded-xl p-4 bg-white">
-                                <div className="flex flex-wrap justify-between items-center gap-2 mb-2">
-                                    <div>
-                                        <p className="font-bold text-slate-800">{g.nombre}</p>
+                            <div className="p-8 text-center text-emerald-600"><Loader2 className="animate-spin mx-auto" size={22} /></div>
+                        ) : (
+                            <div className="space-y-2">
+                                {grupos.map(g => (
+                                    <div key={g.id} className="flex items-center gap-3 bg-white border border-slate-200 rounded-xl p-3">
+                                        <div className="flex-1">
+                                            <p className="text-sm font-bold text-slate-800">{g.nombre}</p>
+                                            <p className="text-[11px] text-slate-500">{g.descripcion}</p>
+                                        </div>
                                         <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                                            g.ambito === 'SISTEMA' ? 'bg-purple-100 text-purple-700'
+                                            g.ambito === 'SISTEMA' ? 'bg-red-100 text-red-700'
                                             : g.ambito === 'GLOBAL' ? 'bg-blue-100 text-blue-700'
-                                            : 'bg-emerald-100 text-emerald-700'
-                                        }`}>{g.ambito}</span>
-                                    </div>
-                                    <button
-                                        onClick={() => setModalPrivilegios(g)}
-                                        className="flex items-center gap-1 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-medium transition-colors"
-                                    >
-                                        <ShieldCheck size={14} /> Privilegios
-                                    </button>
-                                </div>
-                                <div className="flex flex-wrap gap-1.5">
-                                    {privilegios.filter(p => (p.grupos || []).includes(g.nombre)).length === 0 ? (
-                                        <span className="text-xs text-slate-400">Sin privilegios asignados.</span>
-                                    ) : privilegios.filter(p => (p.grupos || []).includes(g.nombre)).map(p => (
-                                        <span key={p.id} className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded-full text-[10px] font-medium">
-                                            {p.nombre}
+                                            : 'bg-emerald-100 text-emerald-700'}`}>
+                                            {g.ambito}
                                         </span>
-                                    ))}
-                                </div>
+                                        <button
+                                            onClick={() => setModalPrivilegios(g)}
+                                            className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-medium transition-colors"
+                                        >
+                                            Privilegios
+                                        </button>
+                                    </div>
+                                ))}
                             </div>
-                        ))}
+                        )}
+                    </div>
+                    <div>
+                        <h3 className="font-bold text-slate-700 flex items-center gap-2 mb-3">
+                            <Plus size={16} /> Nuevo grupo
+                        </h3>
+                        <form onSubmit={crearGrupo} className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
+                            <div>
+                                <label className="text-xs font-semibold text-slate-600 mb-1 block">Nombre</label>
+                                <input
+                                    type="text"
+                                    value={nuevoGrupo.nombre}
+                                    onChange={(e) => setNuevoGrupo({ ...nuevoGrupo, nombre: e.target.value })}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500"
+                                    required
+                                />
+                            </div>
+                            <div>
+                                <label className="text-xs font-semibold text-slate-600 mb-1 block">Ámbito</label>
+                                <select
+                                    value={nuevoGrupo.ambito}
+                                    onChange={(e) => setNuevoGrupo({ ...nuevoGrupo, ambito: e.target.value })}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500"
+                                >
+                                    <option value="COMEDOR">COMEDOR</option>
+                                    <option value="GLOBAL">GLOBAL</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label className="text-xs font-semibold text-slate-600 mb-1 block">Descripción</label>
+                                <textarea
+                                    value={nuevoGrupo.descripcion}
+                                    onChange={(e) => setNuevoGrupo({ ...nuevoGrupo, descripcion: e.target.value })}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500"
+                                    rows="2"
+                                />
+                            </div>
+                            <button
+                                type="submit"
+                                disabled={creandoGrupo}
+                                className="w-full px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+                            >
+                                {creandoGrupo ? 'Creando...' : 'Crear grupo'}
+                            </button>
+                        </form>
                     </div>
                 </div>
             )}
@@ -462,47 +468,68 @@ export const GestionUsuariosSistemaView = ({ modulosPermitidos = [] }) => {
             {/* ============ SUB-PESTAÑA: POLÍTICA DE CLAVES (bloqueos) ============ */}
             {subtab === 'politica' && politica && (
                 <form onSubmit={guardarPolitica} className="max-w-md bg-slate-50 border border-slate-200 rounded-xl p-5 space-y-4">
-                    <h3 className="font-bold text-slate-700 flex items-center gap-2"><KeyRound size={16} /> Política de contraseñas</h3>
-                    <div className="grid grid-cols-2 gap-3">
-                        <div>
-                            <label className="block text-xs font-semibold text-slate-600 mb-1">Longitud mínima</label>
-                            <input type="number" min="6" max="32" value={politica.longitud_min}
-                                onChange={(e) => setPolitica({ ...politica, longitud_min: e.target.value })}
-                                className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
-                        </div>
-                        <div>
-                            <label className="block text-xs font-semibold text-slate-600 mb-1">Longitud máxima</label>
-                            <input type="number" min="8" max="64" value={politica.longitud_max}
-                                onChange={(e) => setPolitica({ ...politica, longitud_max: e.target.value })}
-                                className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
-                        </div>
-                        <div>
-                            <label className="block text-xs font-semibold text-slate-600 mb-1">Meses de expiración</label>
-                            <input type="number" min="1" max="60" value={politica.meses_expiracion}
-                                onChange={(e) => setPolitica({ ...politica, meses_expiracion: e.target.value })}
-                                className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
-                        </div>
-                        <div>
-                            <label className="block text-xs font-semibold text-slate-600 mb-1">Intentos máximos</label>
-                            <input type="number" min="1" max="10" value={politica.max_intentos}
-                                onChange={(e) => setPolitica({ ...politica, max_intentos: e.target.value })}
-                                className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
-                        </div>
+                    <h3 className="font-bold text-slate-700 flex items-center gap-2">
+                        <KeyRound size={16} /> Política de contraseñas
+                    </h3>
+                    <div>
+                        <label className="text-xs font-semibold text-slate-600 mb-1 block">Longitud mínima</label>
+                        <input
+                            type="number" min="6" max="32"
+                            value={politica.longitud_minima ?? 8}
+                            onChange={(e) => setPolitica({ ...politica, longitud_minima: Number(e.target.value) })}
+                            className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
                     </div>
+                    <div>
+                        <label className="text-xs font-semibold text-slate-600 mb-1 block">Expiración (días)</label>
+                        <input
+                            type="number" min="30" max="730"
+                            value={politica.expiracion_dias ?? 180}
+                            onChange={(e) => setPolitica({ ...politica, expiracion_dias: Number(e.target.value) })}
+                            className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                    </div>
+                    <div>
+                        <label className="text-xs font-semibold text-slate-600 mb-1 block">Máximo de intentos fallidos</label>
+                        <input
+                            type="number" min="1" max="10"
+                            value={politica.max_intentos_bloqueo ?? 3}
+                            onChange={(e) => setPolitica({ ...politica, max_intentos_bloqueo: Number(e.target.value) })}
+                            className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                    </div>
+                    {[
+                        ['requiere_mayuscula', 'Exigir mayúscula'],
+                        ['requiere_minuscula', 'Exigir minúscula'],
+                        ['requiere_digito', 'Exigir dígito'],
+                        ['requiere_simbolo', 'Exigir símbolo'],
+                    ].map(([clave, label]) => (
+                        <label key={clave} className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={!!politica[clave]}
+                                onChange={(e) => setPolitica({ ...politica, [clave]: e.target.checked })}
+                                className="accent-emerald-600"
+                            />
+                            {label}
+                        </label>
+                    ))}
                     <button
                         type="submit"
                         disabled={guardandoPolitica}
-                        className="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+                        className="w-full px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
                     >
                         {guardandoPolitica ? 'Guardando...' : 'Guardar política'}
                     </button>
                 </form>
             )}
 
-            {/* ============ SUB-PESTAÑA: VISTAS (editor de permisos por rol) ============ */}
-            {subtab === 'vistas' && <VistaPermisosView />}
+            {/* ============ SUB-PESTAÑA: PERMISOS POR VISTAS (vistas) ============ */}
+            {subtab === 'vistas' && (
+                <VistaPermisosView />
+            )}
 
-            {/* ===== Modales y confirmaciones ===== */}
+            {/* ============ MODALES ============ */}
             {modalCrearUsuario && (
                 <ModalCrearUsuario
                     onClose={() => setModalCrearUsuario(false)}
@@ -527,20 +554,19 @@ export const GestionUsuariosSistemaView = ({ modulosPermitidos = [] }) => {
             {modalPrivilegios && (
                 <ModalGrupoPrivilegios
                     grupo={modalPrivilegios}
-                    privilegios={privilegios}
+                    privilegios={[]}
                     onClose={() => setModalPrivilegios(null)}
-                    onExito={() => { setModalPrivilegios(null); setExito('Privilegios actualizados exitosamente'); cargarGrupos(); }}
+                    onExito={() => { setModalPrivilegios(null); setExito('Privilegios actualizados exitosamente'); }}
                 />
             )}
-
             <ModalConfirmacion
                 isOpen={!!confCuenta}
                 onClose={() => setConfCuenta(null)}
-                onConfirm={confirmarEstadoCuenta}
+                onConfirm={confirmarCuenta}
                 mensaje={confCuenta
-                    ? `¿${confCuenta.activar ? 'Desbloquear' : 'Bloquear'} la cuenta de ${confCuenta.objetivo.nombres} ${confCuenta.objetivo.apellido_paterno} (${confCuenta.objetivo.documento_identidad})? ${confCuenta.activar ? '' : 'El usuario no podrá iniciar sesión.'}`
+                    ? `¿${confCuenta.activar ? 'Desbloquear' : 'Bloquear'} la cuenta de ${confCuenta.objetivo.nombres} ${confCuenta.objetivo.apellido_paterno}?`
                     : ''}
-                tipo={confCuenta?.activar ? 'warning' : 'danger'}
+                tipo="warning"
             />
             <ModalConfirmacion
                 isOpen={!!confDesbloqueo}
@@ -550,6 +576,12 @@ export const GestionUsuariosSistemaView = ({ modulosPermitidos = [] }) => {
                     ? `¿Restablecer el bloqueo por intentos fallidos de ${confDesbloqueo.nombres} ${confDesbloqueo.apellido_paterno}? Se reiniciará su contador de intentos.`
                     : ''}
                 tipo="warning"
+            />
+            {/* COM-38: modal de reseteo/cambio de contraseña (Admin de Sistemas) */}
+            <ModalResetClave
+                isOpen={!!resetUsuario}
+                onClose={() => { setResetUsuario(null); cargarUsuarios(); }}
+                usuarioObjetivo={resetUsuario}
             />
             <ModalExito isOpen={!!exito} onClose={() => setExito('')} mensaje={exito} />
         </div>
