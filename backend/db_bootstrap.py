@@ -5,8 +5,8 @@ Objetivo: Asegurar que el esquema dinámico del sistema exista en la base de dat
           que existieran los scripts actuales (el docker-entrypoint-initdb.d solo se
           ejecuta en la PRIMERA inicialización del volumen).
 Uso: Importar en main.py y ejecutar `asegurar_esquema()` durante el startup (lifespan).
-Nota: Todas las sentencias son idempotentes (IF NOT EXISTS / ON CONFLICT DO NOTHING),
-      por lo que pueden ejecutarse en cada arranque sin efectos secundarios.
+Nota: Todas las sentencias son idempotentes (IF NOT EXISTS / ON CONFLICT DO NOTHING /
+      NOT EXISTS), por lo que pueden ejecutarse en cada arranque sin efectos secundarios.
 
 Historial de integraciones:
  - COM-17: tabla parametros_sistema + seed de parámetros operativos.
@@ -27,11 +27,15 @@ Historial de integraciones:
            comedor/candidata/selector en presupuesto_semanal y columnas nutricionales
            por día en planificacion_dia) + parámetros del motor greedy + módulo 'propuestas'.
  - COM-5 v4 / COM-8 v7: seeds de esquema_modelos_ml (módulos 'clusters' y 'modelos_ml'
-           exclusivos del Admin de Sistemas + listas configurables de proteínas
-           permitidas / ingredientes vetados).
+           exclusivos del Admin de Sistemas + listas configurables de proteínas).
+ - COM-36 (este archivo): el paso 11 (esquema_modelos_ml) queda garantizado en cada
+           arranque y se agrega el paso 12 de AUDITORÍA automática (auditar_modulos_ml)
+           que registra en logs si los módulos y enlaces quedaron vigentes, detectando
+           despliegues parciales sin intervención manual.
 """
 import time
 import psycopg2
+from psycopg2.extras import RealDictCursor
 from config import DB_URL
 from seguridad import (
     hashear_clave,
@@ -53,8 +57,8 @@ from esquema_kmeans import aplicar_esquema_kmeans
 from nutricion_seed import seedar_nutricion
 # COM-8: esquema de propuestas de menú semanal (candidatas + parámetros + módulo)
 from esquema_planificaciones import aplicar_esquema_planificaciones
-# COM-5 v4 / COM-8 v7: módulos ML exclusivos del Admin + proteínas configurables
-from esquema_modelos_ml import aplicar_esquema_modelos_ml
+# COM-5 v4 / COM-8 v7 / COM-36: módulos ML exclusivos del Admin + proteínas configurables
+from esquema_modelos_ml import aplicar_esquema_modelos_ml, auditar_modulos_ml
 
 # ==========================================
 # CONSTANTES DE ROLES (COM-21)
@@ -254,7 +258,7 @@ def _migrar_claves_legacy(cur):
             SET clave_hash = %s, clave_provisoria = TRUE,
                 fecha_clave = CURRENT_TIMESTAMP, intentos_fallidos = 0, bloqueado = FALSE
             WHERE id = %s;
-        """, (hash_inicial, fila[0]))
+        """, (hash_inicial, fila['id']))
     return len(filas)
 
 
@@ -310,7 +314,7 @@ def _asociar_usuarios_existentes(cur):
     row = cur.fetchone()
     if not row:
         return 0
-    comedor_id = row[0]
+    comedor_id = row['id']
     cur.execute("""
         INSERT INTO usuario_comedor (usuario_id, comedor_id, rol, estado_activo)
         SELECT u.id, %s, %s, TRUE
@@ -381,12 +385,13 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
     """
     Verifica/crea el esquema dinámico con reintentos, para tolerar el arranque
     en frío del contenedor PostgreSQL (que puede estar ejecutando init.sql).
+    COM-36: incluye la auditoría final de módulos ML en cada arranque.
     """
     conn = None
     for intento in range(1, reintentos + 1):
         try:
             conn = psycopg2.connect(DB_URL)
-            cur = conn.cursor()
+            cur = conn.cursor(cursor_factory=RealDictCursor)
             # 1. COM-17: tabla de parámetros + seed idempotente
             cur.execute(DDL_PARAMETROS_SISTEMA)
             cur.execute(SEED_PARAMETROS)
@@ -430,9 +435,13 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
             # 10. COM-8: esquema de propuestas semanales (candidatas, vínculo del
             #     maestro, columnas nutricionales por día, parámetros y módulo)
             aplicar_esquema_planificaciones(cur)
-            # 11. COM-5 v4 / COM-8 v7: módulos ML exclusivos del Admin de Sistemas
-            #     ('clusters', 'modelos_ml') + proteínas/vetados configurables
+            # 11. COM-5 v4 / COM-8 v7 / COM-36: módulos ML exclusivos del Admin de
+            #     Sistemas ('clusters', 'modelos_ml') + proteínas/vetados configurables.
+            #     Idempotente: se ejecuta en CADA arranque para auto-reparar despliegues.
             aplicar_esquema_modelos_ml(cur)
+            # 12. COM-36: auditoría automática post-seed (registra en logs si los
+            #     módulos y sus enlaces al rol Admin quedaron vigentes: esperado 2 y 2).
+            modulos_ok, enlaces_ok = auditar_modulos_ml(cur)
             conn.commit()
             cur.close()
             if migrados:
@@ -449,8 +458,12 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
                 print(f"[BOOTSTRAP] COM-27: {importadas} municipalidades importadas del CSV oficial.")
             if nutricion_sembrada:
                 print(f"[BOOTSTRAP] COM-5: {nutricion_sembrada} ingredientes nutricionales sembrados.")
+            # COM-36: línea de auditoría siempre visible para verificar despliegues
+            print(f"[BOOTSTRAP] COM-36: auditoría módulos ML -> módulos={modulos_ok}/2, enlaces_admin={enlaces_ok}/2.")
+            if modulos_ok < 2 or enlaces_ok < 2:
+                print("[BOOTSTRAP] COM-36: [AVISO] Faltan módulos/enlaces ML; se reintentará en el próximo arranque.")
             print("[BOOTSTRAP] Esquema dinámico verificado/creado correctamente "
-                  "(incluye ubicación COM-27, K-means COM-5, propuestas COM-8 y módulos ML COM-5 v4).")
+                  "(incluye ubicación COM-27, K-means COM-5, propuestas COM-8 y módulos ML COM-5 v4/COM-36).")
             return True
         except Exception as e:
             print(f"[BOOTSTRAP] Intento {intento}/{reintentos} fallido: {e}")
