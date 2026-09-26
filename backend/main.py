@@ -2,6 +2,12 @@
 main.py
 Objetivo: Punto de entrada de la aplicación FastAPI. Orquesta los routers, configuraciones globales y middleware.
 Uso: Ejecutar con `uvicorn main:app --host 0.0.0.0 --port 8000`.
+Historial:
+ - COM-21/22/23/25/26/27: routers de gestión (comedores, grupos, usuarios, municipalidades, vistas, ubicaciones).
+ - COM-5: router de clustering K-means del recetario.
+ - COM-8: router de propuestas de menú semanal (motor greedy).
+ - COM-5 v4 / COM-8 v7: router del panel de gráficos de Machine Learning (modelos_ml),
+   exclusivo del Administrador de Sistemas.
 """
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -25,10 +31,12 @@ from routers import (
     ubicaciones,      # COM-27: catálogo geográfico en cascada
     kmeans,           # COM-5: clustering nutricional del recetario (K-means k=4)
     propuestas_menu,  # COM-8: propuestas de menú semanal (motor greedy search)
+    modelos_ml,       # COM-5 v4 / COM-8 v7: panel de gráficos de ML (solo Admin de Sistemas)
 )
 # Asegurado de esquema dinámico (parámetros, planificación, raciones, seguridad,
 # comedores, grupos, gestión de usuarios, permisos por vistas, ubicaciones,
-# esquema K-means con seed nutricional y esquema de propuestas COM-8) al arrancar
+# esquema K-means con seed nutricional, esquema de propuestas COM-8 y seeds de
+# módulos ML / proteínas configurables COM-5 v4) al arrancar
 from db_bootstrap import asegurar_esquema
 
 
@@ -39,7 +47,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="API - NutriComedor", version="2.10.0", lifespan=lifespan)
+app = FastAPI(title="API - NutriComedor", version="2.11.0", lifespan=lifespan)
 
 # Configuración de CORS (Mantiene compatibilidad con tu Frontend)
 app.add_middleware(
@@ -61,6 +69,7 @@ app.include_router(vistas.router, prefix="/api/v1")           # COM-25
 app.include_router(ubicaciones.router, prefix="/api/v1")      # COM-27
 app.include_router(kmeans.router, prefix="/api/v1")           # COM-5
 app.include_router(propuestas_menu.router, prefix="/api/v1")  # COM-8
+app.include_router(modelos_ml.router, prefix="/api/v1")       # COM-5 v4 / COM-8 v7
 app.include_router(parametros.router, prefix="/api/v1")
 app.include_router(presupuesto.router, prefix="/api/v1")
 app.include_router(recetas.router, prefix="/api/v1")

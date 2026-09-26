@@ -21,6 +21,14 @@ Historial de integraciones:
  - COM-26: esquema del flujo CRUD de usuarios por perfil (esquema_flujo_usuario).
  - COM-27: esquema de ubicación geográfica (departamentos, provincias, distritos,
            ubigeos) + importación del CSV oficial de municipalidades.
+ - COM-5:  esquema K-means (kmeans_modelos, recetas_clusters, ingredientes_nutricion)
+           + seed de composición nutricional por ingrediente.
+ - COM-8:  esquema de propuestas de menú semanal (planificaciones_candidatas, vínculo
+           comedor/candidata/selector en presupuesto_semanal y columnas nutricionales
+           por día en planificacion_dia) + parámetros del motor greedy + módulo 'propuestas'.
+ - COM-5 v4 / COM-8 v7: seeds de esquema_modelos_ml (módulos 'clusters' y 'modelos_ml'
+           exclusivos del Admin de Sistemas + listas configurables de proteínas
+           permitidas / ingredientes vetados).
 """
 import time
 import psycopg2
@@ -45,6 +53,8 @@ from esquema_kmeans import aplicar_esquema_kmeans
 from nutricion_seed import seedar_nutricion
 # COM-8: esquema de propuestas de menú semanal (candidatas + parámetros + módulo)
 from esquema_planificaciones import aplicar_esquema_planificaciones
+# COM-5 v4 / COM-8 v7: módulos ML exclusivos del Admin + proteínas configurables
+from esquema_modelos_ml import aplicar_esquema_modelos_ml
 
 # ==========================================
 # CONSTANTES DE ROLES (COM-21)
@@ -402,24 +412,27 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
             # 6. COM-25: esquema de permisos por vistas (módulos del sistema)
             aplicar_esquema_permisos_vistas(cur)
             # COM-26: esquema del flujo CRUD de usuarios por perfil.
-            # (Si tu versión local ya tenía esta línea del intento anterior, mantenla;
-            #  NO fue parte del COM-27 rechazado.)
             aplicar_esquema_flujo_usuario(cur)
             # 7. COM-27: esquema de ubicación geográfica (departamentos, provincias,
             #    distritos, ubigeos). Debe ejecutarse DESPUÉS de que existan
             #    municipalidades, comedores y usuarios.
             aplicar_esquema_ubicaciones(cur)
-            # COM-8: propuestas de menú semanal (tabla candidatas, parámetros y módulo)
-            aplicar_esquema_planificaciones(cur)
-            # COM-5: esquema K-means (nutrición por ingrediente, modelos y asignación)
+            # 8. COM-27: importación del CSV oficial de municipalidades.
+            #    Solo se ejecuta si el catálogo geográfico está vacío (carga inicial).
+            cur.execute("SELECT COUNT(*) AS total FROM departamentos;")
+            if cur.fetchone()["total"] == 0:
+                importadas = importar_ubicaciones(cur)
+            else:
+                importadas = 0
+            # 9. COM-5: esquema K-means (modelos, recetas_clusters, nutrición) + seed
             aplicar_esquema_kmeans(cur)
-            nutricion_seed = seedar_nutricion(cur)
-            if nutricion_seed:
-                print(f"[BOOTSTRAP] COM-5: {nutricion_seed} ingredientes nutricionales sembrados.")
-
-            # 8. COM-27: importación idempotente del CSV oficial de municipalidades.
-            #    Solo carga datos si las tablas geográficas están vacías.
-            importadas = importar_ubicaciones(cur)
+            nutricion_sembrada = seedar_nutricion(cur)
+            # 10. COM-8: esquema de propuestas semanales (candidatas, vínculo del
+            #     maestro, columnas nutricionales por día, parámetros y módulo)
+            aplicar_esquema_planificaciones(cur)
+            # 11. COM-5 v4 / COM-8 v7: módulos ML exclusivos del Admin de Sistemas
+            #     ('clusters', 'modelos_ml') + proteínas/vetados configurables
+            aplicar_esquema_modelos_ml(cur)
             conn.commit()
             cur.close()
             if migrados:
@@ -434,7 +447,10 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
                 print(f"[BOOTSTRAP] COM-22: {membresias_migradas} membresía(s) migradas al modelo de grupos.")
             if importadas:
                 print(f"[BOOTSTRAP] COM-27: {importadas} municipalidades importadas del CSV oficial.")
-            print("[BOOTSTRAP] Esquema dinámico verificado/creado correctamente (incluye ubicación geográfica COM-27).")
+            if nutricion_sembrada:
+                print(f"[BOOTSTRAP] COM-5: {nutricion_sembrada} ingredientes nutricionales sembrados.")
+            print("[BOOTSTRAP] Esquema dinámico verificado/creado correctamente "
+                  "(incluye ubicación COM-27, K-means COM-5, propuestas COM-8 y módulos ML COM-5 v4).")
             return True
         except Exception as e:
             print(f"[BOOTSTRAP] Intento {intento}/{reintentos} fallido: {e}")
