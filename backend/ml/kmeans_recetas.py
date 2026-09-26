@@ -17,12 +17,16 @@ Historial:
  - COM-5 v5: FIX del KeyError 'energia_kcal': el SELECT de recetas de construir_dataset
    no incluía las columnas nutricionales de recetas_almuerzo (hierro_mg, proteina_g,
    energia_kcal); se agregan con detección defensiva y se omiten recetas sin nutrición.
- - COM-5 v6 (este archivo): FIX de unidades de centroides. K-means entrena sobre
-   features estandarizadas, por lo que km.cluster_centers_ vive en espacio z y la UI
-   mostraba valores negativos rotulados como kcal/mg/g/S/. Ahora los centroides se
-   persisten en UNIDADES REALES por ración vía scaler.inverse_transform(), y los
-   centroides estandarizados se conservan en parametros.centroides_z para auditoría.
-   El bloque de persistencia anterior queda COMENTADO por trazabilidad.
+ - COM-5 v6: FIX de unidades de centroides. K-means entrena sobre features
+   estandarizadas, por lo que km.cluster_centers_ vive en espacio z y la UI mostraba
+   valores negativos rotulados como kcal/mg/g/S/. Ahora los centroides se persisten en
+   UNIDADES REALES por ración vía scaler.inverse_transform(), y los centroides
+   estandarizados se conservan en parametros.centroides_z para auditoría.
+ - COM-37 (este archivo): _precios_actuales completa los ingredientes SIN precio de
+   scraper con el precio manual vigente (ingredientes_precios_manuales) a la fecha de
+   hoy, para que el agrupamiento trabaje con precios completos (decisión de ticket:
+   "necesitamos predecir, evaluar, agrupar con precios completos"). Precedencia:
+   scraper/predicción > manual (setdefault).
 Uso: Importado por routers/kmeans.py. Todas las funciones reciben un cursor psycopg2
      (RealDictCursor); el caller gestiona la transacción.
 Referencia: ticket COM-5 (solo trazabilidad; los nombres obedecen a la funcionalidad).
@@ -30,11 +34,15 @@ Referencia: ticket COM-5 (solo trazabilidad; los nombres obedecen a la funcional
 import re
 import json
 import unicodedata
+from datetime import date
 
 import numpy as np
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
+
+# COM-37: precios manuales con vigencia (fallback cuando el scraper no cubre el ingrediente)
+from precios_manuales import obtener_precios_manuales_por_kg
 
 # ==========================================
 # CONSTANTES DEL MODELO
@@ -68,10 +76,6 @@ INGREDIENTES_VETADOS_DEFAULT = [
 #     r'\b(pollo|gallina|huevo|higado|pescado|atun|bonito|jurel|caballa|trucha|sangrecita)\b')
 # RE_PROHIBIDO = re.compile(
 #     r'\b(res|vaca|vacuno|cerdo|chancho|porcino|chorizo|salchicha|bistec|bisteck|lomo|panceta|tocino|chicharron)\b')
-
-# COM-5 v2: el top de ingredientes solo considera estas categorías (nunca especias,
-# cereales, grasas ni lácteos), según requerimiento de la administradora.
-CATEGORIAS_TOP_INGREDIENTE = ('Vegetales y Hortalizas', 'Frutas', 'Proteinas')
 
 
 # ==========================================
@@ -258,6 +262,10 @@ def _precios_actuales(cur):
     historial_precios, unido por insumos->ingredientes y convirtiendo la unidad del
     insumo a gramos (factor_a_base para masa/volumen; peso_estimado_g para discretas).
     Se toma el MÍNIMO entre insumos del mismo ingrediente (criterio de compra económica).
+    COM-37: los ingredientes SIN precio de scraper se completan con el precio manual
+    vigente a la fecha de hoy (ingredientes_precios_manuales), de modo que el
+    agrupamiento nunca descarte recetas por falta de precio cuando el admin cargó un
+    promedio. Precedencia: scraper > manual (setdefault).
     COM-5 v4 (trazabilidad): la versión anterior mapeaba insumo_id como si fuera
     ingrediente_id (precios cruzados); quedó reemplazada por este join correcto.
     """
@@ -277,7 +285,13 @@ def _precios_actuales(cur):
           AND hp.precio_prom IS NOT NULL AND hp.precio_prom > 0
         GROUP BY ins.ingrediente_id;
     """)
-    return {r['ing_id']: float(r['precio_por_kg']) for r in cur.fetchall()}
+    precios = {r['ing_id']: float(r['precio_por_kg']) for r in cur.fetchall()}
+
+    # COM-37: fallback de precios manuales vigentes (hoy) para ingredientes sin scraper
+    manuales = obtener_precios_manuales_por_kg(cur, date.today())
+    for ing_id, precio_kg in manuales.items():
+        precios.setdefault(ing_id, precio_kg)
+    return precios
 
 
 def _cargar_unidades(cur):
@@ -407,8 +421,6 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
         filtro_estado = f" WHERE LOWER({col_r_est}::text) IN ('activo', 'true', 'vigente')"
 
     # COM-5 v5 (FIX): detección de las columnas nutricionales de la tabla de recetas.
-    # Sin ellas en el SELECT, el RealDictRow no trae las claves y entrenar abortaba
-    # con KeyError 'energia_kcal'.
     col_r_hie = _col(cols_r, ['hierro_mg', 'hierro'], contiene='hierro')
     col_r_pro = _col(cols_r, ['proteina_g', 'proteina'], contiene='proteina')
     col_r_ene = _col(cols_r, ['energia_kcal', 'energia'], contiene='energia')
@@ -470,8 +482,7 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
     filas = []
     excluidas = []
     for rec in recetas:
-        # COM-5 v5: recetas sin nutrición cargada se omiten del modelo (antes el
-        # KeyError ocultaba este caso; ahora se filtra explícitamente).
+        # COM-5 v5: recetas sin nutrición cargada se omiten del modelo.
         if rec.get('energia_kcal') is None:
             continue
 
@@ -491,8 +502,7 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
                 motivo_exclusion = motivo_exclusion or 'contiene_res_o_cerdo'
 
         # COM-5 v5 (trazabilidad): bloque muerto COMENTADO. El match nutricional por
-        # nombre (ingredientes_nutricion) ya no se usa para las features: la nutrición
-        # por ración se lee directamente de las columnas de recetas_almuerzo.
+        # nombre (ingredientes_nutricion) ya no se usa para las features.
         # suma = {'energia': 0.0, 'proteina': 0.0, 'hierro': 0.0, 'fibra': 0.0}
         # nut_match = 0
         # for ing in items:
@@ -613,8 +623,6 @@ def entrenar_y_persistir(cur):
     asignacion = _etiquetar_centroides(km.cluster_centers_)
 
     # COM-5 v6 (FIX UX): centroides en UNIDADES REALES por ración para la UI.
-    # km.cluster_centers_ vive en espacio estandarizado (z-score); mostrarlo tal cual
-    # producía valores negativos rotulados como kcal/mg/g/S/ en las tarjetas.
     centros_crudos = scaler.inverse_transform(km.cluster_centers_)
     centroides = {}
     centroides_z = {}
@@ -650,8 +658,7 @@ def entrenar_y_persistir(cur):
         'precio_bajo_max': bajo_max,
         'precio_medio_max': medio_max,
         'reglas': ['R1_proteina_permitida', 'R2_veto_res_cerdo', 'R3_sin_precio_alto'],
-        # COM-5 v6: espacio z conservado para auditoría (el gráfico PCA de Modelos ML
-        # recalcula su propia proyección; esto es solo referencia técnica).
+        # COM-5 v6: espacio z conservado para auditoría.
         'centroides_z': centroides_z,
     }
     cur.execute("""

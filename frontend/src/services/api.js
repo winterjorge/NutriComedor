@@ -26,10 +26,13 @@
  *           endpoints del panel de gráficos exclusivo del Admin de Sistemas.
  *   COM-38: se agrega `resetearClaveUsuario` (POST /usuarios/{id}/reset-clave) para el
  *           reseteo/cambio de contraseña de cualquier usuario por el Admin de Sistemas.
- *   COM-39 (este archivo): se agrega el bloque DIRECTIVOS DE COMEDOR con
- *           buscarComedoresPorDistrito, getDirectivosComedor y actualizarDirectivos
- *           (búsqueda por distrito+nombre, listado de directivos/vacantes y aplicación
- *           por lotes de bajas/reemplazos de cargo). Ningún método existente se modifica.
+ *   COM-39: se agrega el bloque DIRECTIVOS DE COMEDOR con buscarComedoresPorDistrito,
+ *           getDirectivosComedor y actualizarDirectivos (búsqueda por distrito+nombre,
+ *           listado de directivos/vacantes y aplicación por lotes de bajas/reemplazos).
+ *   COM-37 (este archivo): se agrega el bloque GESTIÓN DE INGREDIENTES (exclusivo Admin
+ *           de Sistemas): listado con estado de emparejamiento, CRUD de ingredientes sin
+ *           borrado, períodos de precio manual con vigencia opcional, desactivación
+ *           lógica y re-emparejado de insumos huérfanos. Ningún método existente se modifica.
  */
 
 const API_BASE = '/api/v1';
@@ -204,6 +207,79 @@ export const api = {
             body: JSON.stringify(data)
         });
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al aplicar los cambios de directivos'));
+        return response.json();
+    },
+
+    // ==========================================
+    // GESTIÓN DE INGREDIENTES (COM-37) — exclusivo Admin de Sistemas
+    // ==========================================
+    // COM-37: listado de ingredientes con estado de emparejamiento (n_insumos,
+    // n_insumos_con_precio, n_precios_manuales) para decidir cargas de precio manual.
+    getIngredientesAdmin: async (usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin?usuario_solicitante_id=${usuarioSolicitanteId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener ingredientes'));
+        return response.json();
+    },
+    // COM-37: creación de ingrediente (alimenta al algoritmo de reconocimiento)
+    createIngredienteAdmin: async (data) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al crear el ingrediente'));
+        return response.json();
+    },
+    // COM-37: edición/renombrado sin borrado físico (el frontend advierte inconsistencias)
+    updateIngredienteAdmin: async (ingredienteId, data) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/${ingredienteId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al actualizar el ingrediente'));
+        return response.json();
+    },
+    // COM-37: períodos de precio manual del ingrediente (activos e inactivos)
+    getPreciosManuales: async (ingredienteId, usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/${ingredienteId}/precios-manuales?usuario_solicitante_id=${usuarioSolicitanteId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener precios manuales'));
+        return response.json();
+    },
+    // COM-37: alta de período manual (usar_rango=false => vigencia permanente)
+    createPrecioManual: async (ingredienteId, data) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/${ingredienteId}/precios-manuales`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al crear el precio manual'));
+        return response.json();
+    },
+    // COM-37: edición de período con re-validación de solapes
+    updatePrecioManual: async (periodoId, data) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/precios-manuales/${periodoId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al actualizar el precio manual'));
+        return response.json();
+    },
+    // COM-37: baja lógica del período (no se elimina: preserva trazabilidad)
+    desactivarPrecioManual: async (periodoId, usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/precios-manuales/${periodoId}/desactivar?usuario_solicitante_id=${usuarioSolicitanteId}`, {
+            method: 'PUT'
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al desactivar el precio manual'));
+        return response.json();
+    },
+    // COM-37: re-empareja insumos huérfanos con el algoritmo de reconocimiento (heuristics)
+    reemparejarInsumos: async (usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/reemparejar-insumos?usuario_solicitante_id=${usuarioSolicitanteId}`, {
+            method: 'POST'
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al re-emparejar insumos'));
         return response.json();
     },
 

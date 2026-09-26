@@ -11,6 +11,10 @@ Historial:
              dicts {nombre, categoria} en una única fuente (_costear_recetas) y el
              top-3 tolera/omite elementos en formato legacy (texto plano) en lugar de
              fallar. Archivo autoconsistente: reemplazar COMPLETO, no parchar.
+ - COM-37 (este archivo): _precios_por_gramo completa los ingredientes SIN precio de
+   scraper con el precio manual vigente a la fecha de hoy
+   (ingredientes_precios_manuales), para que las propuestas y la lista de compras
+   trabajen con precios completos. Precedencia: scraper > manual (setdefault).
 Entradas:
   - Nutrición por receta: columnas hierro_mg / proteina_g / energia_kcal de
     recetas_almuerzo (valores de la receta completa), divididas entre raciones.
@@ -27,6 +31,9 @@ import json
 import hashlib
 from datetime import date, timedelta
 from collections import Counter
+
+# COM-37: precios manuales con vigencia (fallback cuando el scraper no cubre el ingrediente)
+from precios_manuales import obtener_precios_manuales_por_kg
 
 # ==========================================
 # METADATOS DE LAS 3 VARIANTES DE PONDERACIÓN
@@ -46,8 +53,8 @@ VARIANTES = {
     },
     'BALANCE': {
         'codigo': 'BALANCE',
-        'etiqueta': '⚖️ BalanceMax',
         'descripcion': 'Balance óptimo entre nutrición y costo.',
+        'etiqueta': '⚖️ BalanceMax',
         'parametro': 'PLANIFICACION_VARIANTE_BALANCE_W',
     },
 }
@@ -143,6 +150,10 @@ def _precios_por_gramo(cur) -> dict:
     Convierte la unidad del insumo a gramos (factor_a_base para masa/volumen;
     peso_estimado_g del ingrediente para unidades discretas) y toma el MÍNIMO
     entre insumos del mismo ingrediente (criterio de compra económica).
+    COM-37: los ingredientes SIN precio de scraper se completan con el precio manual
+    vigente a la fecha de hoy (convertido de precio_por_kg a precio_por_gramo), de
+    modo que propuestas y lista de compras nunca queden con costos en cero cuando el
+    admin cargó un promedio. Precedencia: scraper > manual (setdefault).
     """
     cur.execute("""
         SELECT ins.ingrediente_id AS ing_id,
@@ -160,7 +171,13 @@ def _precios_por_gramo(cur) -> dict:
           AND hp.precio_prom IS NOT NULL AND hp.precio_prom > 0
         GROUP BY ins.ingrediente_id;
     """)
-    return {r['ing_id']: float(r['precio_por_gramo']) for r in cur.fetchall()}
+    precios = {r['ing_id']: float(r['precio_por_gramo']) for r in cur.fetchall()}
+
+    # COM-37: fallback de precios manuales vigentes (hoy) para ingredientes sin scraper
+    manuales = obtener_precios_manuales_por_kg(cur, date.today())
+    for ing_id, precio_kg in manuales.items():
+        precios.setdefault(ing_id, precio_kg / 1000.0)
+    return precios
 
 
 def _cargar_recetas_cluster(cur):
