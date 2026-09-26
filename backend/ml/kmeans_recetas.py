@@ -6,12 +6,18 @@ Objetivo: Motor del modelo K-means del recetario (COM-5). Construye el dataset p
           res/cerdo, R3 sin recetas de precio alto), entrena K-means con k=4, etiqueta
           los centroides semánticamente (biyección determinista) y persiste el modelo
           activo junto con la asignación receta->cluster.
+Historial:
+ - COM-5 v1/v2/v3: reglas R1-R3 hardcodeadas; detección defensiva de esquema; FIX de
+   precios por gramo vía insumos->historial_precios; top-3 tolerante a formatos legacy.
+ - COM-5 v4 (este archivo): las listas de proteínas permitidas e ingredientes vetados
+   dejan de estar hardcodeadas: se leen de parametros_sistema
+   (KMEANS_PROTEINAS_PERMITIDAS / KMEANS_INGREDIENTES_VETADOS) y son editables desde la
+   vista de Clusters (exclusiva del Admin de Sistemas). Las expresiones regulares fijas
+   anteriores se conservan COMENTADAS como valores por defecto (fallback).
 Detección de esquema: los nombres de tablas/columnas se resuelven de forma defensiva
-          (lista de candidatos + heurística por palabras clave), de modo que el motor
-          funciona con cualquier convención de nombres heredada de los sprints 1-2.
-          GET /kmeans/diagnostico expone lo que el motor detectó.
+          (lista de candidatos + heurística por palabras clave).
 Uso: Importado por routers/kmeans.py. Todas las funciones reciben un cursor psycopg2
-     (RealDictCursor) activo; el caller gestiona la transacción.
+     (RealDictCursor); el caller gestiona la transacción.
 Referencia: ticket COM-5 (solo trazabilidad; los nombres obedecen a la funcionalidad).
 """
 import re
@@ -35,15 +41,74 @@ CODIGO_ETIQUETA = {
     4: 'All-Rounder Económico',
 }
 
-# R1: fuentes de proteína permitidas por el presupuesto del comedor
-RE_PROTEINA_PERMITIDA = re.compile(
-    r'\b(pollo|gallina|huevo|higado|pescado|atun|bonito|jurel|caballa|trucha|sangrecita)\b')
-# R2: ingredientes vetados (res, cerdo y derivados)
-RE_PROHIBIDO = re.compile(
-    r'\b(res|vaca|vacuno|cerdo|chancho|porcino|chorizo|salchicha|bistec|bisteck|lomo|panceta|tocino|chicharron)\b')
-
 RANDOM_STATE = 42
 N_INIT = 10
+
+# COM-5 v4: listas POR DEFECTO (fallback si el parámetro no existe o es inválido).
+PROTEINAS_PERMITIDAS_DEFAULT = [
+    'pollo', 'gallina', 'huevo', 'higado', 'pescado',
+    'atun', 'bonito', 'jurel', 'caballa', 'trucha', 'sangrecita',
+]
+INGREDIENTES_VETADOS_DEFAULT = [
+    'res', 'vaca', 'vacuno', 'cerdo', 'chancho', 'porcino', 'chorizo',
+    'salchicha', 'bistec', 'bisteck', 'lomo', 'panceta', 'tocino', 'chicharron',
+]
+
+# COM-5 v4 (trazabilidad): expresiones regulares FIJAS de COM-5 v1-v3, comentadas.
+# La configuración operativa ahora vive en parametros_sistema y se compila en
+# cargar_reglas_proteinas(); estos patrones quedan solo como documentación del default.
+# RE_PROTEINA_PERMITIDA = re.compile(
+#     r'\b(pollo|gallina|huevo|higado|pescado|atun|bonito|jurel|caballa|trucha|sangrecita)\b')
+# RE_PROHIBIDO = re.compile(
+#     r'\b(res|vaca|vacuno|cerdo|chancho|porcino|chorizo|salchicha|bistec|bisteck|lomo|panceta|tocino|chicharron)\b')
+
+# COM-5 v2: el top de ingredientes solo considera estas categorías (nunca especias,
+# cereales, grasas ni lácteos), según requerimiento de la administradora.
+CATEGORIAS_TOP_INGREDIENTE = ('Vegetales y Hortalizas', 'Frutas', 'Proteinas')
+
+
+# ==========================================
+# COM-5 v4: REGLAS CONFIGURABLES DE PROTEÍNAS
+# ==========================================
+def _regex_de_lista(tokens, por_defecto):
+    """Compila una lista de tokens a un regex de palabra completa; usa el default si vacía."""
+    lista = [str(t).strip() for t in (tokens or por_defecto) if str(t).strip()]
+    if not lista:
+        lista = por_defecto
+    return re.compile(r'\b(' + '|'.join(lista) + r')\b')
+
+
+def cargar_reglas_proteinas(cur):
+    """
+    COM-5 v4: Lee las listas configurables desde parametros_sistema y retorna
+    (regex_permitidas, regex_vetadas, lista_permitidas, lista_vetadas).
+    Si el parámetro no existe o el JSON es inválido, cae al default histórico.
+    """
+    cur.execute("""
+        SELECT clave, valor FROM parametros_sistema
+        WHERE clave IN ('KMEANS_PROTEINAS_PERMITIDAS', 'KMEANS_INGREDIENTES_VETADOS');
+    """)
+    p = {r['clave']: r['valor'] for r in cur.fetchall()}
+
+    permitidas = PROTEINAS_PERMITIDAS_DEFAULT
+    try:
+        parsed = json.loads(p.get('KMEANS_PROTEINAS_PERMITIDAS') or 'null')
+        if isinstance(parsed, list) and parsed:
+            permitidas = [str(x).lower() for x in parsed]
+    except Exception:
+        permitidas = PROTEINAS_PERMITIDAS_DEFAULT
+
+    vetadas = INGREDIENTES_VETADOS_DEFAULT
+    try:
+        parsed = json.loads(p.get('KMEANS_INGREDIENTES_VETADOS') or 'null')
+        if isinstance(parsed, list) and parsed:
+            vetadas = [str(x).lower() for x in parsed]
+    except Exception:
+        vetadas = INGREDIENTES_VETADOS_DEFAULT
+
+    return (_regex_de_lista(permitidas, PROTEINAS_PERMITIDAS_DEFAULT),
+            _regex_de_lista(vetadas, INGREDIENTES_VETADOS_DEFAULT),
+            permitidas, vetadas)
 
 
 # ==========================================
@@ -83,7 +148,6 @@ def _col(cols, candidatos, contiene=None):
 # DETECCIÓN DEFENSIVA DEL ESQUEMA
 # ==========================================
 def _detectar_puente(cur, tablas):
-    """Tabla puente receta-ingrediente (detalle de ingredientes por receta)."""
     for n in ('receta_ingredientes', 'recetas_ingredientes', 'recetas_almuerzo_ingredientes',
               'receta_almuerzo_ingredientes', 'detalle_recetas', 'receta_detalle',
               'ingredientes_receta', 'ingredientes_recetas'):
@@ -96,7 +160,6 @@ def _detectar_puente(cur, tablas):
 
 
 def _detectar_catalogo(cur, tablas, puente):
-    """Catálogo de ingredientes/alimentos (insumos con precio y nutrición)."""
     for n in ('catalogo_ingredientes', 'ingredientes', 'catalogo_insumos', 'insumos',
               'catalogo_alimentos', 'alimentos', 'food_items', 'fooditem'):
         if n in tablas and n != puente:
@@ -111,7 +174,6 @@ def _detectar_catalogo(cur, tablas, puente):
 
 
 def _detectar_recetas(cur, tablas, puente):
-    """Tabla maestra de recetas del recetario."""
     for n in ('recetas_almuerzo', 'recetas', 'receta_almuerzo', 'recetas_base', 'recipes'):
         if n in tablas and n != puente:
             return n
@@ -124,7 +186,6 @@ def _detectar_recetas(cur, tablas, puente):
 
 
 def _detectar_precios(cur, tablas):
-    """Tabla de histórico de precios del scraper."""
     for n in ('precios_ingredientes', 'precios_historicos', 'historial_precios',
               'ingrediente_precios', 'precios', 'precios_alimentos', 'historico_precios'):
         if n in tablas:
@@ -172,7 +233,7 @@ def diagnosticar_esquema(cur):
 
 
 # ==========================================
-# CARGA DE DATOS BASE
+# CARGA DE PARÁMETROS Y CONTEXTO
 # ==========================================
 def _parametros_kmeans(cur):
     """Lee k y los umbrales de precio por ración desde parametros_sistema."""
@@ -188,32 +249,31 @@ def _parametros_kmeans(cur):
 
 
 def _precios_actuales(cur):
-    """Retorna {ingrediente_id: precio_por_kg} con el último precio conocido."""
-    tablas = _tablas_public(cur)
-    tabla = _detectar_precios(cur, tablas)
-    if not tabla:
-        raise ValueError(
-            "No se detectó la tabla de precios del scraper. "
-            f"Tablas públicas visibles: {', '.join(sorted(tablas))}. "
-            "Use GET /kmeans/diagnostico para ver el detalle.")
-    cols = _columnas(cur, tabla)
-    col_ing = _col(cols, ['ingrediente_id', 'catalogo_id', 'ingrediente', 'alimento_id', 'insumo_id'],
-                   contiene='ingred') or _col(cols, [], contiene='alimento') or _col(cols, [], contiene='insumo')
-    col_fecha = _col(cols, ['fecha', 'fecha_registro', 'fecha_precio'], contiene='fecha')
-    col_precio = _col(cols, ['precio', 'precio_soles', 'precio_kg', 'costo'], contiene='precio') or \
-                 _col(cols, [], contiene='costo')
-    if not col_ing or not col_precio:
-        raise ValueError(f"La tabla de precios '{tabla}' no tiene columnas reconocibles: {cols}")
-    if col_fecha:
-        cur.execute(f"""
-            SELECT DISTINCT ON ({col_ing}) {col_ing} AS ingrediente_id, {col_precio} AS precio
-            FROM {tabla}
-            WHERE {col_precio} IS NOT NULL
-            ORDER BY {col_ing}, {col_fecha} DESC;
-        """)
-    else:
-        cur.execute(f"SELECT {col_ing} AS ingrediente_id, {col_precio} AS precio FROM {tabla};")
-    return {r['ingrediente_id']: float(r['precio']) for r in cur.fetchall()}
+    """
+    COM-8 FIX (conservado): {ingrediente_id: precio_por_kg} con el último día de
+    historial_precios, unido por insumos->ingredientes y convirtiendo la unidad del
+    insumo a gramos (factor_a_base para masa/volumen; peso_estimado_g para discretas).
+    Se toma el MÍNIMO entre insumos del mismo ingrediente (criterio de compra económica).
+    COM-5 v4 (trazabilidad): la versión anterior mapeaba insumo_id como si fuera
+    ingrediente_id (precios cruzados); quedó reemplazada por este join correcto.
+    """
+    cur.execute("""
+        SELECT ins.ingrediente_id AS ing_id,
+               MIN(
+                 CASE WHEN um.tipo_magnitud = 'discreto'
+                      THEN hp.precio_prom / GREATEST(ing.peso_estimado_g, 1)
+                      ELSE hp.precio_prom / GREATEST(um.factor_a_base, 0.0001)
+                 END
+               ) * 1000 AS precio_por_kg
+        FROM historial_precios hp
+        JOIN insumos ins ON ins.id = hp.insumo_id
+        JOIN unidades_medida um ON um.id = ins.unidad_medida_id
+        JOIN ingredientes ing ON ing.id = ins.ingrediente_id
+        WHERE hp.fecha = (SELECT MAX(fecha) FROM historial_precios)
+          AND hp.precio_prom IS NOT NULL AND hp.precio_prom > 0
+        GROUP BY ins.ingrediente_id;
+    """)
+    return {r['ing_id']: float(r['precio_por_kg']) for r in cur.fetchall()}
 
 
 def _cargar_unidades(cur):
@@ -283,8 +343,13 @@ def _a_gramos(cantidad, sim_unidad, gramos_por_unidad=100.0):
 def construir_dataset(cur, precio_bajo_max, precio_medio_max):
     """
     Construye el dataset por ración de todas las recetas y aplica las reglas R1-R3.
+    COM-5 v4: R1 y R2 usan las listas CONFIGURABLES de proteínas permitidas e
+    ingredientes vetados (parametros_sistema), no regex hardcodeadas.
     Retorna (filas, excluidas).
     """
+    # COM-5 v4: reglas de proteínas configurables por el Admin de Sistemas
+    re_permitida, re_vetada, _, _ = cargar_reglas_proteinas(cur)
+
     nutricion = _cargar_nutricion(cur)
     precios = _precios_actuales(cur)
     unidades = _cargar_unidades(cur)
@@ -343,51 +408,69 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
     sel_unid = f"ri.{col_unid} AS unidad_id," if col_unid else "NULL AS unidad_id,"
     cur.execute(f"""
         SELECT ri.{col_rec} AS receta_id, ri.{col_cant} AS cantidad, {sel_unid}
-               ci.id AS ing_id, ci.{col_cat_nom} AS ing_nombre
+               ci.id AS ing_id, ci.{col_cat_nom} AS ing_nombre,
+               um2.tipo_magnitud, um2.factor_a_base, ci.peso_estimado_g,
+               ca.nombre AS categoria
         FROM {puente} ri
-        JOIN {catalogo} ci ON ci.id = ri.{col_ing};
+        JOIN {catalogo} ci ON ci.id = ri.{col_ing}
+        LEFT JOIN unidades_medida um2 ON um2.id = ri.{col_unid if col_unid else 'unidad_medida_id'}
+        LEFT JOIN categorias_alimentos ca ON ca.id = ci.categoria_id
+    """) if col_unid else cur.execute(f"""
+        SELECT ri.{col_rec} AS receta_id, ri.{col_cant} AS cantidad, NULL AS unidad_id,
+               ci.id AS ing_id, ci.{col_cat_nom} AS ing_nombre,
+               um2.tipo_magnitud, um2.factor_a_base, ci.peso_estimado_g,
+               ca.nombre AS categoria
+        FROM {puente} ri
+        JOIN {catalogo} ci ON ci.id = ri.{col_ing}
+        LEFT JOIN unidades_medida um2 ON um2.id = ci.unidad_medida_id
+        LEFT JOIN categorias_alimentos ca ON ca.id = ci.categoria_id
     """)
-    ingredientes_por_receta = {}
-    for r in cur.fetchall():
-        ingredientes_por_receta.setdefault(r['receta_id'], []).append(r)
+
+    costo_acum = {}
+    nombres_acum = {}
+    for fila in cur.fetchall():
+        if fila['tipo_magnitud'] in ('masa', 'volumen'):
+            gramos = float(fila['cantidad']) * float(fila['factor_a_base'] or 1)
+        elif fila['tipo_magnitud'] == 'discreto':
+            gramos = float(fila['cantidad']) * float(fila['peso_estimado_g'] or 1)
+        else:
+            gramos = float(fila['cantidad'])
+        pkg = precios.get(fila['ing_id'])
+        if pkg is not None:
+            costo_acum[fila['receta_id']] = costo_acum.get(fila['receta_id'], 0.0) + (gramos / 1000.0) * pkg
+        nombres_acum.setdefault(fila['receta_id'], []).append({
+            'nombre': fila['ing_nombre'],
+            'categoria': fila['categoria'] or '',
+        })
 
     filas = []
     excluidas = []
     for rec in recetas:
-        items = ingredientes_por_receta.get(rec['id'], [])
+        items = nombres_acum.get(rec['id'], [])
         if not items:
             excluidas.append({'receta_id': rec['id'], 'nombre': rec['nombre'], 'motivo': 'sin_ingredientes'})
             continue
 
-        suma = {'energia': 0.0, 'proteina': 0.0, 'hierro': 0.0, 'fibra': 0.0}
-        costo_total = 0.0
+        # R1/R2 con reglas CONFIGURABLES (COM-5 v4): primero permitida (exceptúa hígado de res del veto)
         tiene_proteina_permitida = False
         motivo_exclusion = None
-
-        for it in items:
-            nombre_norm = _normalizar(it['ing_nombre'])
-
-            # R1/R2: primero se evalúa proteína permitida (exceptúa hígado de res del veto)
-            es_permitida = bool(RE_PROTEINA_PERMITIDA.search(nombre_norm))
-            if es_permitida:
+        for ing in items:
+            nombre_norm = _normalizar(ing['nombre'])
+            if re_permitida.search(nombre_norm):
                 tiene_proteina_permitida = True
-            elif RE_PROHIBIDO.search(nombre_norm):
+            elif re_vetada.search(nombre_norm):
                 motivo_exclusion = motivo_exclusion or 'contiene_res_o_cerdo'
 
-            nut = _match_nutricion(nombre_norm, nutricion)
-            gramos = _a_gramos(it['cantidad'],
-                               unidades.get(it['unidad_id']),
-                               nut['gramos_por_unidad'] if nut else 100.0)
+        suma = {'energia': 0.0, 'proteina': 0.0, 'hierro': 0.0, 'fibra': 0.0}
+        nut_match = 0
+        for ing in items:
+            nut = _match_nutricion(_normalizar(ing['nombre']), nutricion)
             if nut:
-                factor = gramos / 100.0
-                suma['energia'] += float(nut['energia_kcal_100g']) * factor
-                suma['proteina'] += float(nut['proteina_g_100g']) * factor
-                suma['hierro'] += float(nut['hierro_mg_100g']) * factor
-                suma['fibra'] += float(nut['fibra_g_100g']) * factor
-
-            precio_kg = precios.get(it['ing_id'])
-            if precio_kg is not None:
-                costo_total += (gramos / 1000.0) * precio_kg
+                nut_match += 1
+                # gramos ya acumulados en costo; aquí solo nutrición por nombre
+        # Nutrición desde columnas de recetas_almuerzo (por ración)
+        rac = float(rec['raciones']) if rec['raciones'] else 4.0
+        costo_total = costo_acum.get(rec['id'], 0.0)
 
         if motivo_exclusion:
             excluidas.append({'receta_id': rec['id'], 'nombre': rec['nombre'], 'motivo': motivo_exclusion})
@@ -395,16 +478,11 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
         if not tiene_proteina_permitida:
             excluidas.append({'receta_id': rec['id'], 'nombre': rec['nombre'], 'motivo': 'sin_proteina_permitida'})
             continue
-        if suma['energia'] <= 0:
-            excluidas.append({'receta_id': rec['id'], 'nombre': rec['nombre'], 'motivo': 'sin_datos_nutricion'})
-            continue
         if costo_total <= 0:
             excluidas.append({'receta_id': rec['id'], 'nombre': rec['nombre'], 'motivo': 'sin_precio'})
             continue
 
-        raciones = float(rec['raciones']) if rec['raciones'] else 4.0
-        precio_racion = costo_total / raciones
-
+        precio_racion = costo_total / rac
         # R3: nivel de precio y exclusión de nivel alto
         if precio_racion <= precio_bajo_max:
             nivel = 'bajo'
@@ -417,15 +495,27 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
         filas.append({
             'receta_id': rec['id'],
             'nombre': rec['nombre'],
-            'energia_kcal': round(suma['energia'] / raciones, 2),
-            'hierro_mg': round(suma['hierro'] / raciones, 2),
-            'proteina_g': round(suma['proteina'] / raciones, 2),
-            'fibra_g': round(suma['fibra'] / raciones, 2),
+            'energia_kcal': round(float(rec['energia_kcal'] or 0) / rac, 2),
+            'hierro_mg': round(float(rec['hierro_mg'] or 0) / rac, 2),
+            'proteina_g': round(float(rec['proteina_g'] or 0) / rac, 2),
+            'fibra_g': 0.0,
             'precio_soles': round(precio_racion, 2),
             'nivel_precio': nivel,
+            'ingredientes': items,
         })
 
     return filas, excluidas
+
+
+def _minmax(recetas) -> dict:
+    if not recetas:
+        return {k: (0, 1) for k in ('hierro', 'proteina', 'energia', 'precio')}
+    return {
+        'hierro': (min(r['hierro_mg'] for r in recetas), max(r['hierro_mg'] for r in recetas)),
+        'proteina': (min(r['proteina_g'] for r in recetas), max(r['proteina_g'] for r in recetas)),
+        'energia': (min(r['energia_kcal'] for r in recetas), max(r['energia_kcal'] for r in recetas)),
+        'precio': (min(r['precio_soles'] for r in recetas), max(r['precio_soles'] for r in recetas)),
+    }
 
 
 # ==========================================
@@ -473,8 +563,7 @@ def entrenar_y_persistir(cur):
     if len(filas) < k:
         raise ValueError(
             f"Solo {len(filas)} recetas aptas para k={k}. "
-            "Revise las reglas de negocio o amplíe el recetario. "
-            f"Excluidas: {[(e['nombre'], e['motivo']) for e in excluidas[:10]]}")
+            "Revise las reglas de negocio o amplíe el recetario.")
 
     X = np.array([[f['energia_kcal'], f['hierro_mg'], f['proteina_g'], f['precio_soles']] for f in filas])
     scaler = StandardScaler()
