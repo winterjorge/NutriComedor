@@ -9,9 +9,13 @@ Historial:
  - COM-5 v4 / COM-8 v7: router del panel de gráficos de Machine Learning (modelos_ml),
    exclusivo del Administrador de Sistemas.
  - COM-38: router de reseteo/cambio de clave por Admin de Sistemas (reset_clave).
- - COM-39 (este archivo): router de gestión de directivos por comedor (directivos),
-   exclusivo del Administrador de Sistemas. (En una entrega anterior fue rotulado por
-   error como "COM-38 v2"; se corrige la trazabilidad sin cambios funcionales.)
+ - COM-39: router de gestión de directivos por comedor (directivos), exclusivo del
+   Administrador de Sistemas.
+ - COM-39 fix (este archivo): el include de `directivos` se mueve ANTES del include de
+   `comedores`. Causa: la plantilla GET /comedores/{comedor_id} (int) del router COM-21
+   encajaba primero con /comedores/buscar-por-distrito y fallaba la conversión a int
+   con 422 Unprocessable Content, dejando inaccesible la ruta exacta de COM-39.
+   La línea include original queda comentada en su posición previa (trazabilidad).
 """
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -53,7 +57,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="API - NutriComedor", version="2.14.0", lifespan=lifespan)
+app = FastAPI(title="API - NutriComedor", version="2.14.1", lifespan=lifespan)
 
 # Configuración de CORS (Mantiene compatibilidad con tu Frontend)
 app.add_middleware(
@@ -67,6 +71,10 @@ app.add_middleware(
 # Registro de Routers con el prefijo global de la API
 app.include_router(health.router, prefix="/api/v1")
 app.include_router(auth.router, prefix="/api/v1")
+# COM-39 fix: `directivos` se registra ANTES que `comedores` para que sus rutas exactas
+# (/comedores/buscar-por-distrito) y con sufijo (/comedores/{id}/directivos[...]) ganen
+# a la plantilla genérica GET /comedores/{comedor_id} (que validaba int y daba 422).
+app.include_router(directivos.router, prefix="/api/v1")       # COM-39 (orden crítico)
 app.include_router(comedores.router, prefix="/api/v1")        # COM-21
 app.include_router(grupos.router, prefix="/api/v1")           # COM-22/COM-23
 app.include_router(usuarios.router, prefix="/api/v1")         # COM-23/COM-26
@@ -77,7 +85,8 @@ app.include_router(kmeans.router, prefix="/api/v1")           # COM-5
 app.include_router(propuestas_menu.router, prefix="/api/v1")  # COM-8
 app.include_router(modelos_ml.router, prefix="/api/v1")       # COM-5 v4 / COM-8 v7
 app.include_router(reset_clave.router, prefix="/api/v1")      # COM-38
-app.include_router(directivos.router, prefix="/api/v1")       # COM-39
+# COM-39 fix (trazabilidad): posición original del include de directivos, comentada.
+# app.include_router(directivos.router, prefix="/api/v1")     # COM-39 (antes, después de reset_clave)
 app.include_router(parametros.router, prefix="/api/v1")
 app.include_router(presupuesto.router, prefix="/api/v1")
 app.include_router(recetas.router, prefix="/api/v1")
