@@ -11,11 +11,11 @@ Historial:
  - COM-38: router de reseteo/cambio de clave por Admin de Sistemas (reset_clave).
  - COM-39: router de gestión de directivos por comedor (directivos), exclusivo del
    Administrador de Sistemas.
- - COM-39 fix (este archivo): el include de `directivos` se mueve ANTES del include de
-   `comedores`. Causa: la plantilla GET /comedores/{comedor_id} (int) del router COM-21
-   encajaba primero con /comedores/buscar-por-distrito y fallaba la conversión a int
-   con 422 Unprocessable Content, dejando inaccesible la ruta exacta de COM-39.
-   La línea include original queda comentada en su posición previa (trazabilidad).
+ - COM-39 fix: el include de `directivos` va ANTES que el de `comedores` (sombra de
+   rutas /comedores/{comedor_id} que respondía 422 a /comedores/buscar-por-distrito).
+ - COM-37 (este archivo): router de Gestión de Ingredientes (ingredientes_admin),
+   exclusivo del Administrador de Sistemas: CRUD sin borrado, precios manuales con
+   vigencia y re-emparejado de insumos huérfanos.
 """
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -42,11 +42,13 @@ from routers import (
     modelos_ml,       # COM-5 v4 / COM-8 v7: panel de gráficos de ML (solo Admin de Sistemas)
     reset_clave,      # COM-38: reseteo/cambio de clave por Admin de Sistemas
     directivos,       # COM-39: gestión de directivos por comedor (solo Admin de Sistemas)
+    ingredientes_admin,  # COM-37: gestión de ingredientes y precios manuales (solo Admin)
 )
 # Asegurado de esquema dinámico (parámetros, planificación, raciones, seguridad,
 # comedores, grupos, gestión de usuarios, permisos por vistas, ubicaciones,
-# esquema K-means con seed nutricional, esquema de propuestas COM-8 y seeds de
-# módulos ML / proteínas configurables COM-5 v4) al arrancar
+# esquema K-means con seed nutricional, esquema de propuestas COM-8, seeds de
+# módulos ML / proteínas configurables COM-5 v4 y esquema COM-37 de precios
+# manuales + módulo gestion_ingredientes) al arrancar
 from db_bootstrap import asegurar_esquema
 
 
@@ -57,7 +59,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="API - NutriComedor", version="2.14.1", lifespan=lifespan)
+app = FastAPI(title="API - NutriComedor", version="2.15.0", lifespan=lifespan)
 
 # Configuración de CORS (Mantiene compatibilidad con tu Frontend)
 app.add_middleware(
@@ -72,8 +74,7 @@ app.add_middleware(
 app.include_router(health.router, prefix="/api/v1")
 app.include_router(auth.router, prefix="/api/v1")
 # COM-39 fix: `directivos` se registra ANTES que `comedores` para que sus rutas exactas
-# (/comedores/buscar-por-distrito) y con sufijo (/comedores/{id}/directivos[...]) ganen
-# a la plantilla genérica GET /comedores/{comedor_id} (que validaba int y daba 422).
+# y con sufijo ganen a la plantilla genérica GET /comedores/{comedor_id} (422 histórico).
 app.include_router(directivos.router, prefix="/api/v1")       # COM-39 (orden crítico)
 app.include_router(comedores.router, prefix="/api/v1")        # COM-21
 app.include_router(grupos.router, prefix="/api/v1")           # COM-22/COM-23
@@ -85,6 +86,7 @@ app.include_router(kmeans.router, prefix="/api/v1")           # COM-5
 app.include_router(propuestas_menu.router, prefix="/api/v1")  # COM-8
 app.include_router(modelos_ml.router, prefix="/api/v1")       # COM-5 v4 / COM-8 v7
 app.include_router(reset_clave.router, prefix="/api/v1")      # COM-38
+app.include_router(ingredientes_admin.router, prefix="/api/v1")  # COM-37
 # COM-39 fix (trazabilidad): posición original del include de directivos, comentada.
 # app.include_router(directivos.router, prefix="/api/v1")     # COM-39 (antes, después de reset_clave)
 app.include_router(parametros.router, prefix="/api/v1")

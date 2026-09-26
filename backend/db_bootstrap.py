@@ -29,12 +29,15 @@ Historial de integraciones:
            se purgan membresías de comedor de los admins; el bootstrap ya no inventa
            membresías (se comentaron _asociar_usuarios_existentes y
            _migrar_membresias_legacy).
- - COM-40 v2 (este archivo): la carga inicial NO crea usuarios de comedor ni membresías
-           de piloto: se COMENTA _asegurar_membresias_piloto y su llamada. Los únicos
-           usuarios de arranque son los dos admins canónicos (clave provisoria
-           Admin2026); todos los demás se crean manualmente desde la interfaz
-           (COM-26 / COM-39). En BDs existentes, los usuarios previos conservan sus
-           membresías reales: solo se degrada su rol de sistema si no es canónico.
+ - COM-40 v2: la carga inicial NO crea usuarios de comedor ni membresías de piloto:
+           se COMENTA _asegurar_membresias_piloto y su llamada. Los únicos usuarios de
+           arranque son los dos admins canónicos (clave provisoria Admin2026); todos
+           los demás se crean manualmente desde la interfaz (COM-26 / COM-39).
+ - COM-37 (este archivo): paso 14 de esquema de Gestión de Ingredientes: tabla
+           ingredientes_precios_manuales (precios promedio manuales con vigencia
+           opcional, por unidad estándar del ingrediente) y módulo de vista
+           'gestion_ingredientes' ligado EXCLUSIVAMENTE al rol Administrador de
+           Sistemas, con auditoría automática en logs en cada arranque.
 """
 import time
 import psycopg2
@@ -64,6 +67,8 @@ from nutricion_seed import seedar_nutricion
 from esquema_planificaciones import aplicar_esquema_planificaciones
 # COM-5 v4 / COM-8 v7 / COM-36: módulos ML exclusivos del Admin + proteínas configurables
 from esquema_modelos_ml import aplicar_esquema_modelos_ml, auditar_modulos_ml
+# COM-37: esquema de Gestión de Ingredientes (precios manuales con vigencia + módulo Admin)
+from esquema_ingredientes_admin import aplicar_esquema_ingredientes_admin
 
 # ==========================================
 # CONSTANTES DE ROLES (COM-21)
@@ -560,6 +565,8 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
     purga de membresías de comedor de admins.
     COM-40 v2: el arranque NO crea usuarios de comedor ni membresías de piloto;
     los únicos usuarios creados son los admins canónicos 00000000 y 99999999.
+    COM-37: paso 14 de esquema de Gestión de Ingredientes (precios manuales con
+    vigencia + módulo 'gestion_ingredientes' exclusivo del Admin) con auditoría.
     """
     conn = None
     for intento in range(1, reintentos + 1):
@@ -617,6 +624,24 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
             # 12. COM-5 v4 / COM-36: módulos ML exclusivos del Admin + proteínas configurables
             aplicar_esquema_modelos_ml(cur)
             modulos_ok, enlaces_ok = auditar_modulos_ml(cur)
+            # 13. COM-37: esquema de Gestión de Ingredientes (precios manuales con
+            #     vigencia + módulo 'gestion_ingredientes' exclusivo del Admin) y su
+            #     auditoría automática de despliegue.
+            aplicar_esquema_ingredientes_admin(cur)
+            cur.execute("""
+                SELECT COUNT(*) AS n FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = 'ingredientes_precios_manuales';
+            """)
+            tabla_pm_ok = int(cur.fetchone()['n']) == 1
+            cur.execute("""
+                SELECT COUNT(*) AS n
+                FROM roles_modulos rm
+                JOIN modulos_sistema m ON m.id = rm.modulo_id
+                JOIN roles_grupo r ON r.id = rm.rol_id
+                WHERE m.clave = 'gestion_ingredientes'
+                  AND r.nombre ILIKE 'administrador de sistema%';
+            """)
+            enlaces_gi = int(cur.fetchone()['n'])
             conn.commit()
             cur.close()
             if migrados:
@@ -633,9 +658,15 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
             print(f"[BOOTSTRAP] COM-36: auditoría módulos ML -> módulos={modulos_ok}/2, enlaces_admin={enlaces_ok}/2.")
             if modulos_ok < 2 or enlaces_ok < 2:
                 print("[BOOTSTRAP] COM-36: [AVISO] Faltan módulos/enlaces ML; se reintentará en el próximo arranque.")
+            # COM-37: auditoría del esquema de Gestión de Ingredientes
+            print(f"[BOOTSTRAP] COM-37: tabla ingredientes_precios_manuales={'OK' if tabla_pm_ok else 'FALTA'}, "
+                  f"enlaces módulo gestion_ingredientes al Admin={enlaces_gi}/1.")
+            if not tabla_pm_ok or enlaces_gi < 1:
+                print("[BOOTSTRAP] COM-37: [AVISO] Esquema de gestión de ingredientes incompleto; "
+                      "se reintentará en el próximo arranque.")
             print("[BOOTSTRAP] Esquema dinámico verificado/creado correctamente "
-                  "(incluye ubicación COM-27, K-means COM-5, propuestas COM-8, módulos ML COM-36 "
-                  "y separación de deberes COM-40/COM-40 v2).")
+                  "(incluye ubicación COM-27, K-means COM-5, propuestas COM-8, módulos ML COM-36, "
+                  "separación de deberes COM-40/COM-40 v2 y gestión de ingredientes COM-37).")
             return True
         except Exception as e:
             print(f"[BOOTSTRAP] Intento {intento}/{reintentos} fallido: {e}")
