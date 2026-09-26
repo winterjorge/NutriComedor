@@ -24,9 +24,12 @@
  *           (el router v4 valida Admin de Sistemas) y se agregan getProteinasKmeans /
  *           updateProteinasKmeans (R1/R2). Se añade el bloque MODELOS_ML con los
  *           endpoints del panel de gráficos exclusivo del Admin de Sistemas.
- *   COM-38 (este archivo): se agrega `resetearClaveUsuario` (POST /usuarios/{id}/reset-clave)
- *           para el reseteo/cambio de contraseña de cualquier usuario por el Admin de
- *           Sistemas (modo random o clave específica). Ningún método existente se modifica.
+ *   COM-38: se agrega `resetearClaveUsuario` (POST /usuarios/{id}/reset-clave) para el
+ *           reseteo/cambio de contraseña de cualquier usuario por el Admin de Sistemas.
+ *   COM-39 (este archivo): se agrega el bloque DIRECTIVOS DE COMEDOR con
+ *           buscarComedoresPorDistrito, getDirectivosComedor y actualizarDirectivos
+ *           (búsqueda por distrito+nombre, listado de directivos/vacantes y aplicación
+ *           por lotes de bajas/reemplazos de cargo). Ningún método existente se modifica.
  */
 
 const API_BASE = '/api/v1';
@@ -173,6 +176,38 @@ export const api = {
     },
 
     // ==========================================
+    // DIRECTIVOS DE COMEDOR (COM-39)
+    // ==========================================
+    // COM-39: comedores del distrito elegido (cascada COM-27) cuyo nombre coincide
+    // con el texto escrito. Si se cambia un nivel superior de la cascada, el panel
+    // limpia los inferiores antes de volver a llamar este método.
+    buscarComedoresPorDistrito: async (distrito, q, usuarioSolicitanteId) => {
+        const params = new URLSearchParams({ usuario_solicitante_id: String(usuarioSolicitanteId) });
+        if (distrito) params.append('distrito', distrito);
+        if (q) params.append('q', q);
+        const response = await fetch(`${API_BASE}/comedores/buscar-por-distrito?${params.toString()}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al buscar comedores del distrito'));
+        return response.json();
+    },
+    // COM-39: directivos activos del comedor (documento, nombres y cargo) + roles vacantes
+    getDirectivosComedor: async (comedorId, usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/comedores/${comedorId}/directivos?usuario_solicitante_id=${usuarioSolicitanteId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener los directivos del comedor'));
+        return response.json();
+    },
+    // COM-39: aplica en UNA transacción el lote de operaciones en cola
+    // (bajas y reemplazos; el reemplazo puede incluir nuevo_usuario para registro inmediato)
+    actualizarDirectivos: async (comedorId, data) => {
+        const response = await fetch(`${API_BASE}/comedores/${comedorId}/directivos/actualizar`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al aplicar los cambios de directivos'));
+        return response.json();
+    },
+
+    // ==========================================
     // GRUPOS, PRIVILEGIOS Y ROLES TEMPORALES (COM-22 / COM-23)
     // ==========================================
     getGrupos: async () => {
@@ -286,7 +321,7 @@ export const api = {
     },
 
     // ==========================================
-    // USUARIOS: FLUJO CRUD POR PERFIL (COM-23 / COM-26)
+    // USUARIOS: FLUJO CRUD POR PERFIL (COM-23 / COM-26 / COM-38)
     // ==========================================
     getUsuarios: async (params = {}) => {
         const qs = new URLSearchParams(params).toString();
