@@ -9,13 +9,17 @@ Objetivo: Motor del modelo K-means del recetario (COM-5). Construye el dataset p
 Historial:
  - COM-5 v1/v2/v3: reglas R1-R3 hardcodeadas; detección defensiva de esquema; FIX de
    precios por gramo vía insumos->historial_precios; top-3 tolerante a formatos legacy.
- - COM-5 v4 (este archivo): las listas de proteínas permitidas e ingredientes vetados
-   dejan de estar hardcodeadas: se leen de parametros_sistema
-   (KMEANS_PROTEINAS_PERMITIDAS / KMEANS_INGREDIENTES_VETADOS) y son editables desde la
-   vista de Clusters (exclusiva del Admin de Sistemas). Las expresiones regulares fijas
-   anteriores se conservan COMENTADAS como valores por defecto (fallback).
-Detección de esquema: los nombres de tablas/columnas se resuelven de forma defensiva
-          (lista de candidatos + heurística por palabras clave).
+ - COM-5 v4: las listas de proteínas permitidas e ingredientes vetados dejan de estar
+   hardcodeadas: se leen de parametros_sistema (KMEANS_PROTEINAS_PERMITIDAS /
+   KMEANS_INGREDIENTES_VETADOS) y son editables desde la vista de Clusters (exclusiva
+   del Admin de Sistemas). Las expresiones regulares fijas anteriores se conservan
+   COMENTADAS como valores por defecto (fallback).
+ - COM-5 v5 (este archivo): FIX del KeyError 'energia_kcal'. El SELECT de recetas de
+   construir_dataset NO incluía las columnas nutricionales de recetas_almuerzo
+   (hierro_mg, proteina_g, energia_kcal), por lo que el RealDictRow no tenía esas
+   claves y el entrenamiento abortaba. Se agregan al SELECT con detección defensiva,
+   se omiten recetas sin nutrición cargada y se comenta (trazabilidad) el bloque muerto
+   de match nutricional por nombre. El SELECT anterior queda comentado, no eliminado.
 Uso: Importado por routers/kmeans.py. Todas las funciones reciben un cursor psycopg2
      (RealDictCursor); el caller gestiona la transacción.
 Referencia: ticket COM-5 (solo trazabilidad; los nombres obedecen a la funcionalidad).
@@ -89,7 +93,6 @@ def cargar_reglas_proteinas(cur):
         WHERE clave IN ('KMEANS_PROTEINAS_PERMITIDAS', 'KMEANS_INGREDIENTES_VETADOS');
     """)
     p = {r['clave']: r['valor'] for r in cur.fetchall()}
-
     permitidas = PROTEINAS_PERMITIDAS_DEFAULT
     try:
         parsed = json.loads(p.get('KMEANS_PROTEINAS_PERMITIDAS') or 'null')
@@ -97,7 +100,6 @@ def cargar_reglas_proteinas(cur):
             permitidas = [str(x).lower() for x in parsed]
     except Exception:
         permitidas = PROTEINAS_PERMITIDAS_DEFAULT
-
     vetadas = INGREDIENTES_VETADOS_DEFAULT
     try:
         parsed = json.loads(p.get('KMEANS_INGREDIENTES_VETADOS') or 'null')
@@ -105,7 +107,6 @@ def cargar_reglas_proteinas(cur):
             vetadas = [str(x).lower() for x in parsed]
     except Exception:
         vetadas = INGREDIENTES_VETADOS_DEFAULT
-
     return (_regex_de_lista(permitidas, PROTEINAS_PERMITIDAS_DEFAULT),
             _regex_de_lista(vetadas, INGREDIENTES_VETADOS_DEFAULT),
             permitidas, vetadas)
@@ -345,11 +346,12 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
     Construye el dataset por ración de todas las recetas y aplica las reglas R1-R3.
     COM-5 v4: R1 y R2 usan las listas CONFIGURABLES de proteínas permitidas e
     ingredientes vetados (parametros_sistema), no regex hardcodeadas.
+    COM-5 v5: el SELECT de recetas incluye las columnas nutricionales
+    (hierro_mg, proteina_g, energia_kcal) que antes faltaban y causaban KeyError.
     Retorna (filas, excluidas).
     """
     # COM-5 v4: reglas de proteínas configurables por el Admin de Sistemas
     re_permitida, re_vetada, _, _ = cargar_reglas_proteinas(cur)
-
     nutricion = _cargar_nutricion(cur)
     precios = _precios_actuales(cur)
     unidades = _cargar_unidades(cur)
@@ -401,30 +403,49 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
     elif col_r_est == 'estado':
         filtro_estado = f" WHERE LOWER({col_r_est}::text) IN ('activo', 'true', 'vigente')"
 
+    # COM-5 v5 (FIX): detección de las columnas nutricionales de la tabla de recetas.
+    # Sin ellas en el SELECT, el RealDictRow no trae las claves y entrenar abortaba
+    # con KeyError 'energia_kcal'.
+    col_r_hie = _col(cols_r, ['hierro_mg', 'hierro'], contiene='hierro')
+    col_r_pro = _col(cols_r, ['proteina_g', 'proteina'], contiene='proteina')
+    col_r_ene = _col(cols_r, ['energia_kcal', 'energia'], contiene='energia')
+    if not (col_r_hie and col_r_pro and col_r_ene):
+        raise ValueError(
+            f"La tabla de recetas '{recetas_tabla}' no tiene columnas nutricionales "
+            f"(hierro_mg / proteina_g / energia_kcal). Columnas detectadas: {cols_r}")
+    sel_nut = f", {col_r_hie} AS hierro_mg, {col_r_pro} AS proteina_g, {col_r_ene} AS energia_kcal"
+
     sel_rac = f"{col_r_rac} AS raciones" if col_r_rac else "NULL AS raciones"
-    cur.execute(f"SELECT id, {col_r_nom} AS nombre, {sel_rac} FROM {recetas_tabla}{filtro_estado};")
+
+    # COM-5 v5 (trazabilidad): SELECT anterior COMENTADO: no incluía las columnas
+    # nutricionales y provocaba KeyError 'energia_kcal' en el armado de `filas`.
+    # cur.execute(f"SELECT id, {col_r_nom} AS nombre, {sel_rac} FROM {recetas_tabla}{filtro_estado};")
+    cur.execute(f"SELECT id, {col_r_nom} AS nombre, {sel_rac}{sel_nut} FROM {recetas_tabla}{filtro_estado};")
     recetas = cur.fetchall()
 
     sel_unid = f"ri.{col_unid} AS unidad_id," if col_unid else "NULL AS unidad_id,"
-    cur.execute(f"""
-        SELECT ri.{col_rec} AS receta_id, ri.{col_cant} AS cantidad, {sel_unid}
-               ci.id AS ing_id, ci.{col_cat_nom} AS ing_nombre,
-               um2.tipo_magnitud, um2.factor_a_base, ci.peso_estimado_g,
-               ca.nombre AS categoria
-        FROM {puente} ri
-        JOIN {catalogo} ci ON ci.id = ri.{col_ing}
-        LEFT JOIN unidades_medida um2 ON um2.id = ri.{col_unid if col_unid else 'unidad_medida_id'}
-        LEFT JOIN categorias_alimentos ca ON ca.id = ci.categoria_id
-    """) if col_unid else cur.execute(f"""
-        SELECT ri.{col_rec} AS receta_id, ri.{col_cant} AS cantidad, NULL AS unidad_id,
-               ci.id AS ing_id, ci.{col_cat_nom} AS ing_nombre,
-               um2.tipo_magnitud, um2.factor_a_base, ci.peso_estimado_g,
-               ca.nombre AS categoria
-        FROM {puente} ri
-        JOIN {catalogo} ci ON ci.id = ri.{col_ing}
-        LEFT JOIN unidades_medida um2 ON um2.id = ci.unidad_medida_id
-        LEFT JOIN categorias_alimentos ca ON ca.id = ci.categoria_id
-    """)
+    if col_unid:
+        cur.execute(f"""
+            SELECT ri.{col_rec} AS receta_id, ri.{col_cant} AS cantidad, {sel_unid}
+                   ci.id AS ing_id, ci.{col_cat_nom} AS ing_nombre,
+                   um2.tipo_magnitud, um2.factor_a_base, ci.peso_estimado_g,
+                   ca.nombre AS categoria
+            FROM {puente} ri
+            JOIN {catalogo} ci ON ci.id = ri.{col_ing}
+            LEFT JOIN unidades_medida um2 ON um2.id = ri.{col_unid}
+            LEFT JOIN categorias_alimentos ca ON ca.id = ci.categoria_id
+        """)
+    else:
+        cur.execute(f"""
+            SELECT ri.{col_rec} AS receta_id, ri.{col_cant} AS cantidad, NULL AS unidad_id,
+                   ci.id AS ing_id, ci.{col_cat_nom} AS ing_nombre,
+                   um2.tipo_magnitud, um2.factor_a_base, ci.peso_estimado_g,
+                   ca.nombre AS categoria
+            FROM {puente} ri
+            JOIN {catalogo} ci ON ci.id = ri.{col_ing}
+            LEFT JOIN unidades_medida um2 ON um2.id = ci.unidad_medida_id
+            LEFT JOIN categorias_alimentos ca ON ca.id = ci.categoria_id
+        """)
 
     costo_acum = {}
     nombres_acum = {}
@@ -446,6 +467,11 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
     filas = []
     excluidas = []
     for rec in recetas:
+        # COM-5 v5: recetas sin nutrición cargada se omiten del modelo (antes el
+        # KeyError ocultaba este caso; ahora se filtra explícitamente).
+        if rec.get('energia_kcal') is None:
+            continue
+
         items = nombres_acum.get(rec['id'], [])
         if not items:
             excluidas.append({'receta_id': rec['id'], 'nombre': rec['nombre'], 'motivo': 'sin_ingredientes'})
@@ -461,14 +487,16 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
             elif re_vetada.search(nombre_norm):
                 motivo_exclusion = motivo_exclusion or 'contiene_res_o_cerdo'
 
-        suma = {'energia': 0.0, 'proteina': 0.0, 'hierro': 0.0, 'fibra': 0.0}
-        nut_match = 0
-        for ing in items:
-            nut = _match_nutricion(_normalizar(ing['nombre']), nutricion)
-            if nut:
-                nut_match += 1
-                # gramos ya acumulados en costo; aquí solo nutrición por nombre
-        # Nutrición desde columnas de recetas_almuerzo (por ración)
+        # COM-5 v5 (trazabilidad): bloque muerto COMENTADO. El match nutricional por
+        # nombre (ingredientes_nutricion) ya no se usa para las features: la nutrición
+        # por ración se lee directamente de las columnas de recetas_almuerzo.
+        # suma = {'energia': 0.0, 'proteina': 0.0, 'hierro': 0.0, 'fibra': 0.0}
+        # nut_match = 0
+        # for ing in items:
+        #     nut = _match_nutricion(_normalizar(ing['nombre']), nutricion)
+        #     if nut:
+        #         nut_match += 1
+
         rac = float(rec['raciones']) if rec['raciones'] else 4.0
         costo_total = costo_acum.get(rec['id'], 0.0)
 
@@ -483,6 +511,7 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
             continue
 
         precio_racion = costo_total / rac
+
         # R3: nivel de precio y exclusión de nivel alto
         if precio_racion <= precio_bajo_max:
             nivel = 'bajo'
@@ -495,6 +524,7 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
         filas.append({
             'receta_id': rec['id'],
             'nombre': rec['nombre'],
+            # COM-5 v5: nutrición POR RACIÓN desde las columnas ya presentes en el SELECT
             'energia_kcal': round(float(rec['energia_kcal'] or 0) / rac, 2),
             'hierro_mg': round(float(rec['hierro_mg'] or 0) / rac, 2),
             'proteina_g': round(float(rec['proteina_g'] or 0) / rac, 2),
