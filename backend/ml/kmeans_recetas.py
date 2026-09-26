@@ -14,12 +14,15 @@ Historial:
    KMEANS_INGREDIENTES_VETADOS) y son editables desde la vista de Clusters (exclusiva
    del Admin de Sistemas). Las expresiones regulares fijas anteriores se conservan
    COMENTADAS como valores por defecto (fallback).
- - COM-5 v5 (este archivo): FIX del KeyError 'energia_kcal'. El SELECT de recetas de
-   construir_dataset NO incluía las columnas nutricionales de recetas_almuerzo
-   (hierro_mg, proteina_g, energia_kcal), por lo que el RealDictRow no tenía esas
-   claves y el entrenamiento abortaba. Se agregan al SELECT con detección defensiva,
-   se omiten recetas sin nutrición cargada y se comenta (trazabilidad) el bloque muerto
-   de match nutricional por nombre. El SELECT anterior queda comentado, no eliminado.
+ - COM-5 v5: FIX del KeyError 'energia_kcal': el SELECT de recetas de construir_dataset
+   no incluía las columnas nutricionales de recetas_almuerzo (hierro_mg, proteina_g,
+   energia_kcal); se agregan con detección defensiva y se omiten recetas sin nutrición.
+ - COM-5 v6 (este archivo): FIX de unidades de centroides. K-means entrena sobre
+   features estandarizadas, por lo que km.cluster_centers_ vive en espacio z y la UI
+   mostraba valores negativos rotulados como kcal/mg/g/S/. Ahora los centroides se
+   persisten en UNIDADES REALES por ración vía scaler.inverse_transform(), y los
+   centroides estandarizados se conservan en parametros.centroides_z para auditoría.
+   El bloque de persistencia anterior queda COMENTADO por trazabilidad.
 Uso: Importado por routers/kmeans.py. Todas las funciones reciben un cursor psycopg2
      (RealDictCursor); el caller gestiona la transacción.
 Referencia: ticket COM-5 (solo trazabilidad; los nombres obedecen a la funcionalidad).
@@ -553,7 +556,7 @@ def _minmax(recetas) -> dict:
 # ==========================================
 def _etiquetar_centroides(centros_estandarizados):
     """
-    Biyección determinista centroide->código de cluster:
+    Biyección determinista centroide->código de cluster (sobre espacio estandarizado):
       1) mayor hierro -> Anti-Anemia Premium
       3) menor energía (restantes) -> Ligero y Saludable
       2) mayor proteína+energía (restantes) -> Fortalecimiento Balanceado
@@ -585,6 +588,8 @@ def entrenar_y_persistir(cur):
     """
     Ejecuta el pipeline completo: dataset -> reglas -> K-means(k) -> etiquetado ->
     persistencia del modelo activo y su asignación receta->cluster.
+    COM-5 v6: los centroides persistidos en `centroides` van en UNIDADES REALES por
+    ración (inverse_transform); los estandarizados quedan en parametros.centroides_z.
     Retorna el resumen del entrenamiento (dict). El caller gestiona el commit.
     """
     k, bajo_max, medio_max = _parametros_kmeans(cur)
@@ -607,13 +612,33 @@ def entrenar_y_persistir(cur):
 
     asignacion = _etiquetar_centroides(km.cluster_centers_)
 
+    # COM-5 v6 (FIX UX): centroides en UNIDADES REALES por ración para la UI.
+    # km.cluster_centers_ vive en espacio estandarizado (z-score); mostrarlo tal cual
+    # producía valores negativos rotulados como kcal/mg/g/S/ en las tarjetas.
+    centros_crudos = scaler.inverse_transform(km.cluster_centers_)
     centroides = {}
+    centroides_z = {}
     for i, codigo in asignacion.items():
+        # COM-5 v6 (trazabilidad): bloque anterior COMENTADO (guardaba espacio z como
+        # si fueran unidades reales):
+        # centroides[str(codigo)] = {
+        #     'energia_kcal': round(float(km.cluster_centers_[i][0]), 2),
+        #     'hierro_mg': round(float(km.cluster_centers_[i][1]), 2),
+        #     'proteina_g': round(float(km.cluster_centers_[i][2]), 2),
+        #     'precio_soles': round(float(km.cluster_centers_[i][3]), 2),
+        # }
         centroides[str(codigo)] = {
-            'energia_kcal': round(float(km.cluster_centers_[i][0]), 2),
-            'hierro_mg': round(float(km.cluster_centers_[i][1]), 2),
-            'proteina_g': round(float(km.cluster_centers_[i][2]), 2),
-            'precio_soles': round(float(km.cluster_centers_[i][3]), 2),
+            'energia_kcal': round(float(centros_crudos[i][0]), 2),
+            'hierro_mg': round(float(centros_crudos[i][1]), 2),
+            'proteina_g': round(float(centros_crudos[i][2]), 2),
+            'precio_soles': round(float(centros_crudos[i][3]), 2),
+        }
+        # Auditoría técnica: centroides estandarizados (z-score) conservados aparte
+        centroides_z[str(codigo)] = {
+            'energia_kcal': round(float(km.cluster_centers_[i][0]), 4),
+            'hierro_mg': round(float(km.cluster_centers_[i][1]), 4),
+            'proteina_g': round(float(km.cluster_centers_[i][2]), 4),
+            'precio_soles': round(float(km.cluster_centers_[i][3]), 4),
         }
     etiquetas = {str(c): CODIGO_ETIQUETA[c] for c in asignacion.values()}
 
@@ -625,6 +650,9 @@ def entrenar_y_persistir(cur):
         'precio_bajo_max': bajo_max,
         'precio_medio_max': medio_max,
         'reglas': ['R1_proteina_permitida', 'R2_veto_res_cerdo', 'R3_sin_precio_alto'],
+        # COM-5 v6: espacio z conservado para auditoría (el gráfico PCA de Modelos ML
+        # recalcula su propia proyección; esto es solo referencia técnica).
+        'centroides_z': centroides_z,
     }
     cur.execute("""
         INSERT INTO kmeans_modelos
