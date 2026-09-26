@@ -8,6 +8,7 @@ Historial:
  - COM-8: router de propuestas de menú semanal (motor greedy).
  - COM-5 v4 / COM-8 v7: router del panel de gráficos de Machine Learning (modelos_ml),
    exclusivo del Administrador de Sistemas.
+ - COM-38: router de reseteo/cambio de clave por Admin de Sistemas (reset_clave).
 """
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -32,6 +33,7 @@ from routers import (
     kmeans,           # COM-5: clustering nutricional del recetario (K-means k=4)
     propuestas_menu,  # COM-8: propuestas de menú semanal (motor greedy search)
     modelos_ml,       # COM-5 v4 / COM-8 v7: panel de gráficos de ML (solo Admin de Sistemas)
+    reset_clave,      # COM-38: reseteo/cambio de clave por Admin de Sistemas
 )
 # Asegurado de esquema dinámico (parámetros, planificación, raciones, seguridad,
 # comedores, grupos, gestión de usuarios, permisos por vistas, ubicaciones,
@@ -47,7 +49,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="API - NutriComedor", version="2.11.0", lifespan=lifespan)
+app = FastAPI(title="API - NutriComedor", version="2.12.0", lifespan=lifespan)
 
 # Configuración de CORS (Mantiene compatibilidad con tu Frontend)
 app.add_middleware(
@@ -70,6 +72,7 @@ app.include_router(ubicaciones.router, prefix="/api/v1")      # COM-27
 app.include_router(kmeans.router, prefix="/api/v1")           # COM-5
 app.include_router(propuestas_menu.router, prefix="/api/v1")  # COM-8
 app.include_router(modelos_ml.router, prefix="/api/v1")       # COM-5 v4 / COM-8 v7
+app.include_router(reset_clave.router, prefix="/api/v1")      # COM-38
 app.include_router(parametros.router, prefix="/api/v1")
 app.include_router(presupuesto.router, prefix="/api/v1")
 app.include_router(recetas.router, prefix="/api/v1")
