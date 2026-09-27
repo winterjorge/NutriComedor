@@ -5,40 +5,46 @@ Objetivo: Motor de búsqueda heurística (Greedy Search) del ticket COM-8. Gener
           nutricional y precio, respetando la rotación de clusters K-means (COM-5),
           la variedad de platos y el presupuesto del comedor.
 Historial:
- - COM-8 v1: semana completa de 7 días, top-3 de ingredientes sin filtro.
- - COM-8 v2: días de cocina seleccionables; top-3 restringido a Vegetales/Frutas/Proteínas.
- - COM-8 v3: FIX "string indices must be integers": se normalizan los ingredientes a
-             dicts {nombre, categoria} en una única fuente (_costear_recetas) y el
-             top-3 tolera/omite elementos en formato legacy (texto plano) en lugar de
-             fallar. Archivo autoconsistente: reemplazar COMPLETO, no parchar.
- - COM-37: _precios_por_gramo completa los ingredientes SIN precio de scraper con el
-   precio manual vigente a la fecha de hoy (ingredientes_precios_manuales), para que
-   propuestas y lista de compras trabajen con precios completos. Precedencia:
-   scraper > manual (setdefault).
- - COM-37 v2 (este archivo): regla de PRECIOS COMPLETOS para el flujo del comedor:
-   solo recetas cuyos ingredientes tengan TODOS precio (scraper/predicción/manual)
-   alimentan la generación de propuestas y la planificación. Las excluidas se reportan
-   en el payload con sus ingredientes sin precio. El filtro anterior (solo costo>0,
-   que permitía costos parciales) queda COMENTADO por trazabilidad.
+ - COM-8 v1/v2/v3: días seleccionables, top-3 por categorías, FIX de formatos legacy.
+ - COM-37 v2: regla de PRECIOS COMPLETOS: solo recetas con todos sus ingredientes
+   priceados alimentan propuestas/planificación; excluidas reportadas en el payload.
+ - COM-37 v4 (concepto conservado): validación de reglas de proteína VIGENTES (R1/R2
+   configuradas en K-means) sobre las recetas recomendadas, aunque el modelo no se haya
+   re-entrenado tras editarlas; excluidas reportadas como
+   `recetas_excluidas_reglas_proteina`.
+ - COM-37 v5 (este archivo): costeo reescrito sobre precios_insumos.py con el modelo de
+   DOS CONCEPTOS: gramos de la unidad de USO vía ingredientes_equivalencias (o
+   conversión estándar) × precio por gramo del MEJOR insumo (scraper día > manual
+   insumo > legacy ingrediente). El bloque _precios_por_gramo anterior queda COMENTADO.
 Entradas:
   - Nutrición por receta: columnas hierro_mg / proteina_g / energia_kcal de
     recetas_almuerzo (valores de la receta completa), divididas entre raciones.
-  - Costo real por gramo: insumos -> historial_precios (última fecha, mínimo entre
-    insumos del mismo ingrediente), convertido a gramos con unidades_medida.
+  - Costo por gramo: precios_insumos (mejor opción por ingrediente a la fecha de hoy).
   - Clusters: recetas_clusters del modelo K-means activo (COM-5).
   - Parámetros: PLANIFICACION_* (ponderaciones, rotación, comensales) y
     PRECIO_SOCIAL/AFILIADO/NORMAL para la recolección proyectada.
 Uso: Importado por routers/propuestas_menu.py. Todas las funciones reciben un cursor
      psycopg2 (RealDictCursor); el caller gestiona la transacción.
-Referencia: ticket COM-8 / HU-08 (solo trazabilidad; los nombres obedecen a la funcionalidad).
+Referencia: tickets COM-8 / COM-37 (solo trazabilidad).
 """
 import json
 import hashlib
 from datetime import date, timedelta
 from collections import Counter
 
-# COM-37: precios manuales con vigencia (fallback cuando el scraper no cubre el ingrediente)
-from precios_manuales import obtener_precios_manuales_por_kg
+# COM-37 v5: resolución unificada de precios y conversión estándar de unidades
+from precios_insumos import (
+    precios_por_gramo_por_insumo,
+    mejor_opcion_ingrediente,
+    gramos_por_unidad_estandar,
+)
+
+# COM-37 v4/v5: reglas de proteína VIGENTES y normalizador, compartidos con K-means
+# para garantizar que Greedy y el clustering evalúen las mismas restricciones.
+try:
+    from ml.kmeans_recetas import cargar_reglas_proteinas, _normalizar
+except Exception:  # degradación controlada si el paquete se importa como módulo suelto
+    from kmeans_recetas import cargar_reglas_proteinas, _normalizar
 
 # ==========================================
 # METADATOS DE LAS 3 VARIANTES DE PONDERACIÓN
@@ -149,40 +155,29 @@ def _cargar_parametros(cur) -> dict:
     }
 
 
-def _precios_por_gramo(cur) -> dict:
-    """
-    {ingrediente_id: precio_por_gramo} con el último día de historial_precios.
-    Convierte la unidad del insumo a gramos (factor_a_base para masa/volumen;
-    peso_estimado_g del ingrediente para unidades discretas) y toma el MÍNIMO
-    entre insumos del mismo ingrediente (criterio de compra económica).
-    COM-37: los ingredientes SIN precio de scraper se completan con el precio manual
-    vigente a la fecha de hoy (convertido de precio_por_kg a precio_por_gramo), de
-    modo que propuestas y lista de compras nunca queden con costos en cero cuando el
-    admin cargó un promedio. Precedencia: scraper > manual (setdefault).
-    """
-    cur.execute("""
-        SELECT ins.ingrediente_id AS ing_id,
-               MIN(
-                 CASE WHEN um.tipo_magnitud = 'discreto'
-                      THEN hp.precio_prom / GREATEST(ing.peso_estimado_g, 1)
-                      ELSE hp.precio_prom / GREATEST(um.factor_a_base, 0.0001)
-                 END
-               ) AS precio_por_gramo
-        FROM historial_precios hp
-        JOIN insumos ins ON ins.id = hp.insumo_id
-        JOIN unidades_medida um ON um.id = ins.unidad_medida_id
-        JOIN ingredientes ing ON ing.id = ins.ingrediente_id
-        WHERE hp.fecha = (SELECT MAX(fecha) FROM historial_precios)
-          AND hp.precio_prom IS NOT NULL AND hp.precio_prom > 0
-        GROUP BY ins.ingrediente_id;
-    """)
-    precios = {r['ing_id']: float(r['precio_por_gramo']) for r in cur.fetchall()}
+# =========================================================================
+# COM-37 v5 (trazabilidad): _precios_por_gramo COMENTADO. Mapeaba el último día de
+# historial_precios por ingrediente y completaba con manuales legacy. Reemplazado por
+# precios_insumos.mejor_opcion_ingrediente + equivalencias de unidad de USO.
+# =========================================================================
+# def _precios_por_gramo(cur) -> dict:
+#     cur.execute(""" ... historial_precios último día por ingrediente ... """)
+#     precios = {r['ing_id']: float(r['precio_por_gramo']) for r in cur.fetchall()}
+#     manuales = obtener_precios_manuales_por_kg(cur, date.today())
+#     for ing_id, precio_kg in manuales.items():
+#         precios.setdefault(ing_id, precio_kg / 1000.0)
+#     return precios
 
-    # COM-37: fallback de precios manuales vigentes (hoy) para ingredientes sin scraper
-    manuales = obtener_precios_manuales_por_kg(cur, date.today())
-    for ing_id, precio_kg in manuales.items():
-        precios.setdefault(ing_id, precio_kg / 1000.0)
-    return precios
+
+def _cargar_equivalencias(cur):
+    """COM-37 v5: mapa {(ingrediente_id, insumo_id, unidad_uso_id): gramos} activas."""
+    cur.execute("""
+        SELECT ingrediente_id, insumo_id, unidad_uso_id, gramos_por_unidad_uso
+        FROM ingredientes_equivalencias
+        WHERE estado_activo = TRUE;
+    """)
+    return {(r['ingrediente_id'], r['insumo_id'], r['unidad_uso_id']):
+            float(r['gramos_por_unidad_uso']) for r in cur.fetchall()}
 
 
 def _cargar_recetas_cluster(cur):
@@ -218,29 +213,39 @@ def _cargar_recetas_cluster(cur):
             'hierro_mg': float(r['hierro_mg'] or 0) / rac,
             'proteina_g': float(r['proteina_g'] or 0) / rac,
             'energia_kcal': float(r['energia_kcal'] or 0) / rac,
-            'costo_racion': 0.0,          # se completa en _costear_recetas
-            'precio_completo': False,     # COM-37 v2: se completa en _costear_recetas
+            'costo_racion': 0.0,            # se completa en _costear_recetas
+            'precio_completo': False,       # COM-37 v2: se completa en _costear_recetas
             'ingredientes_sin_precio': [],  # COM-37 v2: auditoría de faltantes
-            'ingredientes': [],           # lista de dicts {nombre, categoria}
+            'ingredientes': [],             # lista de dicts {nombre, categoria}
         })
     return recetas, modelo_id
 
 
-def _costear_recetas(cur, recetas, precios_gramo: dict):
+def _costear_recetas(cur, recetas, fecha: date):
     """
-    COM-8 v3: calcula el costo por ración de cada receta sumando sus ingredientes a
-    precios reales por gramo, y deja los ingredientes NORMALIZADOS como dicts
-    {nombre, categoria} (única fuente de verdad para el top-3).
-    COM-37 v2: además marca r['precio_completo'] = True solo si TODAS las líneas de
-    ingredientes de la receta tuvieron precio (scraper o manual), y registra en
-    r['ingredientes_sin_precio'] los nombres faltantes para auditoría del payload.
+    COM-37 v5: calcula el costo por ración de cada receta con el modelo de DOS
+    CONCEPTOS: por línea, gramos de la unidad de USO (equivalencia del insumo elegido
+    o conversión estándar) × precio por gramo del MEJOR insumo del ingrediente
+    (scraper día > manual insumo > legacy ingrediente). Deja los ingredientes
+    NORMALIZADOS como dicts {nombre, categoria} y marca precio_completo /
+    ingredientes_sin_precio para la regla del flujo del comedor.
     """
     ids = [r['receta_id'] for r in recetas]
     if not ids:
         return
+    precios_insumo = precios_por_gramo_por_insumo(cur, fecha)
+    eq_map = _cargar_equivalencias(cur)
+    opciones_cache = {}
+
+    def _opcion(ing_id):
+        if ing_id not in opciones_cache:
+            opciones_cache[ing_id] = mejor_opcion_ingrediente(cur, ing_id, fecha, precios_insumo)
+        return opciones_cache[ing_id]
+
     cur.execute("""
         SELECT ri.receta_id, ri.ingrediente_id, ri.cantidad_requerida,
-               um.tipo_magnitud, um.factor_a_base,
+               ri.unidad_medida_id AS unidad_uso_id,
+               um.abreviatura AS unidad_abrev, um.tipo_magnitud, um.factor_a_base,
                ing.peso_estimado_g, ing.nombre AS ing_nombre,
                ca.nombre AS categoria
         FROM receta_ingrediente ri
@@ -249,38 +254,84 @@ def _costear_recetas(cur, recetas, precios_gramo: dict):
         LEFT JOIN categorias_alimentos ca ON ca.id = ing.categoria_id
         WHERE ri.receta_id = ANY(%s);
     """, (ids,))
+
     costo_acum = {}
     nombres_acum = {}
-    # COM-37 v2: contadores de líneas con/sin precio por receta
     lineas_tot = {}
     lineas_con_precio = {}
     sin_precio_nom = {}
     for fila in cur.fetchall():
         rid = fila['receta_id']
-        if fila['tipo_magnitud'] in ('masa', 'volumen'):
-            gramos = float(fila['cantidad_requerida']) * float(fila['factor_a_base'] or 1)
-        else:
-            gramos = float(fila['cantidad_requerida']) * float(fila['peso_estimado_g'] or 1)
         lineas_tot[rid] = lineas_tot.get(rid, 0) + 1
-        ppg = precios_gramo.get(fila['ingrediente_id'])
-        if ppg is not None:
-            costo_acum[rid] = costo_acum.get(rid, 0.0) + gramos * ppg
-            lineas_con_precio[rid] = lineas_con_precio.get(rid, 0) + 1
-        else:
+        opc = _opcion(fila['ingrediente_id'])
+        if opc is None:
             sin_precio_nom.setdefault(rid, []).append(fila['ing_nombre'])
+        else:
+            g = eq_map.get((fila['ingrediente_id'], opc['insumo_id'], fila['unidad_uso_id']))
+            if g is None:
+                g = gramos_por_unidad_estandar(
+                    fila['unidad_abrev'], fila['tipo_magnitud'],
+                    fila['factor_a_base'], fila['peso_estimado_g'])
+            gramos = g * float(fila['cantidad_requerida'])
+            costo_acum[rid] = costo_acum.get(rid, 0.0) + gramos * opc['ppg']
+            lineas_con_precio[rid] = lineas_con_precio.get(rid, 0) + 1
         nombres_acum.setdefault(rid, []).append({
             'nombre': fila['ing_nombre'],
             'categoria': fila['categoria'] or '',
         })
+
     for r in recetas:
         total = costo_acum.get(r['receta_id'], 0.0)
         r['costo_racion'] = round(total / r['raciones'], 2)
         r['ingredientes'] = nombres_acum.get(r['receta_id'], [])
-        # COM-37 v2: completitud de precios de la receta
         tot = lineas_tot.get(r['receta_id'], 0)
         conp = lineas_con_precio.get(r['receta_id'], 0)
         r['precio_completo'] = (tot > 0 and conp == tot)
         r['ingredientes_sin_precio'] = sorted(set(sin_precio_nom.get(r['receta_id'], [])))
+
+
+# ==========================================
+# COM-37 v4/v5: VALIDACIÓN DE REGLAS DE PROTEÍNA VIGENTES (R1/R2)
+# ==========================================
+def _validar_reglas_proteinas_vigentes(cur, recetas):
+    """
+    COM-37 v4/v5: aplica las listas CONFIGURABLES de proteínas permitidas (R1) e
+    ingredientes vetados (R2) vigentes en parametros_sistema (las mismas que usa
+    K-means) sobre las recetas candidatas del modelo activo. Replica la lógica de
+    ml/kmeans_recetas.construir_dataset: por ingrediente, permitida primero; veto solo
+    si no es permitida (así 'hígado de res' pasa: 'higado' es permitida y se evalúa
+    antes que el veto 'res'). Retorna (validas, excluidas).
+    """
+    re_permitida, re_vetada, _, _ = cargar_reglas_proteinas(cur)
+    validas = []
+    excluidas = []
+    for r in recetas:
+        tiene_permitida = False
+        tiene_vetada = False
+        for ing in r['ingredientes']:
+            nombre = ing.get('nombre') if isinstance(ing, dict) else ing
+            nn = _normalizar(nombre)
+            if not nn:
+                continue
+            if re_permitida.search(nn):
+                tiene_permitida = True
+            elif re_vetada.search(nn):
+                tiene_vetada = True
+        if tiene_permitida and not tiene_vetada:
+            validas.append(r)
+        else:
+            detalles = []
+            if not tiene_permitida:
+                detalles.append('sin_proteina_permitida')
+            if tiene_vetada:
+                detalles.append('contiene_ingrediente_vetado')
+            excluidas.append({
+                'receta_id': r['receta_id'],
+                'nombre': r['nombre'],
+                'motivo': 'no_cumple_reglas_proteina_vigentes',
+                'detalle': detalles,
+            })
+    return validas, excluidas
 
 
 def _minmax(recetas) -> dict:
@@ -403,11 +454,14 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
                             creado_por_id: int, fecha_referencia: date = None,
                             seed: int = 0, dias_semana: list = None):
     """
-    COM-8 v2/v3 + COM-37 v2: Genera y persiste las 3 propuestas de menú semanal
-    (NUTRI, ECONO, BALANCE) para los DÍAS DE COCINA indicados (1=Lunes..7=Domingo;
-    por defecto Lun-Vie), usando SOLO recetas con precios completos (scraper,
-    predicción o manual). Retorna el payload completo para el frontend, incluyendo
-    las recetas excluidas por precio incompleto con sus ingredientes faltantes.
+    COM-8 v2/v3 + COM-37 v2/v4/v5: Genera y persiste las 3 propuestas de menú semanal
+    (NUTRI, ECONO, BALANCE) para los DÍAS DE COCINA indicados, usando SOLO recetas que
+    cumplan, en este orden:
+      1) nutrición cargada (energía no nula),
+      2) precios COMPLETOS de todos sus ingredientes (scraper/manual insumo/legacy),
+      3) reglas de proteína VIGENTES R1/R2 configuradas en K-means (COM-37 v4/v5).
+    Retorna el payload completo, incluyendo las recetas excluidas por precio incompleto
+    y por reglas de proteína vigentes (transparencia para UI y sustentación).
     """
     if presupuesto_semanal is None or float(presupuesto_semanal) <= 0:
         raise ValueError("El presupuesto semanal debe ser mayor a cero.")
@@ -425,25 +479,34 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
             "No hay un modelo K-means activo con recetas aptas. Entrene el modelo en "
             "la pestaña 'Clusters K-Means' antes de generar propuestas de menú.")
 
-    precios_gramo = _precios_por_gramo(cur)
-    _costear_recetas(cur, recetas, precios_gramo)
+    # COM-37 v5: costeo con equivalencias uso->gramos y mejor insumo por ingrediente
+    _costear_recetas(cur, recetas, fecha_referencia)
 
-    # COM-37 v2 (trazabilidad): filtro anterior COMENTADO (permitía recetas con costo
-    # parcial, es decir, ingredientes sin precio que dejaban el menú subestimado):
+    # COM-37 v2 (trazabilidad): filtro anterior COMENTADO (solo costo>0, permitía
+    # recetas con costo parcial y precios subestimados):
     # recetas = [r for r in recetas if r['costo_racion'] > 0]
     # COM-37 v2: SOLO recetas con precios COMPLETOS alimentan el flujo del comedor
     excluidas_incompletas = [r for r in recetas if not r.get('precio_completo', False)]
     recetas = [r for r in recetas if r.get('precio_completo', False) and r['costo_racion'] > 0]
+
+    # COM-37 v4/v5: validación de reglas de proteína VIGENTES (R1/R2 de K-means)
+    recetas, excluidas_reglas = _validar_reglas_proteinas_vigentes(cur, recetas)
+
     if len(recetas) < len(dias):
-        detalle = "; ".join(
+        detalle_precios = "; ".join(
             f"{r['nombre']} (sin precio: {', '.join(r['ingredientes_sin_precio'][:4])})"
-            for r in excluidas_incompletas[:6]
+            for r in excluidas_incompletas[:5]
+        )
+        detalle_reglas = "; ".join(
+            f"{e['nombre']} ({'/'.join(e['detalle'])})" for e in excluidas_reglas[:5]
         )
         raise ValueError(
-            f"Solo hay {len(recetas)} recetas con precios completos y nutrición; se "
-            f"requieren al menos {len(dias)} para cubrir los días seleccionados. "
-            f"Excluidas por precio incompleto: {detalle or 'ninguna'}. Cargue precios "
-            f"manuales en Gestión de Ingredientes (COM-37) o espere la corrida del scraper.")
+            f"Solo hay {len(recetas)} recetas con precios completos y reglas de proteína "
+            f"vigentes; se requieren al menos {len(dias)} para cubrir los días seleccionados. "
+            f"Excluidas por precio incompleto: {detalle_precios or 'ninguna'}. "
+            f"Excluidas por reglas de proteína vigentes: {detalle_reglas or 'ninguna'}. "
+            f"Cargue precios/insumos manuales en Gestión de Ingredientes (COM-37), revise "
+            f"las listas R1/R2 en Clusters K-Means o espere la corrida del scraper.")
 
     recetas_por_cluster = {}
     for r in recetas:
@@ -509,7 +572,7 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
         'seed': seed,
         'propuestas': propuestas,
         # COM-37 v2: transparencia de la regla de precios completos
-        'recetas_con_precio_completo': len(recetas),
+        'recetas_con_precio_completo': len(recetas) + len(excluidas_reglas),
         'recetas_excluidas_precio_incompleto': [
             {
                 'receta_id': r['receta_id'],
@@ -518,6 +581,8 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
             }
             for r in excluidas_incompletas
         ],
+        # COM-37 v4/v5: transparencia de la validación de reglas de proteína vigentes
+        'recetas_excluidas_reglas_proteina': excluidas_reglas,
     }
 
 
