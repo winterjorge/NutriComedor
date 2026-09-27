@@ -5,34 +5,28 @@
  *           lo que garantiza un manejo uniforme de errores, cabeceras y endpoints.
  * Uso: Importar `api` en hooks y componentes para consumir los endpoints del sistema.
  * Historial:
- *   COM-17: parser defensivo `leerErrorSeguro` (evita "Unexpected token 'I'" con 500 en texto plano).
+ *   COM-17: parser defensivo `leerErrorSeguro`.
  *   COM-19: endpoints de autenticación (login, cambiar-clave).
- *   COM-20: getContextoSeleccion y verificarMembresia (selección de comedor post-login).
+ *   COM-20: getContextoSeleccion y verificarMembresia.
  *   COM-21: bloque COMEDORES (CRUD, usuarios por comedor, asociación, estado, búsqueda).
  *   COM-22: bloque GRUPOS (catálogo, membresías, asignación y estado).
- *   COM-23: bloque USUARIOS (creación, bloqueo/desbloqueo, política de claves),
- *           bloque MUNICIPALIDADES (CRUD) y extensiones de GRUPOS (privilegios,
- *           creación de grupos y roles temporales con vigencia/revocación).
- *   COM-25: bloque VISTAS (catálogo de módulos del sistema, matriz de permisos por rol,
- *           edición de permisos por rol y módulos efectivos del usuario en sesión).
- *   COM-26: flujo CRUD de usuarios por perfil: contextoCreacion, crearUsuario y
- *           editarUsuario con perfil objetivo y alcance, más los métodos de búsqueda
- *           buscarMunicipalidades y buscarComedores para el autocompletado.
+ *   COM-23: bloque USUARIOS, MUNICIPALIDADES y extensiones de GRUPOS.
+ *   COM-25: bloque VISTAS (módulos, matriz de permisos, módulos efectivos).
+ *   COM-26: flujo CRUD de usuarios por perfil + búsquedas de municipalidades/comedores.
  *   COM-5:  bloque KMEANS (clustering nutricional del recetario).
  *   COM-8:  bloque PROPUESTAS (motor greedy de menú semanal).
- *   COM-5 v4 / COM-8 v7: los métodos del bloque KMEANS reciben `usuarioSolicitanteId`
- *           (el router v4 valida Admin de Sistemas) y se agregan getProteinasKmeans /
- *           updateProteinasKmeans (R1/R2). Se añade el bloque MODELOS_ML con los
- *           endpoints del panel de gráficos exclusivo del Admin de Sistemas.
- *   COM-38: se agrega `resetearClaveUsuario` (POST /usuarios/{id}/reset-clave) para el
- *           reseteo/cambio de contraseña de cualquier usuario por el Admin de Sistemas.
- *   COM-39: se agrega el bloque DIRECTIVOS DE COMEDOR con buscarComedoresPorDistrito,
- *           getDirectivosComedor y actualizarDirectivos (búsqueda por distrito+nombre,
- *           listado de directivos/vacantes y aplicación por lotes de bajas/reemplazos).
- *   COM-37 (este archivo): se agrega el bloque GESTIÓN DE INGREDIENTES (exclusivo Admin
- *           de Sistemas): listado con estado de emparejamiento, CRUD de ingredientes sin
- *           borrado, períodos de precio manual con vigencia opcional, desactivación
- *           lógica y re-emparejado de insumos huérfanos. Ningún método existente se modifica.
+ *   COM-5 v4 / COM-8 v7: KMEANS con usuarioSolicitanteId + proteínas configurables +
+ *           bloque MODELOS_ML (panel de gráficos exclusivo del Admin).
+ *   COM-38: resetearClaveUsuario (reset/cambio de clave por Admin de Sistemas).
+ *   COM-39: bloque DIRECTIVOS DE COMEDOR (búsqueda por distrito, listado, lotes).
+ *   COM-37 v1: bloque GESTION_INGREDIENTES (ingredientes CRUD sin borrado, precios
+ *           manuales por ingrediente con vigencia, re-emparejado).
+ *   COM-37 v5 (este archivo): se AMPLÍA GESTION_INGREDIENTES con el modelo de DOS
+ *           CONCEPTOS (ingrediente=uso / insumo=compra): insumos del ingrediente con
+ *           precio de hoy y fuente, búsqueda de insumos, vinculación con equivalencias,
+ *           creación/edición/desvinculación de insumos MANUALES, CRUD de equivalencias
+ *           (unidad de uso -> gramos) y CRUD de precios manuales POR INSUMO.
+ *           Los métodos v1 de precios por ingrediente se conservan como LEGACY.
  */
 
 const API_BASE = '/api/v1';
@@ -124,7 +118,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al actualizar el comedor'));
         return response.json();
     },
-    // COM-26: búsqueda de comedores para el autocompletado del formulario de usuarios
     buscarComedores: async (q) => {
         const response = await fetch(`${API_BASE}/comedores/buscar?q=${encodeURIComponent(q || '')}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al buscar comedores'));
@@ -181,9 +174,6 @@ export const api = {
     // ==========================================
     // DIRECTIVOS DE COMEDOR (COM-39)
     // ==========================================
-    // COM-39: comedores del distrito elegido (cascada COM-27) cuyo nombre coincide
-    // con el texto escrito. Si se cambia un nivel superior de la cascada, el panel
-    // limpia los inferiores antes de volver a llamar este método.
     buscarComedoresPorDistrito: async (distrito, q, usuarioSolicitanteId) => {
         const params = new URLSearchParams({ usuario_solicitante_id: String(usuarioSolicitanteId) });
         if (distrito) params.append('distrito', distrito);
@@ -192,14 +182,11 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al buscar comedores del distrito'));
         return response.json();
     },
-    // COM-39: directivos activos del comedor (documento, nombres y cargo) + roles vacantes
     getDirectivosComedor: async (comedorId, usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/comedores/${comedorId}/directivos?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener los directivos del comedor'));
         return response.json();
     },
-    // COM-39: aplica en UNA transacción el lote de operaciones en cola
-    // (bajas y reemplazos; el reemplazo puede incluir nuevo_usuario para registro inmediato)
     actualizarDirectivos: async (comedorId, data) => {
         const response = await fetch(`${API_BASE}/comedores/${comedorId}/directivos/actualizar`, {
             method: 'POST',
@@ -211,16 +198,14 @@ export const api = {
     },
 
     // ==========================================
-    // GESTIÓN DE INGREDIENTES (COM-37) — exclusivo Admin de Sistemas
+    // GESTIÓN DE INGREDIENTES (COM-37 v1 + COM-37 v5) — exclusivo Admin de Sistemas
     // ==========================================
-    // COM-37: listado de ingredientes con estado de emparejamiento (n_insumos,
-    // n_insumos_con_precio, n_precios_manuales) para decidir cargas de precio manual.
+    // --- Ingredientes (CRUD sin borrado) ---
     getIngredientesAdmin: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/ingredientes-admin?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener ingredientes'));
         return response.json();
     },
-    // COM-37: creación de ingrediente (alimenta al algoritmo de reconocimiento)
     createIngredienteAdmin: async (data) => {
         const response = await fetch(`${API_BASE}/ingredientes-admin`, {
             method: 'POST',
@@ -230,7 +215,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al crear el ingrediente'));
         return response.json();
     },
-    // COM-37: edición/renombrado sin borrado físico (el frontend advierte inconsistencias)
     updateIngredienteAdmin: async (ingredienteId, data) => {
         const response = await fetch(`${API_BASE}/ingredientes-admin/${ingredienteId}`, {
             method: 'PUT',
@@ -240,13 +224,139 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al actualizar el ingrediente'));
         return response.json();
     },
-    // COM-37: períodos de precio manual del ingrediente (activos e inactivos)
+
+    // --- COM-37 v5: Sección B: emparejamiento ingrediente <-> insumo ---
+    getInsumosDelIngrediente: async (ingredienteId, usuarioSolicitanteId, fecha) => {
+        const params = new URLSearchParams({ usuario_solicitante_id: String(usuarioSolicitanteId) });
+        if (fecha) params.append('fecha', fecha);
+        const response = await fetch(`${API_BASE}/ingredientes-admin/${ingredienteId}/insumos?${params.toString()}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener insumos del ingrediente'));
+        return response.json();
+    },
+    buscarInsumosAdmin: async (q, soloSinVincular, usuarioSolicitanteId) => {
+        const params = new URLSearchParams({ usuario_solicitante_id: String(usuarioSolicitanteId) });
+        if (q) params.append('q', q);
+        if (soloSinVincular) params.append('solo_sin_vincular', 'true');
+        const response = await fetch(`${API_BASE}/ingredientes-admin/buscar-insumos?${params.toString()}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al buscar insumos'));
+        return response.json();
+    },
+    vincularInsumo: async (ingredienteId, data) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/${ingredienteId}/vincular-insumo`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al vincular el insumo'));
+        return response.json();
+    },
+    crearInsumoManual: async (ingredienteId, data) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/${ingredienteId}/insumos-manuales`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al crear el insumo manual'));
+        return response.json();
+    },
+    editarInsumoManual: async (insumoId, data) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/insumos/${insumoId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al editar el insumo manual'));
+        return response.json();
+    },
+    desvincularInsumo: async (insumoId, usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/insumos/${insumoId}/desvincular?usuario_solicitante_id=${usuarioSolicitanteId}`, {
+            method: 'PUT'
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al desvincular el insumo'));
+        return response.json();
+    },
+
+    // --- COM-37 v5: Sección C: equivalencias unidad de uso -> gramos ---
+    getEquivalencias: async (ingredienteId, usuarioSolicitanteId, insumoId) => {
+        const params = new URLSearchParams({ usuario_solicitante_id: String(usuarioSolicitanteId) });
+        if (insumoId) params.append('insumo_id', insumoId);
+        const response = await fetch(`${API_BASE}/ingredientes-admin/${ingredienteId}/equivalencias?${params.toString()}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener equivalencias'));
+        return response.json();
+    },
+    createEquivalencia: async (ingredienteId, data) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/${ingredienteId}/equivalencias`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al crear la equivalencia'));
+        return response.json();
+    },
+    updateEquivalencia: async (eqId, data) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/equivalencias/${eqId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al actualizar la equivalencia'));
+        return response.json();
+    },
+    desactivarEquivalencia: async (eqId, usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/equivalencias/${eqId}/desactivar?usuario_solicitante_id=${usuarioSolicitanteId}`, {
+            method: 'PUT'
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al desactivar la equivalencia'));
+        return response.json();
+    },
+
+    // --- COM-37 v5: Sección D: precios manuales POR INSUMO ---
+    getPreciosManualesInsumo: async (insumoId, usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/insumos/${insumoId}/precios-manuales?usuario_solicitante_id=${usuarioSolicitanteId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener precios del insumo'));
+        return response.json();
+    },
+    createPrecioManualInsumo: async (insumoId, data) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/insumos/${insumoId}/precios-manuales`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al crear el precio manual'));
+        return response.json();
+    },
+    updatePrecioManualInsumo: async (periodoId, data) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/precios-manuales/${periodoId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al actualizar el precio manual'));
+        return response.json();
+    },
+    desactivarPrecioManualInsumo: async (periodoId, usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/precios-manuales/${periodoId}/desactivar?usuario_solicitante_id=${usuarioSolicitanteId}`, {
+            method: 'PUT'
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al desactivar el precio manual'));
+        return response.json();
+    },
+
+    // --- COM-37 v5: re-emparejado de insumos huérfanos ---
+    reemparejarInsumos: async (usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/reemparejar-insumos?usuario_solicitante_id=${usuarioSolicitanteId}`, {
+            method: 'POST'
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al re-emparejar insumos'));
+        return response.json();
+    },
+
+    // --- LEGACY COM-37 v1: precios manuales POR INGREDIENTE (fallback de resolución) ---
     getPreciosManuales: async (ingredienteId, usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/ingredientes-admin/${ingredienteId}/precios-manuales?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener precios manuales'));
         return response.json();
     },
-    // COM-37: alta de período manual (usar_rango=false => vigencia permanente)
     createPrecioManual: async (ingredienteId, data) => {
         const response = await fetch(`${API_BASE}/ingredientes-admin/${ingredienteId}/precios-manuales`, {
             method: 'POST',
@@ -256,30 +366,11 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al crear el precio manual'));
         return response.json();
     },
-    // COM-37: edición de período con re-validación de solapes
-    updatePrecioManual: async (periodoId, data) => {
-        const response = await fetch(`${API_BASE}/ingredientes-admin/precios-manuales/${periodoId}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data)
-        });
-        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al actualizar el precio manual'));
-        return response.json();
-    },
-    // COM-37: baja lógica del período (no se elimina: preserva trazabilidad)
     desactivarPrecioManual: async (periodoId, usuarioSolicitanteId) => {
-        const response = await fetch(`${API_BASE}/ingredientes-admin/precios-manuales/${periodoId}/desactivar?usuario_solicitante_id=${usuarioSolicitanteId}`, {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/precios-manuales-legacy/${periodoId}/desactivar?usuario_solicitante_id=${usuarioSolicitanteId}`, {
             method: 'PUT'
         });
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al desactivar el precio manual'));
-        return response.json();
-    },
-    // COM-37: re-empareja insumos huérfanos con el algoritmo de reconocimiento (heuristics)
-    reemparejarInsumos: async (usuarioSolicitanteId) => {
-        const response = await fetch(`${API_BASE}/ingredientes-admin/reemparejar-insumos?usuario_solicitante_id=${usuarioSolicitanteId}`, {
-            method: 'POST'
-        });
-        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al re-emparejar insumos'));
         return response.json();
     },
 
@@ -405,20 +496,11 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener usuarios'));
         return response.json();
     },
-    /**
-     * COM-26: contexto de creación/edición según el perfil del creador:
-     * perfil del solicitante, perfiles que puede crear, grupos/roles por perfil
-     * y alcance permitido (municipalidades y/o comedores).
-     */
     getContextoCreacion: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/usuarios/contexto-creacion?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el contexto de creación'));
         return response.json();
     },
-    /**
-     * COM-26: creación de usuario con perfil objetivo y alcance
-     * (municipalidad_ids para Administrativo, comedor_ids para Directivo/Operativo).
-     */
     crearUsuario: async (data) => {
         const response = await fetch(`${API_BASE}/usuarios`, {
             method: 'POST',
@@ -428,9 +510,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al crear el usuario'));
         return response.json();
     },
-    /**
-     * COM-26: edición de usuario (datos personales + membresías del grupo del perfil objetivo).
-     */
     editarUsuario: async (usuarioId, data) => {
         const response = await fetch(`${API_BASE}/usuarios/${usuarioId}`, {
             method: 'PUT',
@@ -440,10 +519,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al editar el usuario'));
         return response.json();
     },
-    /**
-     * COM-26: detalle del usuario para precargar la edición (datos personales,
-     * perfil, grupo/rol actual y alcance vigente: municipalidades/comedores).
-     */
     getDetalleFlujoUsuario: async (usuarioId, solicitanteId) => {
         const response = await fetch(`${API_BASE}/usuarios/${usuarioId}/detalle-flujo?usuario_solicitante_id=${solicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el detalle del usuario'));
@@ -468,8 +543,6 @@ export const api = {
         return response.json();
     },
     // COM-38: reseteo/cambio de contraseña de CUALQUIER usuario por Admin de Sistemas.
-    // data: { usuario_solicitante_id, modo: 'random'|'especifica', clave_nueva?, forzar_cambio }
-    // En modo 'random' la respuesta incluye clave_temporal (visible una sola vez).
     resetearClaveUsuario: async (usuarioId, data) => {
         const response = await fetch(`${API_BASE}/usuarios/${usuarioId}/reset-clave`, {
             method: 'POST',
@@ -531,7 +604,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al actualizar la municipalidad'));
         return response.json();
     },
-    // COM-26: búsqueda de municipalidades para el autocompletado del formulario de usuarios
     buscarMunicipalidades: async (q) => {
         const response = await fetch(`${API_BASE}/municipalidades/buscar?q=${encodeURIComponent(q || '')}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al buscar municipalidades'));
@@ -595,7 +667,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el diagnóstico'));
         return response.json();
     },
-    // COM-5 v4: listas configurables de proteínas permitidas (R1) e ingredientes vetados (R2)
     getProteinasKmeans: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/kmeans/proteinas?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener la configuración de proteínas'));
@@ -613,7 +684,6 @@ export const api = {
 
     // ==========================================
     // PANEL DE GRÁFICOS DE MACHINE LEARNING (COM-5 v4 / COM-8 v7)
-    // Exclusivo del Administrador de Sistemas (módulo 'modelos_ml')
     // ==========================================
     getEstadoModelosML: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/modelos-ml/estado?usuario_solicitante_id=${usuarioSolicitanteId}`);

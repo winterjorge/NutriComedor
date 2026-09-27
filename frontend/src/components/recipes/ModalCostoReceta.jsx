@@ -1,28 +1,28 @@
 /**
  * components/recipes/ModalCostoReceta.jsx
  * Objetivo: Modal "Evaluar" del Recetario: desglose del costo de una receta en una
- *           fecha dada (unidad de la receta, insumo seleccionado real/predicho/manual
- *           y costo parcial) + totales por receta y por ración.
+ *           fecha dada (unidad de USO de la receta, insumo seleccionado real/predicho/
+ *           manual y costo parcial) + totales por receta y por ración.
  * Historial:
- *  - Sprint 2: versión original autoconsultante (api.getCostoReceta) con filas rojas
- *    para ingredientes sin precio y aviso ámbar.
- *  - COM-37 (roto): versión que esperaba `costoData` por props; RecipesView nunca la
- *    envió y el modal no abría. Se COMENTA esa variante y se RESTAURA el auto-fetch.
- *  - COM-37 v2 (este archivo): restaura el contrato original con RecipesView
- *    ({ isOpen, onClose, receta, fecha, onChangeFecha }) y agrega:
- *      * Filas manuales: texto "Obtenido de la Base de Datos" con los colores actuales
- *        del caso sin insumos (fondo rojo), costo real incluido en totales.
- *      * Si el perfil es ADMIN DE SISTEMA y hay ingredientes sin precio: botón
- *        "Agregar precio" por fila con formulario inline (precio por unidad estándar,
- *        rango de fechas opcional) que guarda y re-evalúa al instante.
- *      * Si NO es admin: comportamiento anterior (fila roja + aviso ámbar).
- *      * Badge de costo completo/incompleto (regla: solo recetas completas entran al
- *        flujo del comedor).
- * Uso: Montado por RecipesView.jsx (props sin cambios respecto al original).
- * Referencia: tickets COM-37 / COM-37 v2 (solo trazabilidad).
+ *  - Sprint 2: versión original autoconsultante con filas rojas sin precio y aviso ámbar.
+ *  - COM-37 (roto): variante que esperaba `costoData` por props; comentada.
+ *  - COM-37 v2: restaura el auto-fetch y agrega filas manuales ("Obtenido de la Base de
+ *    Datos"), badge de costo completo/incompleto y formulario inline de precio manual
+ *    por ingrediente (solo Admin).
+ *  - COM-37 v5 (este archivo): el formulario inline v2 queda COMENTADO y se reemplaza
+ *    por el botón "Asignar insumo/precio" (solo Admin) que abre un MODAL SIMPLIFICADO
+ *    de un solo ingrediente con dos vías: (a) vincular un insumo del scraper buscado
+ *    por nombre, o (b) registrar un insumo MANUAL con unidad de compra, precio con
+ *    vigencia opcional y equivalencia unidad de uso -> gramos. Al guardar se
+ *    re-evalúa el costo. Perfiles no admin conservan el aviso ámbar original.
+ * Uso: Montado por RecipesView.jsx con props { isOpen, onClose, receta, fecha, onChangeFecha }.
+ * Referencia: tickets COM-37 v2/v5 (solo trazabilidad).
  */
 import React, { useState, useEffect } from 'react';
-import { X, Loader2, AlertCircle, Database, TrendingUp, Plus, Save, CheckCircle2 } from 'lucide-react';
+import {
+    X, Loader2, AlertCircle, Database, TrendingUp, CheckCircle2,
+    Search, Package, Scale, Save
+} from 'lucide-react';
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 
@@ -40,12 +40,24 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
     const [cargando, setCargando] = useState(false);
     const [fechaLocal, setFechaLocal] = useState(fecha || new Date().toISOString().split('T')[0]);
 
-    // COM-37 v2: catálogo de ingredientes (unidad estándar) para el formulario de precio
+    // COM-37 v5: catálogo de ingredientes (unidad de uso por defecto) y unidades,
+    // para precargar la equivalencia del modal simplificado.
     const [ingPorId, setIngPorId] = useState({});
-    // COM-37 v2: formulario inline de precio manual por ingrediente_id
-    const [formPrecio, setFormPrecio] = useState(null);
-    const [guardandoPrecio, setGuardandoPrecio] = useState(false);
-    const [errorPrecio, setErrorPrecio] = useState('');
+    const [unidades, setUnidades] = useState([]);
+
+    // COM-37 v5: modal simplificado "Asignar insumo/precio" (una fila sin precio)
+    const [modalAsignar, setModalAsignar] = useState(null);       // fila del detalle
+    const [tabAsignar, setTabAsignar] = useState('scraper');      // 'scraper' | 'manual'
+    const [qAsignar, setQAsignar] = useState('');
+    const [resultadosAsignar, setResultadosAsignar] = useState([]);
+    const [buscandoAsignar, setBuscandoAsignar] = useState(false);
+    const [formManual, setFormManual] = useState({
+        nombre: '', unidad_medida_id: '', precio_por_unidad: '', usar_rango: false,
+        fecha_inicio: '', fecha_fin: '', observacion: '',
+        eq_unidad_uso_id: '', eq_gramos: '',
+    });
+    const [guardandoAsignar, setGuardandoAsignar] = useState(false);
+    const [errorAsignar, setErrorAsignar] = useState('');
     const [exitoPrecio, setExitoPrecio] = useState('');
 
     const cargarCosto = async (fechaEval) => {
@@ -77,26 +89,27 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
 
     useEffect(() => {
         if (isOpen && receta) {
-            setFormPrecio(null);
-            setErrorPrecio('');
+            setModalAsignar(null);
+            setErrorAsignar('');
             setExitoPrecio('');
             cargarCosto(fechaLocal);
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [isOpen, receta]);
 
-    // COM-37 v2: si es admin y hay filas sin precio, carga unidades estándar una vez
+    // COM-37 v5: si es admin y hay filas sin precio, carga catálogo de ingredientes y unidades
     useEffect(() => {
         if (!isOpen || !esAdminSistema) return;
         const faltantes = (datos?.detalle_insumos || []).filter(d => d.error);
         if (faltantes.length === 0) return;
         let vivo = true;
-        api.getIngredientesAdmin(usuario.id)
-            .then(list => {
+        Promise.all([api.getIngredientesAdmin(usuario.id), api.getUnidadesMedida()])
+            .then(([ings, ums]) => {
                 if (!vivo) return;
                 const map = {};
-                (list || []).forEach(i => { map[i.id] = i; });
+                (ings || []).forEach(i => { map[i.id] = i; });
                 setIngPorId(map);
+                setUnidades(ums || []);
             })
             .catch(() => {});
         return () => { vivo = false; };
@@ -110,38 +123,104 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
         cargarCosto(nuevaFecha);
     };
 
-    // COM-37 v2: guarda el precio manual y re-evalúa
-    const guardarPrecioManual = async (fila) => {
-        const f = formPrecio;
-        if (!f || !Number(f.precio) || Number(f.precio) <= 0) {
-            setErrorPrecio('Ingrese un precio mayor a cero.');
-            return;
-        }
-        if (f.usar_rango && !f.fecha_inicio) {
-            setErrorPrecio('Con el rango activado, la fecha de inicio es obligatoria.');
-            return;
-        }
-        setGuardandoPrecio(true);
-        setErrorPrecio('');
-        setExitoPrecio('');
+    // ---------- COM-37 v5: modal simplificado ----------
+    const abrirAsignar = (fila) => {
+        const ing = ingPorId[fila.ingrediente_id];
+        setModalAsignar(fila);
+        setTabAsignar('scraper');
+        setQAsignar(fila.ingrediente || '');
+        setErrorAsignar('');
+        setResultadosAsignar([]);
+        setFormManual({
+            nombre: `${fila.ingrediente} (manual)`,
+            unidad_medida_id: '',
+            precio_por_unidad: '',
+            usar_rango: false,
+            fecha_inicio: fechaLocal,
+            fecha_fin: '',
+            observacion: 'Cargado desde Evaluar receta (COM-37)',
+            eq_unidad_uso_id: ing ? String(ing.unidad_medida_id) : '',
+            eq_gramos: '',
+        });
+        buscarScraper(fila.ingrediente || '');
+    };
+
+    const buscarScraper = async (q) => {
+        setBuscandoAsignar(true);
+        setErrorAsignar('');
         try {
-            await api.createPrecioManual(fila.ingrediente_id, {
-                usuario_solicitante_id: usuario.id,
-                precio_por_unidad: Number(f.precio),
-                usar_rango: !!f.usar_rango,
-                fecha_inicio: f.usar_rango ? f.fecha_inicio : null,
-                fecha_fin: f.usar_rango ? (f.fecha_fin || null) : null,
-                observacion: f.observacion || 'Cargado desde Evaluar receta (COM-37)',
-            });
-            setExitoPrecio(`Precio manual guardado para ${fila.ingrediente}.`);
-            setFormPrecio(null);
-            cargarCosto(fechaLocal);
+            setResultadosAsignar(await api.buscarInsumosAdmin(q || '', false, usuario.id));
         } catch (e) {
-            setErrorPrecio(e.message);
+            setErrorAsignar(e.message);
         } finally {
-            setGuardandoPrecio(false);
+            setBuscandoAsignar(false);
         }
     };
+
+    const vincularScraper = async (ins) => {
+        setGuardandoAsignar(true);
+        setErrorAsignar('');
+        try {
+            const res = await api.vincularInsumo(modalAsignar.ingrediente_id, {
+                usuario_solicitante_id: usuario.id,
+                insumo_id: ins.id,
+                reasignar: true,
+                equivalencias: [],
+            });
+            setExitoPrecio(res.message || `Insumo '${ins.nombre}' vinculado.`);
+            setModalAsignar(null);
+            cargarCosto(fechaLocal);
+        } catch (e) {
+            setErrorAsignar(e.message);
+        } finally {
+            setGuardandoAsignar(false);
+        }
+    };
+
+    const crearManual = async () => {
+        if (!formManual.nombre.trim() || !formManual.unidad_medida_id || !Number(formManual.precio_por_unidad)) {
+            setErrorAsignar('Complete nombre, unidad de compra y precio mayor a cero.');
+            return;
+        }
+        if (formManual.usar_rango && !formManual.fecha_inicio) {
+            setErrorAsignar('Con el rango activado, la fecha de inicio es obligatoria.');
+            return;
+        }
+        setGuardandoAsignar(true);
+        setErrorAsignar('');
+        try {
+            const equivalencias = [];
+            if (formManual.eq_unidad_uso_id && Number(formManual.eq_gramos) > 0) {
+                equivalencias.push({
+                    unidad_uso_id: Number(formManual.eq_unidad_uso_id),
+                    gramos_por_unidad_uso: Number(formManual.eq_gramos),
+                    observacion: 'Equivalencia inicial desde Evaluar receta',
+                });
+            }
+            const res = await api.crearInsumoManual(modalAsignar.ingrediente_id, {
+                usuario_solicitante_id: usuario.id,
+                nombre: formManual.nombre.trim(),
+                unidad_medida_id: Number(formManual.unidad_medida_id),
+                precio_por_unidad: Number(formManual.precio_por_unidad),
+                usar_rango: formManual.usar_rango,
+                fecha_inicio: formManual.usar_rango ? formManual.fecha_inicio : null,
+                fecha_fin: formManual.usar_rango ? (formManual.fecha_fin || null) : null,
+                observacion: formManual.observacion || null,
+                equivalencias,
+            });
+            setExitoPrecio(res.message || 'Insumo manual creado y vinculado.');
+            setModalAsignar(null);
+            cargarCosto(fechaLocal);
+        } catch (e) {
+            setErrorAsignar(e.message);
+        } finally {
+            setGuardandoAsignar(false);
+        }
+    };
+
+    // COM-37 v2 (trazabilidad): guardado del formulario inline legacy de precio manual
+    // por ingrediente, COMENTADO. Reemplazado por el modal simplificado v5:
+    // const guardarPrecioManual = async (fila) => { ... api.createPrecioManual(fila.ingrediente_id, {...}) ... };
 
     if (!isOpen || !receta) return null;
 
@@ -150,6 +229,7 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
     const manuales = datos?.ingredientes_manuales || 0;
     const completo = datos ? datos.precio_completo : false;
     const inputCls = "w-full px-2 py-1.5 border border-slate-300 rounded-lg text-xs outline-none focus:ring-2 focus:ring-emerald-500";
+    const labelCls = "text-[10px] font-bold text-slate-600 block mb-0.5";
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm">
@@ -178,7 +258,7 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
                         )}
                     </div>
 
-                    {/* COM-37 v2: badge de completitud de precios (regla de negocio) */}
+                    {/* Badge de completitud de precios (regla del flujo del comedor) */}
                     {datos && !datos.error && (
                         <div className={`mb-4 px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 ${
                             completo ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
@@ -204,121 +284,50 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
                                 </thead>
                                 <tbody>
                                     {detalle.map((d, i) => (
-                                        <React.Fragment key={i}>
-                                            <tr className={d.error || d.es_manual ? 'bg-red-50' : 'hover:bg-slate-50'}>
-                                                <td className="p-2 font-medium">{d.ingrediente}</td>
-                                                <td className="p-2">
-                                                    {d.error ? (
-                                                        <span className="text-red-600 text-xs flex items-center gap-1">
-                                                            <AlertCircle size={12} /> {d.error}
-                                                            {/* COM-37 v2: alta rápida de precio manual solo para Admin */}
-                                                            {esAdminSistema && d.ingrediente_id && (
-                                                                <button
-                                                                    onClick={() => {
-                                                                        setFormPrecio({
-                                                                            ingrediente_id: d.ingrediente_id,
-                                                                            precio: '',
-                                                                            usar_rango: false,
-                                                                            fecha_inicio: fechaLocal,
-                                                                            fecha_fin: '',
-                                                                            observacion: '',
-                                                                        });
-                                                                        setErrorPrecio('');
-                                                                        setExitoPrecio('');
-                                                                    }}
-                                                                    className="ml-2 inline-flex items-center gap-1 px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-bold transition-colors"
-                                                                >
-                                                                    <Plus size={11} /> Agregar precio
-                                                                </button>
-                                                            )}
-                                                        </span>
-                                                    ) : d.es_manual ? (
-                                                        /* COM-37: precio manual de la BD, colores del caso sin insumos */
-                                                        <span className="text-red-600 text-xs flex items-center gap-1 font-semibold">
-                                                            <Database size={12} /> {d.insumo_comprado}
-                                                        </span>
-                                                    ) : d.es_prediccion ? (
-                                                        <span className="text-amber-600 text-xs flex items-center gap-1 font-semibold">
-                                                            <TrendingUp size={12} /> {d.insumo_comprado}
-                                                        </span>
-                                                    ) : (
-                                                        <span className="text-slate-700">{d.insumo_comprado}</span>
-                                                    )}
-                                                </td>
-                                                <td className={`p-2 text-right font-bold ${d.error ? 'text-red-600' : 'text-emerald-700'}`}>
-                                                    {d.error ? (
-                                                        <span>S/ 0.00</span>
-                                                    ) : (
-                                                        `S/${d.costo_parcial?.toFixed(2) || '0.00'}`
-                                                    )}
-                                                </td>
-                                            </tr>
-
-                                            {/* COM-37 v2: formulario inline de precio manual (solo Admin) */}
-                                            {esAdminSistema && formPrecio && formPrecio.ingrediente_id === d.ingrediente_id && (
-                                                <tr className="bg-emerald-50/60">
-                                                    <td colSpan="3" className="p-3">
-                                                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                                                            <div>
-                                                                <label className="text-[10px] font-bold text-slate-600 block mb-0.5">
-                                                                    Precio S/ por {ingPorId[d.ingrediente_id]
-                                                                        ? `${ingPorId[d.ingrediente_id].unidad_abrev} (${ingPorId[d.ingrediente_id].unidad_nombre})`
-                                                                        : 'unidad estándar'}
-                                                                </label>
-                                                                <input type="number" min="0.01" step="0.10" value={formPrecio.precio}
-                                                                    onChange={(e) => setFormPrecio({ ...formPrecio, precio: e.target.value })}
-                                                                    className={inputCls} placeholder="Ej. 18.50" />
-                                                            </div>
-                                                            <div className="flex items-end pb-1">
-                                                                <label className="flex items-center gap-1.5 text-[11px] text-slate-700 cursor-pointer">
-                                                                    <input type="checkbox" checked={formPrecio.usar_rango}
-                                                                        onChange={(e) => setFormPrecio({ ...formPrecio, usar_rango: e.target.checked })}
-                                                                        className="accent-emerald-600" />
-                                                                    Usar rango de fechas
-                                                                </label>
-                                                            </div>
-                                                            <div>
-                                                                <label className="text-[10px] font-bold text-slate-600 block mb-0.5">Inicio</label>
-                                                                <input type="date" value={formPrecio.fecha_inicio} disabled={!formPrecio.usar_rango}
-                                                                    onChange={(e) => setFormPrecio({ ...formPrecio, fecha_inicio: e.target.value })}
-                                                                    className={`${inputCls} disabled:bg-slate-100`} />
-                                                            </div>
-                                                            <div>
-                                                                <label className="text-[10px] font-bold text-slate-600 block mb-0.5">Fin (opcional)</label>
-                                                                <input type="date" value={formPrecio.fecha_fin} disabled={!formPrecio.usar_rango}
-                                                                    onChange={(e) => setFormPrecio({ ...formPrecio, fecha_fin: e.target.value })}
-                                                                    className={`${inputCls} disabled:bg-slate-100`} />
-                                                            </div>
-                                                        </div>
-                                                        <div className="flex items-center gap-2 mt-2">
-                                                            <input type="text" value={formPrecio.observacion}
-                                                                onChange={(e) => setFormPrecio({ ...formPrecio, observacion: e.target.value })}
-                                                                placeholder="Observación (opcional)" className={`${inputCls} flex-1`} />
+                                        <tr key={i} className={d.error || d.es_manual ? 'bg-red-50' : 'hover:bg-slate-50'}>
+                                            <td className="p-2 font-medium">{d.ingrediente}</td>
+                                            <td className="p-2">
+                                                {d.error ? (
+                                                    <span className="text-red-600 text-xs flex items-center gap-1 flex-wrap">
+                                                        <AlertCircle size={12} /> {d.error}
+                                                        {/* COM-37 v5: asignación de insumo/precio solo para Admin */}
+                                                        {esAdminSistema && d.ingrediente_id && (
                                                             <button
-                                                                onClick={() => guardarPrecioManual(d)}
-                                                                disabled={guardandoPrecio}
-                                                                className="inline-flex items-center gap-1 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition-colors disabled:opacity-50"
+                                                                onClick={() => abrirAsignar(d)}
+                                                                className="ml-2 inline-flex items-center gap-1 px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-bold transition-colors"
                                                             >
-                                                                {guardandoPrecio ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
-                                                                Guardar y re-evaluar
+                                                                <Package size={11} /> Asignar insumo/precio
                                                             </button>
-                                                            <button
-                                                                onClick={() => setFormPrecio(null)}
-                                                                className="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg text-xs font-bold transition-colors"
-                                                            >
-                                                                Cancelar
-                                                            </button>
-                                                        </div>
-                                                        {errorPrecio && (
-                                                            <p className="mt-1 text-[11px] text-red-600 flex items-center gap-1"><AlertCircle size={11} /> {errorPrecio}</p>
                                                         )}
-                                                    </td>
-                                                </tr>
-                                            )}
-                                        </React.Fragment>
+                                                    </span>
+                                                ) : d.es_manual ? (
+                                                    /* COM-37: precio manual, colores del caso sin insumos */
+                                                    <span className="text-red-600 text-xs flex items-center gap-1 font-semibold">
+                                                        <Database size={12} /> {d.insumo_comprado}
+                                                    </span>
+                                                ) : d.es_prediccion ? (
+                                                    <span className="text-amber-600 text-xs flex items-center gap-1 font-semibold">
+                                                        <TrendingUp size={12} /> {d.insumo_comprado}
+                                                    </span>
+                                                ) : (
+                                                    <span className="text-slate-700">{d.insumo_comprado}</span>
+                                                )}
+                                            </td>
+                                            <td className={`p-2 text-right font-bold ${d.error ? 'text-red-600' : 'text-emerald-700'}`}>
+                                                {d.error ? <span>S/ 0.00</span> : `S/${d.costo_parcial?.toFixed(2) || '0.00'}`}
+                                            </td>
+                                        </tr>
                                     ))}
                                 </tbody>
                             </table>
+
+                            {/* COM-37 v2 (trazabilidad): formulario inline legacy de precio
+                                manual por ingrediente, COMENTADO (reemplazado por el modal
+                                simplificado v5 con botón "Asignar insumo/precio"):
+                            {esAdminSistema && formPrecio && formPrecio.ingrediente_id === d.ingrediente_id && (
+                                <tr className="bg-emerald-50/60"> ... inputs precio/rango/fechas ... </tr>
+                            )}
+                            */}
 
                             {/* Avisos inferiores */}
                             {sinPrecio > 0 && !esAdminSistema && (
@@ -331,8 +340,9 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
                             {sinPrecio > 0 && esAdminSistema && (
                                 <div className="mt-4 bg-amber-50 border border-amber-200 rounded-lg p-3 text-amber-800 text-sm">
                                     <p className="font-semibold mb-1">⚠ Ingredientes sin precio:</p>
-                                    <p>Use el botón "Agregar precio" de cada fila para registrar un precio promedio manual
-                                    (con o sin rango de fechas). Mientras falten precios, la receta queda fuera de las
+                                    <p>Use "Asignar insumo/precio" en cada fila: vincule un insumo del scraper o
+                                    registre un insumo manual (unidad de compra + precio con vigencia + equivalencia
+                                    de unidad de uso). Mientras falten precios, la receta queda fuera de las
                                     propuestas del comedor.</p>
                                 </div>
                             )}
@@ -362,6 +372,180 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
                     ) : null}
                 </div>
             </div>
+
+            {/* ===== COM-37 v5: modal simplificado de asignación (un solo ingrediente) ===== */}
+            {modalAsignar && (
+                <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[88vh] flex flex-col overflow-hidden">
+                        <div className="bg-emerald-700 text-white p-4 flex items-center gap-2">
+                            <Package size={18} />
+                            <div className="flex-1">
+                                <p className="font-bold text-sm">Asignar insumo/precio: {modalAsignar.ingrediente}</p>
+                                <p className="text-[11px] text-emerald-100">
+                                    Unidad de uso en esta receta: {modalAsignar.cantidad_usada}
+                                </p>
+                            </div>
+                            <button onClick={() => setModalAsignar(null)} className="p-1 hover:bg-emerald-800 rounded">
+                                <X size={18} />
+                            </button>
+                        </div>
+
+                        <div className="p-4 overflow-y-auto space-y-4">
+                            {/* Pestañas */}
+                            <div className="grid grid-cols-2 gap-2">
+                                <button
+                                    onClick={() => setTabAsignar('scraper')}
+                                    className={`p-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1 ${
+                                        tabAsignar === 'scraper' ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
+                                    <Search size={13} /> Insumo del scraper
+                                </button>
+                                <button
+                                    onClick={() => setTabAsignar('manual')}
+                                    className={`p-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1 ${
+                                        tabAsignar === 'manual' ? 'bg-purple-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
+                                    <Package size={13} /> Registrar insumo manual
+                                </button>
+                            </div>
+
+                            {errorAsignar && (
+                                <div className="p-2.5 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-center gap-2 text-xs">
+                                    <AlertCircle size={14} /> {errorAsignar}
+                                </div>
+                            )}
+
+                            {/* Vía 1: buscar y vincular insumo del scraper */}
+                            {tabAsignar === 'scraper' && (
+                                <div className="space-y-2">
+                                    <div className="flex gap-2">
+                                        <input
+                                            type="text"
+                                            value={qAsignar}
+                                            onChange={(e) => setQAsignar(e.target.value)}
+                                            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); buscarScraper(qAsignar); } }}
+                                            placeholder="Nombre del insumo..."
+                                            className={inputCls}
+                                        />
+                                        <button
+                                            onClick={() => buscarScraper(qAsignar)}
+                                            disabled={buscandoAsignar}
+                                            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-colors disabled:opacity-50">
+                                            {buscandoAsignar ? <Loader2 className="animate-spin" size={13} /> : 'Buscar'}
+                                        </button>
+                                    </div>
+                                    <div className="space-y-1.5 max-h-52 overflow-y-auto">
+                                        {resultadosAsignar.map(ins => (
+                                            <div key={ins.id} className="border border-slate-200 rounded-lg p-2 flex items-center gap-2 text-xs">
+                                                <div className="flex-1">
+                                                    <p className="font-bold text-slate-800">{ins.nombre}</p>
+                                                    <p className="text-[10px] text-slate-500">
+                                                        {ins.origen} · {ins.unidad_nombre}
+                                                        {ins.ingrediente_id ? ` · vinculado a: ${ins.ingrediente_actual}` : ' · sin vincular'}
+                                                    </p>
+                                                </div>
+                                                <button
+                                                    onClick={() => vincularScraper(ins)}
+                                                    disabled={guardandoAsignar}
+                                                    className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-bold transition-colors disabled:opacity-50">
+                                                    Vincular
+                                                </button>
+                                            </div>
+                                        ))}
+                                        {resultadosAsignar.length === 0 && !buscandoAsignar && (
+                                            <p className="text-[11px] text-slate-500 text-center p-3">
+                                                Sin resultados. Pruebe otro texto o registre un insumo manual.
+                                            </p>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Vía 2: registrar insumo manual con precio y equivalencia */}
+                            {tabAsignar === 'manual' && (
+                                <div className="space-y-3">
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <label className={labelCls}>Nombre del insumo</label>
+                                            <input type="text" value={formManual.nombre}
+                                                onChange={(e) => setFormManual({ ...formManual, nombre: e.target.value })}
+                                                className={inputCls} />
+                                        </div>
+                                        <div>
+                                            <label className={labelCls}>Unidad de COMPRA</label>
+                                            <select value={formManual.unidad_medida_id}
+                                                onChange={(e) => setFormManual({ ...formManual, unidad_medida_id: e.target.value })}
+                                                className={inputCls}>
+                                                <option value="">Seleccionar...</option>
+                                                {unidades.map(u => <option key={u.id} value={u.id}>{u.nombre} ({u.abreviatura})</option>)}
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className={labelCls}>Precio por unidad (S/)</label>
+                                            <input type="number" min="0.01" step="0.10" value={formManual.precio_por_unidad}
+                                                onChange={(e) => setFormManual({ ...formManual, precio_por_unidad: e.target.value })}
+                                                className={inputCls} />
+                                        </div>
+                                        <div className="flex items-end pb-1">
+                                            <label className="flex items-center gap-1.5 text-[11px] text-slate-700 cursor-pointer">
+                                                <input type="checkbox" checked={formManual.usar_rango}
+                                                    onChange={(e) => setFormManual({ ...formManual, usar_rango: e.target.checked })}
+                                                    className="accent-purple-600" />
+                                                Rango de vigencia
+                                            </label>
+                                        </div>
+                                        <div>
+                                            <label className={labelCls}>Inicio</label>
+                                            <input type="date" value={formManual.fecha_inicio} disabled={!formManual.usar_rango}
+                                                onChange={(e) => setFormManual({ ...formManual, fecha_inicio: e.target.value })}
+                                                className={`${inputCls} disabled:bg-slate-100`} />
+                                        </div>
+                                        <div>
+                                            <label className={labelCls}>Fin (opcional)</label>
+                                            <input type="date" value={formManual.fecha_fin} disabled={!formManual.usar_rango}
+                                                onChange={(e) => setFormManual({ ...formManual, fecha_fin: e.target.value })}
+                                                className={`${inputCls} disabled:bg-slate-100`} />
+                                        </div>
+                                    </div>
+
+                                    {/* Equivalencia precargada (unidad de uso por defecto del ingrediente) */}
+                                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-3">
+                                        <p className="text-[11px] font-bold text-slate-700 mb-2 flex items-center gap-1">
+                                            <Scale size={12} /> Equivalencia unidad de USO → gramos (opcional)
+                                        </p>
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <div>
+                                                <label className={labelCls}>Unidad de uso</label>
+                                                <select value={formManual.eq_unidad_uso_id}
+                                                    onChange={(e) => setFormManual({ ...formManual, eq_unidad_uso_id: e.target.value })}
+                                                    className={inputCls}>
+                                                    <option value="">Sin equivalencia</option>
+                                                    {unidades.map(u => <option key={u.id} value={u.id}>{u.nombre} ({u.abreviatura})</option>)}
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label className={labelCls}>Gramos por unidad</label>
+                                                <input type="number" min="0.0001" step="0.0001" value={formManual.eq_gramos}
+                                                    onChange={(e) => setFormManual({ ...formManual, eq_gramos: e.target.value })}
+                                                    className={inputCls} placeholder="Ej. 0.5" />
+                                            </div>
+                                        </div>
+                                        <p className="text-[10px] text-slate-500 mt-1">
+                                            Si la deja vacía, se usará la conversión estándar de la unidad de uso.
+                                        </p>
+                                    </div>
+
+                                    <button
+                                        onClick={crearManual}
+                                        disabled={guardandoAsignar}
+                                        className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-sm font-bold transition-colors disabled:opacity-50">
+                                        {guardandoAsignar ? <Loader2 className="animate-spin" size={15} /> : <Save size={15} />}
+                                        Crear insumo manual y re-evaluar
+                                    </button>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };
