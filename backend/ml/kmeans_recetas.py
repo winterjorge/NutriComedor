@@ -22,11 +22,13 @@ Historial:
    valores negativos rotulados como kcal/mg/g/S/. Ahora los centroides se persisten en
    UNIDADES REALES por ración vía scaler.inverse_transform(), y los centroides
    estandarizados se conservan en parametros.centroides_z para auditoría.
- - COM-37 (este archivo): _precios_actuales completa los ingredientes SIN precio de
-   scraper con el precio manual vigente (ingredientes_precios_manuales) a la fecha de
-   hoy, para que el agrupamiento trabaje con precios completos (decisión de ticket:
-   "necesitamos predecir, evaluar, agrupar con precios completos"). Precedencia:
-   scraper/predicción > manual (setdefault).
+ - COM-37: _precios_actuales completa los ingredientes SIN precio de scraper con el
+   precio manual vigente (ingredientes_precios_manuales) a la fecha de hoy, para que
+   el agrupamiento trabaje con precios completos. Precedencia: scraper > manual.
+ - COM-37 v2 (este archivo): regla de PRECIOS COMPLETOS para el flujo del comedor:
+   una receta con algún ingrediente sin precio (scraper/predicción/manual) se EXCLUYE
+   del modelo con motivo 'precio_incompleto' (y lista de ingredientes faltantes) en la
+   auditoría de listar_candidatas / entrenar. Ninguna línea existente se elimina.
 Uso: Importado por routers/kmeans.py. Todas las funciones reciben un cursor psycopg2
      (RealDictCursor); el caller gestiona la transacción.
 Referencia: ticket COM-5 (solo trazabilidad; los nombres obedecen a la funcionalidad).
@@ -356,7 +358,7 @@ def _a_gramos(cantidad, sim_unidad, gramos_por_unidad=100.0):
 
 
 # ==========================================
-# CONSTRUCCIÓN DEL DATASET (por ración) + REGLAS R1-R3
+# CONSTRUCCIÓN DEL DATASET (por ración) + REGLAS R1-R3 + PRECIOS COMPLETOS (COM-37 v2)
 # ==========================================
 def construir_dataset(cur, precio_bajo_max, precio_medio_max):
     """
@@ -365,6 +367,9 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
     ingredientes vetados (parametros_sistema), no regex hardcodeadas.
     COM-5 v5: el SELECT de recetas incluye las columnas nutricionales
     (hierro_mg, proteina_g, energia_kcal) que antes faltaban y causaban KeyError.
+    COM-37 v2: además se exige PRECIO COMPLETO: si algún ingrediente de la receta no
+    tiene precio (scraper/predicción/manual), la receta se excluye con motivo
+    'precio_incompleto' y la lista de ingredientes sin precio (auditoría transparente).
     Retorna (filas, excluidas).
     """
     # COM-5 v4: reglas de proteínas configurables por el Admin de Sistemas
@@ -464,6 +469,8 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
 
     costo_acum = {}
     nombres_acum = {}
+    # COM-37 v2: ingredientes SIN precio por receta (para el motivo 'precio_incompleto')
+    sin_precio_acum = {}
     for fila in cur.fetchall():
         if fila['tipo_magnitud'] in ('masa', 'volumen'):
             gramos = float(fila['cantidad']) * float(fila['factor_a_base'] or 1)
@@ -474,6 +481,9 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
         pkg = precios.get(fila['ing_id'])
         if pkg is not None:
             costo_acum[fila['receta_id']] = costo_acum.get(fila['receta_id'], 0.0) + (gramos / 1000.0) * pkg
+        else:
+            # COM-37 v2: se registra el ingrediente sin precio (scraper ni manual vigente)
+            sin_precio_acum.setdefault(fila['receta_id'], []).append(fila['ing_nombre'])
         nombres_acum.setdefault(fila['receta_id'], []).append({
             'nombre': fila['ing_nombre'],
             'categoria': fila['categoria'] or '',
@@ -521,6 +531,19 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
             continue
         if costo_total <= 0:
             excluidas.append({'receta_id': rec['id'], 'nombre': rec['nombre'], 'motivo': 'sin_precio'})
+            continue
+
+        # COM-37 v2: regla de PRECIOS COMPLETOS. Si algún ingrediente quedó sin precio
+        # (scraper/predicción/manual), la receta NO entra al modelo ni al flujo del
+        # comedor; se audita con motivo 'precio_incompleto' y la lista de faltantes.
+        faltantes_precio = sin_precio_acum.get(rec['id'])
+        if faltantes_precio:
+            excluidas.append({
+                'receta_id': rec['id'],
+                'nombre': rec['nombre'],
+                'motivo': 'precio_incompleto',
+                'ingredientes_sin_precio': sorted(set(faltantes_precio)),
+            })
             continue
 
         precio_racion = costo_total / rac
@@ -600,6 +623,8 @@ def entrenar_y_persistir(cur):
     persistencia del modelo activo y su asignación receta->cluster.
     COM-5 v6: los centroides persistidos en `centroides` van en UNIDADES REALES por
     ración (inverse_transform); los estandarizados quedan en parametros.centroides_z.
+    COM-37 v2: el dataset solo incluye recetas con precios completos; las excluidas
+    por 'precio_incompleto' quedan auditables en el resumen y en listar_candidatas.
     Retorna el resumen del entrenamiento (dict). El caller gestiona el commit.
     """
     k, bajo_max, medio_max = _parametros_kmeans(cur)
@@ -608,7 +633,7 @@ def entrenar_y_persistir(cur):
     if len(filas) < k:
         raise ValueError(
             f"Solo {len(filas)} recetas aptas para k={k}. "
-            "Revise las reglas de negocio o amplíe el recetario.")
+            "Revise las reglas de negocio, los precios (scraper o manuales) o amplíe el recetario.")
 
     X = np.array([[f['energia_kcal'], f['hierro_mg'], f['proteina_g'], f['precio_soles']] for f in filas])
     scaler = StandardScaler()
@@ -657,7 +682,8 @@ def entrenar_y_persistir(cur):
         'n_init': N_INIT,
         'precio_bajo_max': bajo_max,
         'precio_medio_max': medio_max,
-        'reglas': ['R1_proteina_permitida', 'R2_veto_res_cerdo', 'R3_sin_precio_alto'],
+        'reglas': ['R1_proteina_permitida', 'R2_veto_res_cerdo', 'R3_sin_precio_alto',
+                   'R4_precios_completos_COM37v2'],
         # COM-5 v6: espacio z conservado para auditoría.
         'centroides_z': centroides_z,
     }
@@ -704,6 +730,8 @@ def entrenar_y_persistir(cur):
         'silhouette': round(silhouette, 4),
         'clusters': resumen_clusters,
         'excluidas': excluidas,
+        # COM-37 v2: resumen rápido de excluidas por precio incompleto
+        'n_excluidas_precio_incompleto': sum(1 for e in excluidas if e.get('motivo') == 'precio_incompleto'),
     }
 
 
@@ -750,7 +778,8 @@ def obtener_recetas_por_cluster(cur, modelo_id, cluster_codigo=None):
 
 def listar_candidatas(cur):
     """
-    Transparencia del modelo: recetas aptas y excluidas con su motivo,
+    Transparencia del modelo: recetas aptas y excluidas con su motivo (incluye
+    'precio_incompleto' con la lista de ingredientes sin precio, COM-37 v2),
     recalculadas con los parámetros vigentes (sin persistir nada).
     """
     k, bajo_max, medio_max = _parametros_kmeans(cur)
