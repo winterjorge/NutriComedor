@@ -15,15 +15,13 @@ Historial:
    parametros.centroides_z.
  - COM-37 v2: regla R4 de PRECIOS COMPLETOS (motivo 'precio_incompleto').
  - COM-37 v5: costeo sobre precios_insumos.py (equivalencias uso->gramos + mejor insumo).
- - COM-37 v5-fix (este archivo):
-     1) construir_dataset pide precios con fallback_ultima_fecha=True: si hoy no hubo
-        corrida del scraper, los motores planifican con la ÚLTIMA corrida disponible
-        (antes el mapa quedaba vacío y solo entraban recetas con precio manual).
-     2) BLINDAJE de silhouette_score: solo se calcula si n_samples > n_clusters
-        (con 4 recetas aptas y k=4 sklearn lanzaba ValueError y el endpoint respondía
-        400 "Number of labels is 4..."); en caso contrario silhouette = 0.0.
-     3) Mensaje de error más claro cuando hay pocas recetas aptas (guía al admin a
-        cargar precios manuales o esperar al scraper).
+ - COM-37 v5-fix: fallback_ultima_fecha para días sin corrida del scraper; blindaje de
+   silhouette_score (n_samples > n_clusters) y mensaje de error guía.
+ - COM-37 v7 (este archivo): COHERENCIA DE FUENTES con Evaluar (optimizador): la
+   predicción Random Forest también cuenta como precio válido para la completitud
+   (jerarquía: scraper día/última corrida > manual insumo > legacy ingrediente >
+   predicción RF, menor costo entre insumos). Sin esto, un día sin scraper dejaba
+   "precio_incompleto" a recetas que en Evaluar aparecen con filas PREDICHO.
 Uso: Importado por routers/kmeans.py y por ml/greedy_search.py (reglas R1/R2).
 Referencia: ticket COM-5 (solo trazabilidad).
 """
@@ -37,12 +35,15 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
 
-# COM-37 v5: resolución unificada de precios por insumo/ingrediente y conversión estándar
+# COM-37 v5: resolución unificada de precios y conversión estándar de unidades
 from precios_insumos import (
     precios_por_gramo_por_insumo,
     mejor_opcion_ingrediente,
     gramos_por_unidad_estandar,
+    gramos_por_unidad_compra,
 )
+# COM-37 v7: predicción RF compartida con el optimizador (misma fuente de verdad)
+from optimizador import predecir_precio_con_confianza
 
 # ==========================================
 # CONSTANTES DEL MODELO
@@ -257,10 +258,8 @@ def _parametros_kmeans(cur):
 
 
 # =========================================================================
-# COM-37 v5 (trazabilidad): _precios_actuales COMENTADO. Mapeaba el último día de
-# historial_precios por ingrediente y completaba con precios manuales legacy.
-# Reemplazado por precios_insumos.mejor_opcion_ingrediente (scraper día/último >
-# manual insumo > legacy ingrediente) + equivalencias de unidad de USO.
+# COM-37 v5 (trazabilidad): _precios_actuales COMENTADO. Reemplazado por
+# precios_insumos.mejor_opcion_ingrediente + equivalencias de unidad de USO.
 # =========================================================================
 # def _precios_actuales(cur):
 #     cur.execute(""" ... historial_precios último día por ingrediente ... """)
@@ -293,6 +292,46 @@ def _gramos_linea(eq_map, ing_id, insumo_id, unidad_uso_id,
     if g is None:
         g = gramos_por_unidad_estandar(unidad_abrev, tipo_magnitud, factor_a_base, peso_estimado_g)
     return g * float(cantidad)
+
+
+def _opcion_con_prediccion(cur, ing_id, fecha, precios_insumo, peso_estimado_g):
+    """
+    COM-37 v7: mejor opción de precio del ingrediente con la MISMA jerarquía que
+    Evaluar: scraper (día o última corrida) > manual insumo > legacy ingrediente >
+    predicción RF (menor costo entre los insumos del ingrediente). Retorna dict de
+    opción o None si ninguna fuente aplica.
+    """
+    opc = mejor_opcion_ingrediente(cur, ing_id, fecha, precios_insumo)
+    if opc:
+        return opc
+    # COM-37 v7: fallback de predicción RF (coherente con optimizador.calcular_costo_receta)
+    cur.execute("""
+        SELECT ins.id, ins.nombre, ins.origen,
+               um.abreviatura, um.tipo_magnitud, um.factor_a_base
+        FROM insumos ins
+        JOIN unidades_medida um ON um.id = ins.unidad_medida_id
+        WHERE ins.ingrediente_id = %s;
+    """, (ing_id,))
+    mejor = None
+    for ins in cur.fetchall():
+        pred, conf, ok = predecir_precio_con_confianza(ins['id'], fecha, None, cur)
+        if not (ok and pred):
+            continue
+        g_compra = gramos_por_unidad_compra(
+            ins['abreviatura'], ins['tipo_magnitud'], ins['factor_a_base'], peso_estimado_g)
+        if g_compra <= 0:
+            continue
+        ppg = float(pred) / g_compra
+        if mejor is None or ppg < mejor['ppg']:
+            mejor = {
+                'insumo_id': ins['id'],
+                'insumo_nombre': ins['nombre'],
+                'origen': ins['origen'],
+                'ppg': ppg,
+                'fuente': 'PREDICHO',
+                'detalle': f"S/ {pred} por {ins['abreviatura']} (PREDICHO {conf}%)",
+            }
+    return mejor
 
 
 def _cargar_unidades(cur):
@@ -364,13 +403,14 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
     Construye el dataset por ración de todas las recetas y aplica las reglas:
       R1/R2 (COM-5 v4): proteínas permitidas / veto res-cerdo, configurables.
       R3: sin recetas de precio alto (umbrales de parametros_sistema).
-      R4 (COM-37 v2): PRECIOS COMPLETOS: si algún ingrediente no tiene fuente de precio
-          (scraper/manual insumo/legacy), la receta se excluye con motivo
+      R4 (COM-37 v2): PRECIOS COMPLETOS: si algún ingrediente no tiene NINGUNA fuente
+          de precio (scraper día/última corrida, manual insumo, legacy ingrediente o
+          predicción RF — COM-37 v7), la receta se excluye con motivo
           'precio_incompleto' y la lista de ingredientes faltantes.
     COM-37 v5: el costo por ración usa gramos de la unidad de USO (equivalencias o
     conversión estándar) × precio por gramo del MEJOR insumo del ingrediente.
-    COM-37 v5-fix: los precios se consultan con fallback_ultima_fecha=True (si hoy no
-    hubo corrida del scraper, se planifica con la última corrida disponible).
+    COM-37 v5-fix: precios con fallback_ultima_fecha=True (planifica con la última
+    corrida del scraper si hoy no hubo).
     Retorna (filas, excluidas).
     """
     # COM-5 v4: reglas de proteínas configurables por el Admin de Sistemas
@@ -378,17 +418,18 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
     nutricion = _cargar_nutricion(cur)
     unidades = _cargar_unidades(cur)
 
-    # COM-37 v5-fix: contexto de precios y equivalencias a la fecha de hoy, con
-    # fallback a la última corrida del scraper si hoy no hay precios.
+    # COM-37 v5-fix/v7: contexto de precios y equivalencias a la fecha de hoy
     fecha_hoy = date.today()
     precios_insumo = precios_por_gramo_por_insumo(cur, fecha_hoy, fallback_ultima_fecha=True)
     eq_map = _cargar_equivalencias(cur)
     opciones_cache = {}
 
-    def _opcion(ing_id):
-        if ing_id not in opciones_cache:
-            opciones_cache[ing_id] = mejor_opcion_ingrediente(cur, ing_id, fecha_hoy, precios_insumo)
-        return opciones_cache[ing_id]
+    def _opcion(ing_id, peso_estimado_g):
+        key = (ing_id)
+        if key not in opciones_cache:
+            opciones_cache[key] = _opcion_con_prediccion(
+                cur, ing_id, fecha_hoy, precios_insumo, peso_estimado_g)
+        return opciones_cache[key]
 
     tablas = _tablas_public(cur)
     puente = _detectar_puente(cur, tablas)
@@ -485,7 +526,7 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
     # COM-37 v2: ingredientes SIN precio por receta (motivo 'precio_incompleto')
     sin_precio_acum = {}
     for fila in cur.fetchall():
-        opc = _opcion(fila['ing_id'])
+        opc = _opcion(fila['ing_id'], fila['peso_estimado_g'])
         if opc is None:
             sin_precio_acum.setdefault(fila['receta_id'], []).append(fila['ing_nombre'])
         else:
