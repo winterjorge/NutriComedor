@@ -11,10 +11,15 @@ Historial:
              dicts {nombre, categoria} en una única fuente (_costear_recetas) y el
              top-3 tolera/omite elementos en formato legacy (texto plano) en lugar de
              fallar. Archivo autoconsistente: reemplazar COMPLETO, no parchar.
- - COM-37 (este archivo): _precios_por_gramo completa los ingredientes SIN precio de
-   scraper con el precio manual vigente a la fecha de hoy
-   (ingredientes_precios_manuales), para que las propuestas y la lista de compras
-   trabajen con precios completos. Precedencia: scraper > manual (setdefault).
+ - COM-37: _precios_por_gramo completa los ingredientes SIN precio de scraper con el
+   precio manual vigente a la fecha de hoy (ingredientes_precios_manuales), para que
+   propuestas y lista de compras trabajen con precios completos. Precedencia:
+   scraper > manual (setdefault).
+ - COM-37 v2 (este archivo): regla de PRECIOS COMPLETOS para el flujo del comedor:
+   solo recetas cuyos ingredientes tengan TODOS precio (scraper/predicción/manual)
+   alimentan la generación de propuestas y la planificación. Las excluidas se reportan
+   en el payload con sus ingredientes sin precio. El filtro anterior (solo costo>0,
+   que permitía costos parciales) queda COMENTADO por trazabilidad.
 Entradas:
   - Nutrición por receta: columnas hierro_mg / proteina_g / energia_kcal de
     recetas_almuerzo (valores de la receta completa), divididas entre raciones.
@@ -213,8 +218,10 @@ def _cargar_recetas_cluster(cur):
             'hierro_mg': float(r['hierro_mg'] or 0) / rac,
             'proteina_g': float(r['proteina_g'] or 0) / rac,
             'energia_kcal': float(r['energia_kcal'] or 0) / rac,
-            'costo_racion': 0.0,   # se completa en _costear_recetas
-            'ingredientes': [],    # lista de dicts {nombre, categoria}
+            'costo_racion': 0.0,          # se completa en _costear_recetas
+            'precio_completo': False,     # COM-37 v2: se completa en _costear_recetas
+            'ingredientes_sin_precio': [],  # COM-37 v2: auditoría de faltantes
+            'ingredientes': [],           # lista de dicts {nombre, categoria}
         })
     return recetas, modelo_id
 
@@ -224,6 +231,9 @@ def _costear_recetas(cur, recetas, precios_gramo: dict):
     COM-8 v3: calcula el costo por ración de cada receta sumando sus ingredientes a
     precios reales por gramo, y deja los ingredientes NORMALIZADOS como dicts
     {nombre, categoria} (única fuente de verdad para el top-3).
+    COM-37 v2: además marca r['precio_completo'] = True solo si TODAS las líneas de
+    ingredientes de la receta tuvieron precio (scraper o manual), y registra en
+    r['ingredientes_sin_precio'] los nombres faltantes para auditoría del payload.
     """
     ids = [r['receta_id'] for r in recetas]
     if not ids:
@@ -241,15 +251,24 @@ def _costear_recetas(cur, recetas, precios_gramo: dict):
     """, (ids,))
     costo_acum = {}
     nombres_acum = {}
+    # COM-37 v2: contadores de líneas con/sin precio por receta
+    lineas_tot = {}
+    lineas_con_precio = {}
+    sin_precio_nom = {}
     for fila in cur.fetchall():
+        rid = fila['receta_id']
         if fila['tipo_magnitud'] in ('masa', 'volumen'):
             gramos = float(fila['cantidad_requerida']) * float(fila['factor_a_base'] or 1)
         else:
             gramos = float(fila['cantidad_requerida']) * float(fila['peso_estimado_g'] or 1)
+        lineas_tot[rid] = lineas_tot.get(rid, 0) + 1
         ppg = precios_gramo.get(fila['ingrediente_id'])
         if ppg is not None:
-            costo_acum[fila['receta_id']] = costo_acum.get(fila['receta_id'], 0.0) + gramos * ppg
-        nombres_acum.setdefault(fila['receta_id'], []).append({
+            costo_acum[rid] = costo_acum.get(rid, 0.0) + gramos * ppg
+            lineas_con_precio[rid] = lineas_con_precio.get(rid, 0) + 1
+        else:
+            sin_precio_nom.setdefault(rid, []).append(fila['ing_nombre'])
+        nombres_acum.setdefault(rid, []).append({
             'nombre': fila['ing_nombre'],
             'categoria': fila['categoria'] or '',
         })
@@ -257,6 +276,11 @@ def _costear_recetas(cur, recetas, precios_gramo: dict):
         total = costo_acum.get(r['receta_id'], 0.0)
         r['costo_racion'] = round(total / r['raciones'], 2)
         r['ingredientes'] = nombres_acum.get(r['receta_id'], [])
+        # COM-37 v2: completitud de precios de la receta
+        tot = lineas_tot.get(r['receta_id'], 0)
+        conp = lineas_con_precio.get(r['receta_id'], 0)
+        r['precio_completo'] = (tot > 0 and conp == tot)
+        r['ingredientes_sin_precio'] = sorted(set(sin_precio_nom.get(r['receta_id'], [])))
 
 
 def _minmax(recetas) -> dict:
@@ -379,9 +403,11 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
                             creado_por_id: int, fecha_referencia: date = None,
                             seed: int = 0, dias_semana: list = None):
     """
-    COM-8 v2/v3: Genera y persiste las 3 propuestas de menú semanal (NUTRI, ECONO,
-    BALANCE) para los DÍAS DE COCINA indicados (1=Lunes..7=Domingo; por defecto
-    Lun-Vie). Retorna el payload completo para el frontend.
+    COM-8 v2/v3 + COM-37 v2: Genera y persiste las 3 propuestas de menú semanal
+    (NUTRI, ECONO, BALANCE) para los DÍAS DE COCINA indicados (1=Lunes..7=Domingo;
+    por defecto Lun-Vie), usando SOLO recetas con precios completos (scraper,
+    predicción o manual). Retorna el payload completo para el frontend, incluyendo
+    las recetas excluidas por precio incompleto con sus ingredientes faltantes.
     """
     if presupuesto_semanal is None or float(presupuesto_semanal) <= 0:
         raise ValueError("El presupuesto semanal debe ser mayor a cero.")
@@ -401,11 +427,23 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
 
     precios_gramo = _precios_por_gramo(cur)
     _costear_recetas(cur, recetas, precios_gramo)
-    recetas = [r for r in recetas if r['costo_racion'] > 0]
+
+    # COM-37 v2 (trazabilidad): filtro anterior COMENTADO (permitía recetas con costo
+    # parcial, es decir, ingredientes sin precio que dejaban el menú subestimado):
+    # recetas = [r for r in recetas if r['costo_racion'] > 0]
+    # COM-37 v2: SOLO recetas con precios COMPLETOS alimentan el flujo del comedor
+    excluidas_incompletas = [r for r in recetas if not r.get('precio_completo', False)]
+    recetas = [r for r in recetas if r.get('precio_completo', False) and r['costo_racion'] > 0]
     if len(recetas) < len(dias):
+        detalle = "; ".join(
+            f"{r['nombre']} (sin precio: {', '.join(r['ingredientes_sin_precio'][:4])})"
+            for r in excluidas_incompletas[:6]
+        )
         raise ValueError(
-            f"Solo hay {len(recetas)} recetas con costo y nutrición completos; se "
-            f"requieren al menos {len(dias)} para cubrir los días seleccionados.")
+            f"Solo hay {len(recetas)} recetas con precios completos y nutrición; se "
+            f"requieren al menos {len(dias)} para cubrir los días seleccionados. "
+            f"Excluidas por precio incompleto: {detalle or 'ninguna'}. Cargue precios "
+            f"manuales en Gestión de Ingredientes (COM-37) o espere la corrida del scraper.")
 
     recetas_por_cluster = {}
     for r in recetas:
@@ -470,6 +508,16 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
         'modelo_kmeans_id': modelo_id,
         'seed': seed,
         'propuestas': propuestas,
+        # COM-37 v2: transparencia de la regla de precios completos
+        'recetas_con_precio_completo': len(recetas),
+        'recetas_excluidas_precio_incompleto': [
+            {
+                'receta_id': r['receta_id'],
+                'nombre': r['nombre'],
+                'ingredientes_sin_precio': r.get('ingredientes_sin_precio', []),
+            }
+            for r in excluidas_incompletas
+        ],
     }
 
 

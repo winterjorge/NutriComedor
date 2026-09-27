@@ -16,7 +16,7 @@ from pathlib import Path
 # ==========================================
 # Define tu rango de fechas aquí
 FECHA_INICIO = date(2026, 4, 1)
-FECHA_FIN = date(2026, 7, 13)
+FECHA_FIN = date.today()
 
 # Pausa entre ejecuciones (segundos)
 # Importante para no saturar al servidor MIDAGRI
