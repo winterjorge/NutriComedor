@@ -2,22 +2,26 @@
 precios_insumos.py
 Objetivo: COM-37 v5: resolución unificada de (a) equivalencias unidad de USO -> gramos
           y (b) precios por gramo de cada insumo/ingrediente en una fecha, combinando
-          las cuatro fuentes con precedencia:
-            1) precio scraper del día (historial_precios de insumos SCRAPER),
+          las fuentes con precedencia:
+            1) precio scraper del día (historial_precios),
             2) predicción Random Forest (la aplica el optimizador; este módulo expone
                los gramos de compra para convertirla),
-            3) período manual vigente del insumo (insumos_precios_manuales, incluye
-               insumos MANUAL creados por el Admin),
+            3) período manual vigente del insumo (insumos_precios_manuales),
             4) precio manual legacy por ingrediente (ingredientes_precios_manuales v1).
-          Entre insumos de un mismo ingrediente gana el MENOR costo por gramo
-          (criterio de compra económica del comedor).
+          Entre insumos de un mismo ingrediente gana el MENOR costo por gramo.
+Historial:
+ - COM-37 v5: versión original (scraper del día + manual por insumo + legacy).
+ - COM-37 v5-fix (este archivo): nuevo parámetro `fallback_ultima_fecha` en
+   precios_por_gramo_por_insumo. Cuando se activa (motores K-means y Greedy, que
+   planifican con el último precio disponible), si la fecha pedida no tiene corrida
+   del scraper se usa el MAX(fecha) de historial_precios y la fuente se marca
+   'SCRAPER_ULTIMO'. El optimizador (Evaluar) NO lo activa: conserva la precedencia
+   día -> predicción RF -> manual (filas "PREDICHO" intactas).
+   Sin este fallback, un día sin corrida del scraper dejaba solo precios manuales
+   y el entrenamiento K-means caía con 4 recetas aptas (error de silhouette).
 Modelo de unidades:
-          - USO (ingrediente/receta): pizca, cucharadita, taza, rodaja, und...
-            gramos = equivalencia (ingrediente,insumo,unidad_uso) si existe; si no,
-            conversión estándar (factor_a_base masa/volumen; peso_estimado_g discretas;
-            atado=100 g; rodaja=20 g).
-          - COMPRA (insumo): Kg, L, atado, und... gramos por unidad de compra con la
-            misma regla estándar sobre la unidad del insumo.
+          - USO (ingrediente/receta): pizca, cucharadita, taza, und...
+          - COMPRA (insumo): Kg, L, atado, und...
 Uso: Importado por optimizador.py, ml/kmeans_recetas.py, ml/greedy_search.py y
      routers/ingredientes_admin.py.
 Referencia: ticket COM-37 v5 (solo trazabilidad).
@@ -105,18 +109,42 @@ def gramos_por_unidad_compra(insumo_abrev, tipo_magnitud, factor_a_base, peso_es
 # ==========================================
 # PRECIOS POR GRAMO POR INSUMO EN UNA FECHA
 # ==========================================
-def precios_por_gramo_por_insumo(cur, fecha):
+def _fecha_scraper_efectiva(cur, fecha):
     """
-    COM-37 v5: {insumo_id: {'ppg', 'fuente', 'detalle', 'insumo_nombre', 'origen'}}
+    COM-37 v5-fix: si la fecha pedida no tiene corrida del scraper, devuelve la última
+    fecha con precios disponibles (MAX(fecha)); si no hay historial alguno, devuelve
+    la fecha pedida (el mapa quedará vacío y regirán manuales/predicción).
+    """
+    cur.execute("""
+        SELECT COUNT(*) AS n FROM historial_precios
+        WHERE fecha = %s AND precio_prom IS NOT NULL AND precio_prom > 0;
+    """, (fecha,))
+    fila = cur.fetchone()
+    if fila and fila['n']:
+        return fecha
+    cur.execute("""
+        SELECT MAX(fecha) AS f FROM historial_precios
+        WHERE precio_prom IS NOT NULL AND precio_prom > 0;
+    """)
+    row = cur.fetchone()
+    return row['f'] if row and row['f'] else fecha
+
+
+def precios_por_gramo_por_insumo(cur, fecha, fallback_ultima_fecha=False):
+    """
+    COM-37 v5/v5-fix: {insumo_id: {'ppg','fuente','detalle','insumo_nombre','origen'}}
     con la mejor fuente disponible por insumo para la fecha:
-      'SCRAPER_DIA'      -> mínimo precio_prom del día en historial_precios,
-      'MANUAL_PERIODO'   -> período vigente más reciente de insumos_precios_manuales
-                            (solo si el insumo no tuvo precio scraper ese día).
+      'SCRAPER_DIA'     -> mínimo precio_prom del día en historial_precios,
+      'SCRAPER_ULTIMO'  -> (solo con fallback_ultima_fecha=True) mínimo precio_prom de
+                           la última corrida disponible cuando la fecha pedida no tiene,
+      'MANUAL_PERIODO'  -> período vigente más reciente de insumos_precios_manuales
+                           (solo si el insumo no tuvo precio scraper efectivo).
     La conversión a gramos usa la unidad de COMPRA del insumo.
     """
     out = {}
+    fecha_scraper = _fecha_scraper_efectiva(cur, fecha) if fallback_ultima_fecha else fecha
 
-    # 1) Precios scraper del día (mínimo por insumo entre mercados)
+    # 1) Precios scraper (del día pedido o de la última corrida, según fallback)
     cur.execute("""
         SELECT ins.id AS insumo_id, ins.nombre AS insumo_nombre, ins.origen,
                MIN(hp.precio_prom) AS precio_prom,
@@ -129,21 +157,22 @@ def precios_por_gramo_por_insumo(cur, fecha):
         WHERE hp.fecha = %s AND hp.precio_prom IS NOT NULL AND hp.precio_prom > 0
         GROUP BY ins.id, ins.nombre, ins.origen,
                  um.abreviatura, um.tipo_magnitud, um.factor_a_base, ing.peso_estimado_g;
-    """, (fecha,))
+    """, (fecha_scraper,))
     for r in cur.fetchall():
         g_compra = gramos_por_unidad_compra(
             r['u_abrev'], r['u_tipo'], r['u_factor'], r['peso_estimado_g'])
         if g_compra <= 0:
             continue
+        fuente = 'SCRAPER_DIA' if fecha_scraper == fecha else 'SCRAPER_ULTIMO'
         out[r['insumo_id']] = {
             'ppg': float(r['precio_prom']) / g_compra,
-            'fuente': 'SCRAPER_DIA',
-            'detalle': f"S/ {r['precio_prom']} por {r['u_abrev']} (scraper {fecha})",
+            'fuente': fuente,
+            'detalle': f"S/ {r['precio_prom']} por {r['u_abrev']} (scraper {fecha_scraper})",
             'insumo_nombre': r['insumo_nombre'],
             'origen': r['origen'],
         }
 
-    # 2) Períodos manuales vigentes (solo insumos sin precio scraper del día)
+    # 2) Períodos manuales vigentes (solo insumos sin precio scraper efectivo)
     cur.execute("""
         SELECT ipm.insumo_id, ipm.precio_por_unidad, ipm.id AS periodo_id, ipm.observacion,
                ins.nombre AS insumo_nombre, ins.origen,
@@ -160,7 +189,7 @@ def precios_por_gramo_por_insumo(cur, fecha):
     """, (fecha, fecha))
     for r in cur.fetchall():
         if r['insumo_id'] in out:
-            continue  # el scraper del día tiene precedencia
+            continue  # el scraper (del día o última corrida) tiene precedencia
         g_compra = gramos_por_unidad_compra(
             r['u_abrev'], r['u_tipo'], r['u_factor'], r['peso_estimado_g'])
         if g_compra <= 0:
@@ -184,8 +213,7 @@ def mejor_opcion_ingrediente(cur, ingrediente_id, fecha, precios_insumo=None):
     una fecha, recorriendo sus insumos. Si ningún insumo tiene precio, cae al manual
     legacy por ingrediente (COM-37 v1). Retorna dict con:
       {insumo_id, insumo_nombre, origen, ppg, fuente, detalle} o None.
-    `precios_insumo` puede pasarse precalculado (mapa de precios_por_gramo_por_insumo)
-    para evitar reconsultas en bucles de costeo.
+    `precios_insumo` puede pasarse precalculado para evitar reconsultas en bucles.
     """
     if precios_insumo is None:
         precios_insumo = precios_por_gramo_por_insumo(cur, fecha)
@@ -222,13 +250,12 @@ def mejor_opcion_ingrediente(cur, ingrediente_id, fecha, precios_insumo=None):
     return None
 
 
-def precios_por_gramo_por_ingrediente(cur, fecha):
+def precios_por_gramo_por_ingrediente(cur, fecha, fallback_ultima_fecha=False):
     """
     COM-37 v5: {ingrediente_id: ppg} con la mejor opción de cada ingrediente
-    (scraper día > manual insumo > legacy ingrediente). Lo usan K-means y Greedy para
-    costear con precios completos sin recorrer insumo por insumo en cada línea.
+    (scraper día/último > manual insumo > legacy ingrediente).
     """
-    precios_insumo = precios_por_gramo_por_insumo(cur, fecha)
+    precios_insumo = precios_por_gramo_por_insumo(cur, fecha, fallback_ultima_fecha)
     cur.execute("""
         SELECT DISTINCT ingrediente_id FROM insumos WHERE ingrediente_id IS NOT NULL;
     """)
