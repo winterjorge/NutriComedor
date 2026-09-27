@@ -1,27 +1,29 @@
 /**
  * components/recipes/ModalCostoReceta.jsx
  * Objetivo: Modal "Evaluar" del Recetario: desglose del costo de una receta en una
- *           fecha dada (unidad de USO de la receta, insumo seleccionado real/predicho/
- *           manual y costo parcial) + totales por receta y por ración.
+ *           fecha dada (unidad de USO, insumo seleccionado real/predicho/manual y costo
+ *           parcial) + totales por receta y por ración.
  * Historial:
  *  - Sprint 2: versión original autoconsultante con filas rojas sin precio y aviso ámbar.
  *  - COM-37 (roto): variante que esperaba `costoData` por props; comentada.
- *  - COM-37 v2: restaura el auto-fetch y agrega filas manuales ("Obtenido de la Base de
- *    Datos"), badge de costo completo/incompleto y formulario inline de precio manual
- *    por ingrediente (solo Admin).
- *  - COM-37 v5 (este archivo): el formulario inline v2 queda COMENTADO y se reemplaza
- *    por el botón "Asignar insumo/precio" (solo Admin) que abre un MODAL SIMPLIFICADO
- *    de un solo ingrediente con dos vías: (a) vincular un insumo del scraper buscado
- *    por nombre, o (b) registrar un insumo MANUAL con unidad de compra, precio con
- *    vigencia opcional y equivalencia unidad de uso -> gramos. Al guardar se
- *    re-evalúa el costo. Perfiles no admin conservan el aviso ámbar original.
+ *  - COM-37 v2: auto-fetch + filas manuales ("Obtenido de la Base de Datos") + badge de
+ *    costo completo + formulario inline de precio manual (solo Admin).
+ *  - COM-37 v5/v6: botón "Asignar insumo/precio" por fila sin precio (solo Admin) que
+ *    abre el modal simplificado de un solo ingrediente (vincular insumo del scraper o
+ *    registrar insumo manual con unidad+precio+vigencia+equivalencia) y re-evalúa.
+ *  - COM-37 v8 (este archivo): FIX del reporte "vinculé y solo una receta quedó completa":
+ *    al vincular un insumo que PERTENECE A OTRO INGREDIENTE, el modal muestra la
+ *    confirmación "Vincular y fusionar", que envía fusionar_ingrediente_origen=true para
+ *    que el ingrediente sinónimo se fusione en el actual y TODAS sus recetas hereden el
+ *    precio (el sinónimo queda como [OBSOLETO]). Sin ese aviso, la reasignación dejaba
+ *    huérfano al ingrediente origen.
  * Uso: Montado por RecipesView.jsx con props { isOpen, onClose, receta, fecha, onChangeFecha }.
- * Referencia: tickets COM-37 v2/v5 (solo trazabilidad).
+ * Referencia: tickets COM-37 v2/v5/v6/v8 (solo trazabilidad).
  */
 import React, { useState, useEffect } from 'react';
 import {
     X, Loader2, AlertCircle, Database, TrendingUp, CheckCircle2,
-    Search, Package, Scale, Save
+    Search, Package, Scale, Save, GitMerge
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
@@ -40,14 +42,13 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
     const [cargando, setCargando] = useState(false);
     const [fechaLocal, setFechaLocal] = useState(fecha || new Date().toISOString().split('T')[0]);
 
-    // COM-37 v5: catálogo de ingredientes (unidad de uso por defecto) y unidades,
-    // para precargar la equivalencia del modal simplificado.
+    // COM-37 v5: catálogo de ingredientes (unidad de uso por defecto) y unidades
     const [ingPorId, setIngPorId] = useState({});
     const [unidades, setUnidades] = useState([]);
 
-    // COM-37 v5: modal simplificado "Asignar insumo/precio" (una fila sin precio)
-    const [modalAsignar, setModalAsignar] = useState(null);       // fila del detalle
-    const [tabAsignar, setTabAsignar] = useState('scraper');      // 'scraper' | 'manual'
+    // COM-37 v5/v6: modal simplificado "Asignar insumo/precio" (una fila sin precio)
+    const [modalAsignar, setModalAsignar] = useState(null);
+    const [tabAsignar, setTabAsignar] = useState('scraper');
     const [qAsignar, setQAsignar] = useState('');
     const [resultadosAsignar, setResultadosAsignar] = useState([]);
     const [buscandoAsignar, setBuscandoAsignar] = useState(false);
@@ -59,6 +60,8 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
     const [guardandoAsignar, setGuardandoAsignar] = useState(false);
     const [errorAsignar, setErrorAsignar] = useState('');
     const [exitoPrecio, setExitoPrecio] = useState('');
+    // COM-37 v8: confirmación de fusión cuando el insumo pertenece a otro ingrediente
+    const [confirmFusion, setConfirmFusion] = useState(null);
 
     const cargarCosto = async (fechaEval) => {
         if (!receta) return;
@@ -67,7 +70,6 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
         try {
             const response = await api.getCostoReceta(receta.id, fechaEval);
             if (response.error) {
-                // Si no hay datos para esa fecha, intentar con la fecha actual
                 const hoy = new Date().toISOString().split('T')[0];
                 if (fechaEval !== hoy) {
                     const responseHoy = await api.getCostoReceta(receta.id, hoy);
@@ -90,6 +92,7 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
     useEffect(() => {
         if (isOpen && receta) {
             setModalAsignar(null);
+            setConfirmFusion(null);
             setErrorAsignar('');
             setExitoPrecio('');
             cargarCosto(fechaLocal);
@@ -97,7 +100,7 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [isOpen, receta]);
 
-    // COM-37 v5: si es admin y hay filas sin precio, carga catálogo de ingredientes y unidades
+    // COM-37 v5: si es admin y hay filas sin precio, carga catálogo y unidades
     useEffect(() => {
         if (!isOpen || !esAdminSistema) return;
         const faltantes = (datos?.detalle_insumos || []).filter(d => d.error);
@@ -123,13 +126,14 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
         cargarCosto(nuevaFecha);
     };
 
-    // ---------- COM-37 v5: modal simplificado ----------
+    // ---------- COM-37 v5/v6/v8: modal simplificado ----------
     const abrirAsignar = (fila) => {
         const ing = ingPorId[fila.ingrediente_id];
         setModalAsignar(fila);
         setTabAsignar('scraper');
         setQAsignar(fila.ingrediente || '');
         setErrorAsignar('');
+        setConfirmFusion(null);
         setResultadosAsignar([]);
         setFormManual({
             nombre: `${fila.ingrediente} (manual)`,
@@ -157,7 +161,16 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
         }
     };
 
-    const vincularScraper = async (ins) => {
+    // COM-37 v8: si el insumo pertenece a OTRO ingrediente, pedir confirmación de fusión
+    const pedirVincular = (ins) => {
+        if (ins.ingrediente_id && ins.ingrediente_id !== modalAsignar.ingrediente_id) {
+            setConfirmFusion(ins);
+        } else {
+            vincularScraper(ins, false);
+        }
+    };
+
+    const vincularScraper = async (ins, fusionar) => {
         setGuardandoAsignar(true);
         setErrorAsignar('');
         try {
@@ -165,9 +178,11 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
                 usuario_solicitante_id: usuario.id,
                 insumo_id: ins.id,
                 reasignar: true,
+                fusionar_ingrediente_origen: !!fusionar,
                 equivalencias: [],
             });
             setExitoPrecio(res.message || `Insumo '${ins.nombre}' vinculado.`);
+            setConfirmFusion(null);
             setModalAsignar(null);
             cargarCosto(fechaLocal);
         } catch (e) {
@@ -219,8 +234,8 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
     };
 
     // COM-37 v2 (trazabilidad): guardado del formulario inline legacy de precio manual
-    // por ingrediente, COMENTADO. Reemplazado por el modal simplificado v5:
-    // const guardarPrecioManual = async (fila) => { ... api.createPrecioManual(fila.ingrediente_id, {...}) ... };
+    // por ingrediente, COMENTADO. Reemplazado por el modal simplificado v5/v8:
+    // const guardarPrecioManual = async (fila) => { ... api.createPrecioManual(...) ... };
 
     if (!isOpen || !receta) return null;
 
@@ -290,7 +305,6 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
                                                 {d.error ? (
                                                     <span className="text-red-600 text-xs flex items-center gap-1 flex-wrap">
                                                         <AlertCircle size={12} /> {d.error}
-                                                        {/* COM-37 v5: asignación de insumo/precio solo para Admin */}
                                                         {esAdminSistema && d.ingrediente_id && (
                                                             <button
                                                                 onClick={() => abrirAsignar(d)}
@@ -301,7 +315,6 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
                                                         )}
                                                     </span>
                                                 ) : d.es_manual ? (
-                                                    /* COM-37: precio manual, colores del caso sin insumos */
                                                     <span className="text-red-600 text-xs flex items-center gap-1 font-semibold">
                                                         <Database size={12} /> {d.insumo_comprado}
                                                     </span>
@@ -321,11 +334,10 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
                                 </tbody>
                             </table>
 
-                            {/* COM-37 v2 (trazabilidad): formulario inline legacy de precio
-                                manual por ingrediente, COMENTADO (reemplazado por el modal
-                                simplificado v5 con botón "Asignar insumo/precio"):
+                            {/* COM-37 v2 (trazabilidad): formulario inline legacy COMENTADO
+                                (reemplazado por el modal simplificado v5/v8):
                             {esAdminSistema && formPrecio && formPrecio.ingrediente_id === d.ingrediente_id && (
-                                <tr className="bg-emerald-50/60"> ... inputs precio/rango/fechas ... </tr>
+                                <tr className="bg-emerald-50/60"> ... inputs precio/rango ... </tr>
                             )}
                             */}
 
@@ -341,9 +353,9 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
                                 <div className="mt-4 bg-amber-50 border border-amber-200 rounded-lg p-3 text-amber-800 text-sm">
                                     <p className="font-semibold mb-1">⚠ Ingredientes sin precio:</p>
                                     <p>Use "Asignar insumo/precio" en cada fila: vincule un insumo del scraper o
-                                    registre un insumo manual (unidad de compra + precio con vigencia + equivalencia
-                                    de unidad de uso). Mientras falten precios, la receta queda fuera de las
-                                    propuestas del comedor.</p>
+                                    registre un insumo manual. Si el insumo pertenece a un ingrediente sinónimo,
+                                    elija "Vincular y fusionar" para que TODAS las recetas del sinónimo hereden el
+                                    precio. Mientras falten precios, la receta queda fuera de las propuestas.</p>
                                 </div>
                             )}
                             {manuales > 0 && (
@@ -373,7 +385,7 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
                 </div>
             </div>
 
-            {/* ===== COM-37 v5: modal simplificado de asignación (un solo ingrediente) ===== */}
+            {/* ===== COM-37 v5/v6/v8: modal simplificado de asignación ===== */}
             {modalAsignar && (
                 <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
                     <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[88vh] flex flex-col overflow-hidden">
@@ -385,7 +397,7 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
                                     Unidad de uso en esta receta: {modalAsignar.cantidad_usada}
                                 </p>
                             </div>
-                            <button onClick={() => setModalAsignar(null)} className="p-1 hover:bg-emerald-800 rounded">
+                            <button onClick={() => { setModalAsignar(null); setConfirmFusion(null); }} className="p-1 hover:bg-emerald-800 rounded">
                                 <X size={18} />
                             </button>
                         </div>
@@ -413,8 +425,37 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
                                 </div>
                             )}
 
+                            {/* COM-37 v8: confirmación de fusión de sinónimos */}
+                            {confirmFusion && (
+                                <div className="p-3 bg-amber-50 border border-amber-300 rounded-xl text-amber-900 text-xs space-y-2">
+                                    <p className="font-bold flex items-center gap-1"><GitMerge size={13} /> El insumo pertenece a otro ingrediente</p>
+                                    <p>
+                                        "{confirmFusion.nombre}" está vinculado actualmente a <b>{confirmFusion.ingrediente_actual}</b>.
+                                        Si "{confirmFusion.ingrediente_actual}" es un sinónimo de "{modalAsignar.ingrediente}",
+                                        fusiónelos para que <b>todas</b> sus recetas hereden este precio (el sinónimo quedará
+                                        marcado como [OBSOLETO] y sus líneas de receta se moverán aquí).
+                                    </p>
+                                    <div className="flex gap-2">
+                                        <button
+                                            onClick={() => vincularScraper(confirmFusion, true)}
+                                            disabled={guardandoAsignar}
+                                            className="flex-1 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-bold transition-colors disabled:opacity-50">
+                                            Vincular y fusionar (recomendado)
+                                        </button>
+                                        <button
+                                            onClick={() => vincularScraper(confirmFusion, false)}
+                                            disabled={guardandoAsignar}
+                                            className="flex-1 px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg text-[11px] font-bold transition-colors disabled:opacity-50">
+                                            Solo vincular
+                                        </button>
+                                    </div>
+                                    <button onClick={() => setConfirmFusion(null)}
+                                        className="text-[10px] underline text-slate-600">Cancelar</button>
+                                </div>
+                            )}
+
                             {/* Vía 1: buscar y vincular insumo del scraper */}
-                            {tabAsignar === 'scraper' && (
+                            {tabAsignar === 'scraper' && !confirmFusion && (
                                 <div className="space-y-2">
                                     <div className="flex gap-2">
                                         <input
@@ -443,7 +484,7 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
                                                     </p>
                                                 </div>
                                                 <button
-                                                    onClick={() => vincularScraper(ins)}
+                                                    onClick={() => pedirVincular(ins)}
                                                     disabled={guardandoAsignar}
                                                     className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-bold transition-colors disabled:opacity-50">
                                                     Vincular
@@ -506,7 +547,6 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
                                         </div>
                                     </div>
 
-                                    {/* Equivalencia precargada (unidad de uso por defecto del ingrediente) */}
                                     <div className="bg-slate-50 border border-slate-200 rounded-xl p-3">
                                         <p className="text-[11px] font-bold text-slate-700 mb-2 flex items-center gap-1">
                                             <Scale size={12} /> Equivalencia unidad de USO → gramos (opcional)

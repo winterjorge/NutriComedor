@@ -1,26 +1,39 @@
 """
 routers/ingredientes_admin.py
-Objetivo: COM-37 v5/v6: módulo "Gestión de Ingredientes" exclusivo del Administrador de
-          Sistemas, sobre el modelo de DOS CONCEPTOS:
-            - INGREDIENTE: lo que se cocina; unidad de USO (pizca, cucharadita, taza...).
-            - INSUMO: lo que se compra; unidad de COMPRA (Kg, L, atado, und...);
-              origen 'SCRAPER' (SISAP) o 'MANUAL' (registrado por el Admin).
+Objetivo: COM-37 v5/v6/v8: módulo "Gestión de Ingredientes" exclusivo del Administrador
+          de Sistemas, sobre el modelo de DOS CONCEPTOS:
+            - INGREDIENTE: lo que se cocina; unidad de USO.
+            - INSUMO: lo que se compra; unidad de COMPRA; origen SCRAPER|MANUAL.
           Secciones:
             A) Ingredientes: listado con indicadores, crear y editar/renombrar SIN borrado.
-            B) Emparejamiento ingrediente<->insumo: insumos vinculados con precio de hoy
-               (COM-37 v6: ahora también precio POR UNIDAD DE COMPRA y detalle de la
-               fuente), búsqueda de insumos del scraper, vinculación con equivalencias,
-               creación de insumo MANUAL (unidad + precio con vigencia + equivalencias),
-               edición y desvinculación de insumos manuales.
+            B) Emparejamiento ingrediente<->insumo: insumos vinculados con precio vigente
+               hoy en unidad de compra y fuente, búsqueda y vinculación de insumos del
+               scraper, creación de insumo MANUAL (unidad+precio+vigencia+equivalencias),
+               edición y desvinculación de manuales.
             C) Equivalencias unidad de USO -> gramos (CRUD + desactivación lógica).
-            D) Precios manuales por INSUMO (períodos con vigencia opcional, solapes
-               validados, desactivación lógica).
+            D) Precios manuales POR INSUMO (períodos con vigencia opcional, solapes).
             E) Re-emparejado de insumos huérfanos (heuristics + nombre normalizado).
-            LEGACY (COM-37 v1): precios manuales POR INGREDIENTE conservados como
-               último fallback de resolución.
+            LEGACY (COM-37 v1): precios manuales POR INGREDIENTE como último fallback.
+Historial:
+ - COM-37 v8 (este archivo): FIX del reporte "vinculé un insumo y solo una receta quedó
+   con precio completo": el vínculo es por ingrediente (insumos.ingrediente_id), pero
+   existen IDs duplicados/sinónimos (Pimenton vs Pimiento) y reasignaciones que huérfanan
+   al ingrediente origen. Se agregan:
+     * POST /{ingrediente_id}/fusionar: fusiona un ingrediente duplicado (origen) en el
+       canónico (destino): re-apunta receta_ingrediente (sumando cantidades en líneas
+       duplicadas receta+unidad), insumos, equivalencias y precios legacy; renombra el
+       origen como '[OBSOLETO] ...' (SIN borrado físico del catálogo; el DELETE de líneas
+       puente duplicadas es parte inherente de la fusión, documentado).
+     * GET /duplicados: detecta ingredientes SIN insumos cuyo nombre normalizado coincide
+       o contiene al de otro ingrediente CON insumos (candidatos a fusión).
+     * VincularInsumoInput.fusionar_ingrediente_origen: al reasignar un insumo desde otro
+       ingrediente, fusiona también ese origen en el destino (usado por el modal de
+       Evaluar con la confirmación "Vincular y fusionar").
+ - COM-37 v6: precio vigente hoy en unidad de compra + detalle de fuente en el listado B.
+ - COM-37 v5: secciones B/C/D/E sobre insumos_precios_manuales e ingredientes_equivalencias.
 Permisos: todos los endpoints exigen es_admin_sistema (403 en caso contrario).
 Uso: Registrado en main.py con prefijo /api/v1 (include existente de COM-37).
-Referencia: tickets COM-37 v5/v6 (solo trazabilidad).
+Referencia: tickets COM-37 v5/v6/v8 (solo trazabilidad).
 """
 import unicodedata
 from datetime import date
@@ -43,7 +56,7 @@ except Exception:  # pragma: no cover - degradación controlada
     clasificar_heuristica_mejorada = None
     HEURISTICA_DISPONIBLE = False
 
-router = APIRouter(prefix="/ingredientes-admin", tags=["Gestión de Ingredientes (COM-37 v6)"])
+router = APIRouter(prefix="/ingredientes-admin", tags=["Gestión de Ingredientes (COM-37 v8)"])
 
 
 # ==========================================
@@ -77,7 +90,17 @@ class VincularInsumoInput(BaseModel):
     usuario_solicitante_id: int
     insumo_id: int
     reasignar: bool = False
+    # COM-37 v8: si el insumo pertenecía a otro ingrediente y este flag es True, se
+    # fusiona ese ingrediente origen en el destino (sinónimos), de modo que TODAS las
+    # recetas del sinónimo hereden el precio del insumo reasignado.
+    fusionar_ingrediente_origen: bool = False
     equivalencias: List[EquivalenciaItem] = []
+
+
+class FusionarIngredienteInput(BaseModel):
+    """COM-37 v8: fusiona `origen_id` (duplicado/sinónimo) en el ingrediente de la ruta."""
+    usuario_solicitante_id: int
+    origen_id: int
 
 
 class CrearInsumoManualInput(BaseModel):
@@ -250,6 +273,78 @@ def _precio_por_unidad_hoy(cur, insumo_id, fuente, fecha_obj):
 
 
 # ==========================================
+# COM-37 v8: FUSIÓN DE INGREDIENTES SINÓNIMOS
+# ==========================================
+def _fusionar_ingredientes(cur, origen_id: int, destino_id: int) -> dict:
+    """
+    COM-37 v8: fusiona el ingrediente `origen_id` (duplicado/sinónimo) en `destino_id`.
+    Re-apunta todas las referencias y conserva trazabilidad:
+      1) receta_ingrediente: si la receta ya tiene línea del destino con la misma unidad
+         de uso, SUMA las cantidades y elimina la línea duplicada del origen (el DELETE
+         es parte inherente de la fusión de líneas puente; el catálogo NO se borra).
+      2) receta_ingrediente restante, insumos, equivalencias y precios legacy: se mueven
+         al destino (las equivalencias en conflicto se desactivan, no se borran).
+      3) El ingrediente origen se renombra '[OBSOLETO] <nombre>' (sin borrado físico).
+    Retorna contadores para el mensaje de confirmación. El caller hace commit.
+    """
+    if origen_id == destino_id:
+        raise HTTPException(status_code=400, detail="No se puede fusionar un ingrediente consigo mismo.")
+    cur.execute("SELECT id, nombre FROM ingredientes WHERE id IN (%s, %s);", (origen_id, destino_id))
+    filas = cur.fetchall()
+    if len(filas) != 2:
+        raise HTTPException(status_code=404, detail="Ingrediente origen o destino no encontrado.")
+    nombres = {f['id']: f['nombre'] for f in filas}
+    if nombres[origen_id].startswith('[OBSOLETO]'):
+        raise HTTPException(status_code=400, detail="El ingrediente origen ya está obsoleto.")
+
+    # 1) Líneas puente duplicadas (misma receta + misma unidad de uso): sumar y quitar duplicado
+    cur.execute("""
+        UPDATE receta_ingrediente d
+        SET cantidad_requerida = d.cantidad_requerida + o.cantidad_requerida
+        FROM receta_ingrediente o
+        WHERE o.ingrediente_id = %s AND d.ingrediente_id = %s
+          AND d.receta_id = o.receta_id AND d.unidad_medida_id = o.unidad_medida_id;
+    """, (origen_id, destino_id))
+    cur.execute("""
+        DELETE FROM receta_ingrediente o
+        USING receta_ingrediente d
+        WHERE o.ingrediente_id = %s AND d.ingrediente_id = %s
+          AND d.receta_id = o.receta_id AND d.unidad_medida_id = o.unidad_medida_id;
+    """, (origen_id, destino_id))
+    n_lineas_duplicadas = cur.rowcount
+
+    # 2) Mover el resto de referencias al destino
+    cur.execute("UPDATE receta_ingrediente SET ingrediente_id = %s WHERE ingrediente_id = %s;",
+                (destino_id, origen_id))
+    n_lineas_movidas = cur.rowcount
+    cur.execute("UPDATE insumos SET ingrediente_id = %s WHERE ingrediente_id = %s;",
+                (destino_id, origen_id))
+    n_insumos_movidos = cur.rowcount
+    cur.execute("""
+        UPDATE ingredientes_equivalencias o SET estado_activo = FALSE
+        FROM ingredientes_equivalencias d
+        WHERE o.ingrediente_id = %s AND d.ingrediente_id = %s
+          AND o.insumo_id = d.insumo_id AND o.unidad_uso_id = d.unidad_uso_id;
+    """, (origen_id, destino_id))
+    cur.execute("UPDATE ingredientes_equivalencias SET ingrediente_id = %s WHERE ingrediente_id = %s;",
+                (destino_id, origen_id))
+    cur.execute("UPDATE ingredientes_precios_manuales SET ingrediente_id = %s WHERE ingrediente_id = %s;",
+                (destino_id, origen_id))
+
+    # 3) Marcar el origen como obsoleto (sin borrado físico)
+    cur.execute("UPDATE ingredientes SET nombre = '[OBSOLETO] ' || nombre WHERE id = %s;", (origen_id,))
+    return {
+        'origen_id': origen_id,
+        'origen_nombre': nombres[origen_id],
+        'destino_id': destino_id,
+        'destino_nombre': nombres[destino_id],
+        'lineas_receta_movidas': n_lineas_movidas,
+        'lineas_duplicadas_sumadas': n_lineas_duplicadas,
+        'insumos_movidos': n_insumos_movidos,
+    }
+
+
+# ==========================================
 # SECCIÓN A: INGREDIENTES (CRUD sin borrado)
 # ==========================================
 @router.get("")
@@ -276,6 +371,7 @@ def listar_ingredientes(usuario_solicitante_id: int, db=Depends(get_db)):
             FROM ingredientes i
             LEFT JOIN categorias_alimentos ca ON ca.id = i.categoria_id
             LEFT JOIN unidades_medida um ON um.id = i.unidad_medida_id
+            WHERE i.nombre NOT LIKE '[OBSOLETO]%%'
             ORDER BY i.nombre;
         """)
         return cur.fetchall()
@@ -283,6 +379,74 @@ def listar_ingredientes(usuario_solicitante_id: int, db=Depends(get_db)):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al listar ingredientes: {e}")
+    finally:
+        cur.close()
+
+
+@router.get("/duplicados")
+def listar_duplicados(usuario_solicitante_id: int, db=Depends(get_db)):
+    """
+    COM-37 v8: candidatos a fusión: ingredientes SIN insumos cuyo nombre normalizado
+    coincide o contiene (>=4 caracteres) al de otro ingrediente CON insumos. Explica
+    por qué una receta quedaba sin precio completo aunque su sinónimo sí tuviera insumo.
+    """
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        _validar_admin(cur, usuario_solicitante_id)
+        cur.execute("SELECT id, nombre FROM ingredientes;")
+        rows = [r for r in cur.fetchall() if not r['nombre'].startswith('[OBSOLETO]')]
+        norm = [(r['id'], _normalizar(r['nombre']), r['nombre']) for r in rows]
+        cur.execute("SELECT ingrediente_id, COUNT(*) AS n FROM insumos GROUP BY ingrediente_id;")
+        con_insumos = {r['ingrediente_id']: r['n'] for r in cur.fetchall()}
+        cur.execute("SELECT ingrediente_id, COUNT(*) AS n FROM receta_ingrediente GROUP BY ingrediente_id;")
+        uso_recetas = {r['ingrediente_id']: r['n'] for r in cur.fetchall()}
+        out = []
+        for oid, onorm, onom in norm:
+            if con_insumos.get(oid):
+                continue  # ya tiene insumos: no es un duplicado huérfano
+            for did, dnorm, dnom in norm:
+                if did == oid or not con_insumos.get(did):
+                    continue
+                if onorm == dnorm or (len(onorm) >= 4 and (onorm in dnorm or dnorm in onorm)):
+                    out.append({
+                        'origen_id': oid, 'origen_nombre': onom,
+                        'destino_id': did, 'destino_nombre': dnom,
+                        'recetas_afectadas': uso_recetas.get(oid, 0),
+                    })
+                    break
+        return out
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al detectar duplicados: {e}")
+    finally:
+        cur.close()
+
+
+@router.post("/{ingrediente_id}/fusionar")
+def fusionar_ingrediente(ingrediente_id: int, data: FusionarIngredienteInput, db=Depends(get_db)):
+    """
+    COM-37 v8: fusiona el ingrediente duplicado `origen_id` en el ingrediente de la ruta
+    (destino). Tras la fusión, TODAS las recetas que usaban el sinónimo pasan a usar el
+    canónico y heredan sus insumos/precios. El origen queda como '[OBSOLETO] ...'.
+    """
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        _validar_admin(cur, data.usuario_solicitante_id)
+        resumen = _fusionar_ingredientes(cur, data.origen_id, ingrediente_id)
+        db.commit()
+        return {
+            **resumen,
+            'message': (f"'{resumen['origen_nombre']}' fusionado en '{resumen['destino_nombre']}': "
+                        f"{resumen['lineas_receta_movidas']} línea(s) de receta y {resumen['insumos_movidos']} "
+                        f"insumo(s) movidos; {resumen['lineas_duplicadas_sumadas']} línea(s) duplicada(s) sumadas. "
+                        f"Todas las recetas del sinónimo ahora heredan sus precios."),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error al fusionar ingredientes: {e}")
     finally:
         cur.close()
 
@@ -403,9 +567,8 @@ def listar_insumos_del_ingrediente(
 ):
     """
     COM-37 v6: insumos vinculados al ingrediente con unidad de compra, último precio
-    scraper, períodos manuales activos, equivalencias y —nuevo— el precio VIGENTE HOY
-    EN UNIDAD DE COMPRA (precio_por_unidad_hoy) con su fuente y detalle legible, para
-    que lo cargado desde el modal de Evaluar sea visible inmediatamente en el panel.
+    scraper, períodos manuales activos, equivalencias y el precio VIGENTE HOY EN UNIDAD
+    DE COMPRA (precio_por_unidad_hoy) con su fuente y detalle legible.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -450,7 +613,12 @@ def listar_insumos_del_ingrediente(
 
 @router.post("/{ingrediente_id}/vincular-insumo")
 def vincular_insumo(ingrediente_id: int, data: VincularInsumoInput, db=Depends(get_db)):
-    """COM-37 v5: vincula un insumo existente al ingrediente y registra equivalencias."""
+    """
+    COM-37 v5/v8: vincula un insumo existente al ingrediente y registra equivalencias.
+    COM-37 v8: si el insumo pertenecía a otro ingrediente y
+    `fusionar_ingrediente_origen=True`, ese origen se fusiona en el destino (sinónimos),
+    de modo que TODAS las recetas del sinónimo hereden el precio (fix del reporte).
+    """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         _validar_admin(cur, data.usuario_solicitante_id)
@@ -461,7 +629,8 @@ def vincular_insumo(ingrediente_id: int, data: VincularInsumoInput, db=Depends(g
         ins = cur.fetchone()
         if not ins:
             raise HTTPException(status_code=404, detail="Insumo no encontrado.")
-        if ins['ingrediente_id'] is not None and ins['ingrediente_id'] != ingrediente_id and not data.reasignar:
+        origen_previo = ins['ingrediente_id']
+        if origen_previo is not None and origen_previo != ingrediente_id and not data.reasignar:
             raise HTTPException(
                 status_code=400,
                 detail=f"El insumo '{ins['nombre']}' ya está vinculado a otro ingrediente. "
@@ -470,8 +639,13 @@ def vincular_insumo(ingrediente_id: int, data: VincularInsumoInput, db=Depends(g
                     (ingrediente_id, data.insumo_id))
         n_eq = _upsert_equivalencias(cur, ingrediente_id, data.insumo_id,
                                      data.equivalencias, data.usuario_solicitante_id)
+        mensaje_extra = ''
+        if origen_previo is not None and origen_previo != ingrediente_id and data.fusionar_ingrediente_origen:
+            resumen = _fusionar_ingredientes(cur, origen_previo, ingrediente_id)
+            mensaje_extra = (f" Se fusionó '{resumen['origen_nombre']}' en el destino: "
+                             f"{resumen['lineas_receta_movidas']} línea(s) de receta heredaron el precio.")
         db.commit()
-        return {'message': f"Insumo '{ins['nombre']}' vinculado. Equivalencias registradas: {n_eq}."}
+        return {'message': f"Insumo '{ins['nombre']}' vinculado. Equivalencias registradas: {n_eq}.{mensaje_extra}"}
     except HTTPException:
         raise
     except Exception as e:
