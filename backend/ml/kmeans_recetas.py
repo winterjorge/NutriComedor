@@ -9,19 +9,22 @@ Objetivo: Motor del modelo K-means del recetario (COM-5). Construye el dataset p
 Historial:
  - COM-5 v1/v2/v3: reglas hardcodeadas; detección defensiva de esquema; FIX de precios
    por gramo vía insumos->historial_precios.
- - COM-5 v4: reglas R1/R2 configurables desde parametros_sistema (editables por el
-   Admin en la vista de Clusters); regex fijas anteriores COMENTADAS como default.
+ - COM-5 v4: reglas R1/R2 configurables desde parametros_sistema (Admin en Clusters).
  - COM-5 v5: FIX KeyError 'energia_kcal' (columnas nutricionales en el SELECT).
- - COM-5 v6: centroides persistidos en UNIDADES REALES (inverse_transform); los z-score
-   se conservan en parametros.centroides_z para auditoría.
- - COM-37 v2: regla de PRECIOS COMPLETOS: recetas con algún ingrediente sin precio se
-   excluyen con motivo 'precio_incompleto' (auditoría con lista de faltantes).
- - COM-37 v5 (este archivo): costeo reescrito sobre precios_insumos.py con el modelo de
-   DOS CONCEPTOS: gramos de la unidad de USO vía ingredientes_equivalencias (o
-   conversión estándar) × precio por gramo del MEJOR insumo del ingrediente
-   (scraper del día > período manual del insumo > manual legacy por ingrediente).
-   El bloque _precios_actuales anterior queda COMENTADO por trazabilidad.
-Uso: Importado por routers/kmeans.py y (para las reglas R1/R2) por ml/greedy_search.py.
+ - COM-5 v6: centroides persistidos en UNIDADES REALES (inverse_transform); z-score en
+   parametros.centroides_z.
+ - COM-37 v2: regla R4 de PRECIOS COMPLETOS (motivo 'precio_incompleto').
+ - COM-37 v5: costeo sobre precios_insumos.py (equivalencias uso->gramos + mejor insumo).
+ - COM-37 v5-fix (este archivo):
+     1) construir_dataset pide precios con fallback_ultima_fecha=True: si hoy no hubo
+        corrida del scraper, los motores planifican con la ÚLTIMA corrida disponible
+        (antes el mapa quedaba vacío y solo entraban recetas con precio manual).
+     2) BLINDAJE de silhouette_score: solo se calcula si n_samples > n_clusters
+        (con 4 recetas aptas y k=4 sklearn lanzaba ValueError y el endpoint respondía
+        400 "Number of labels is 4..."); en caso contrario silhouette = 0.0.
+     3) Mensaje de error más claro cuando hay pocas recetas aptas (guía al admin a
+        cargar precios manuales o esperar al scraper).
+Uso: Importado por routers/kmeans.py y por ml/greedy_search.py (reglas R1/R2).
 Referencia: ticket COM-5 (solo trazabilidad).
 """
 import re
@@ -256,8 +259,8 @@ def _parametros_kmeans(cur):
 # =========================================================================
 # COM-37 v5 (trazabilidad): _precios_actuales COMENTADO. Mapeaba el último día de
 # historial_precios por ingrediente y completaba con precios manuales legacy.
-# Reemplazado por precios_insumos.mejor_opcion_ingrediente (scraper día > manual
-# insumo > legacy ingrediente) + equivalencias de unidad de USO.
+# Reemplazado por precios_insumos.mejor_opcion_ingrediente (scraper día/último >
+# manual insumo > legacy ingrediente) + equivalencias de unidad de USO.
 # =========================================================================
 # def _precios_actuales(cur):
 #     cur.execute(""" ... historial_precios último día por ingrediente ... """)
@@ -366,6 +369,8 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
           'precio_incompleto' y la lista de ingredientes faltantes.
     COM-37 v5: el costo por ración usa gramos de la unidad de USO (equivalencias o
     conversión estándar) × precio por gramo del MEJOR insumo del ingrediente.
+    COM-37 v5-fix: los precios se consultan con fallback_ultima_fecha=True (si hoy no
+    hubo corrida del scraper, se planifica con la última corrida disponible).
     Retorna (filas, excluidas).
     """
     # COM-5 v4: reglas de proteínas configurables por el Admin de Sistemas
@@ -373,9 +378,10 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
     nutricion = _cargar_nutricion(cur)
     unidades = _cargar_unidades(cur)
 
-    # COM-37 v5: contexto de precios y equivalencias a la fecha de hoy
+    # COM-37 v5-fix: contexto de precios y equivalencias a la fecha de hoy, con
+    # fallback a la última corrida del scraper si hoy no hay precios.
     fecha_hoy = date.today()
-    precios_insumo = precios_por_gramo_por_insumo(cur, fecha_hoy)
+    precios_insumo = precios_por_gramo_por_insumo(cur, fecha_hoy, fallback_ultima_fecha=True)
     eq_map = _cargar_equivalencias(cur)
     opciones_cache = {}
 
@@ -625,17 +631,20 @@ def entrenar_y_persistir(cur):
     persistencia del modelo activo y su asignación receta->cluster.
     COM-5 v6: los centroides persistidos en `centroides` van en UNIDADES REALES por
     ración (inverse_transform); los estandarizados quedan en parametros.centroides_z.
-    COM-37 v2/v5: el dataset solo incluye recetas con precios completos y reglas R1-R3
-    vigentes; las excluidas quedan auditables (motivo + ingredientes faltantes).
+    COM-37 v5-fix: silhouette solo se calcula si n_samples > n_clusters (sklearn exige
+    labels <= n_samples-1); con muestras insuficientes se registra 0.0 en lugar de
+    lanzar ValueError (que el router convertía en 400).
     Retorna el resumen del entrenamiento (dict). El caller gestiona el commit.
     """
     k, bajo_max, medio_max = _parametros_kmeans(cur)
     filas, excluidas = construir_dataset(cur, bajo_max, medio_max)
 
     if len(filas) < k:
+        n_inc = sum(1 for e in excluidas if e.get('motivo') == 'precio_incompleto')
         raise ValueError(
-            f"Solo {len(filas)} recetas aptas para k={k}. "
-            "Revise las reglas de negocio, los precios (scraper o manuales) o amplíe el recetario.")
+            f"Solo {len(filas)} recetas aptas para k={k} ({n_inc} excluidas por precio "
+            f"incompleto). Cargue precios manuales en Gestión de Ingredientes, espere la "
+            f"corrida del scraper o amplíe el recetario.")
 
     X = np.array([[f['energia_kcal'], f['hierro_mg'], f['proteina_g'], f['precio_soles']] for f in filas])
     scaler = StandardScaler()
@@ -645,7 +654,13 @@ def entrenar_y_persistir(cur):
     labels = km.fit_predict(Xs)
 
     inercia = float(km.inertia_)
-    silhouette = float(silhouette_score(Xs, labels)) if len(set(labels)) > 1 else 0.0
+    # COM-37 v5-fix (trazabilidad): línea anterior COMENTADA (crash con n_samples <= k):
+    # silhouette = float(silhouette_score(Xs, labels)) if len(set(labels)) > 1 else 0.0
+    n_clusters_obtenidos = len(set(labels))
+    if n_clusters_obtenidos > 1 and Xs.shape[0] > n_clusters_obtenidos:
+        silhouette = float(silhouette_score(Xs, labels))
+    else:
+        silhouette = 0.0
 
     asignacion = _etiquetar_centroides(km.cluster_centers_)
 
