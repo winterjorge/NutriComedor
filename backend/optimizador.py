@@ -4,13 +4,16 @@ Objetivo: Motor de cálculo de costos de recetas con predicción de precios basa
 Uso: Importar desde routers de FastAPI para calcular costos dinámicos de recetas en cualquier fecha.
 Nota: Utiliza Random Forest para predicción de precios (consistente con ai_engine.py)
 Historial:
- - Sprint 2: versión original (mejor insumo por precio del día, predicción RF con R²).
- - COM-37 (este archivo): fallback de PRECIO MANUAL vigente (precios_manuales.py) cuando
-   no hay insumos emparejados o la predicción RF falla. El detalle marca
-   insumo_comprado="Obtenido de la Base de Datos" y es_manual=True para que el frontend
-   conserve los colores actuales del caso "sin insumos" mostrando el texto requerido.
-   Precedencia: precio real del día > predicción RF > precio manual. Ninguna rama
-   existente se elimina: el intento manual se intercala antes de declarar error.
+ - Sprint 2: versión original (mejor insumo del día, predicción RF con R², filas de error).
+ - COM-37: fallback de PRECIO MANUAL vigente (precios_manuales.py) cuando no hay insumos
+   emparejados o la predicción RF falla; la fila marca es_manual=True y el texto de la
+   columna 'insumo_comprado' es "Obtenido de la Base de Datos". Precedencia:
+   precio real del día > predicción RF > precio manual.
+ - COM-37 v2 (este archivo): cada fila del detalle incluye `ingrediente_id` (para poder
+   guardar un precio manual desde el modal de Evaluación) y la respuesta agrega
+   `precio_completo` (todos los ingredientes con precio) e `ingredientes_manuales`,
+   que soportan la regla "solo recetas con precios completos entran al flujo del
+   comedor". Ninguna rama existente se elimina.
 """
 import os
 import psycopg2
@@ -101,6 +104,7 @@ def _detalle_precio_manual(cur, ingrediente_id, fecha_objetivo, peso_total_g, un
     COM-37: intenta costear con el precio manual vigente. Retorna (detalle, costo) o
     (None, 0.0) si no hay período manual aplicable. El texto de la columna
     'insumo_comprado' es exactamente "Obtenido de la Base de Datos" (requerimiento).
+    COM-37 v2: el detalle incluye ingrediente_id para el alta rápida desde el modal.
     """
     manual = obtener_precio_manual_por_gramo(cur, ingrediente_id, fecha_objetivo)
     if not manual:
@@ -109,6 +113,7 @@ def _detalle_precio_manual(cur, ingrediente_id, fecha_objetivo, peso_total_g, un
     costo_ingrediente = redondear_hacia_arriba_010(costo_sin_redondear)
     detalle = {
         "ingrediente": nombre_ingrediente,
+        "ingrediente_id": ingrediente_id,
         "insumo_comprado": "Obtenido de la Base de Datos",
         "cantidad_usada": unidad_display,
         "costo_parcial": round(costo_ingrediente, 2),
@@ -127,6 +132,7 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
     2. El número de raciones que produce la receta
     COM-37: si no hay insumo con precio ni predicción RF posible, se usa el precio
     manual vigente (marca es_manual / 'Obtenido de la Base de Datos').
+    COM-37 v2: responde `precio_completo` (True si ningún ingrediente quedó sin precio).
     Retorna el costo POR RACIÓN
     """
     conn = None
@@ -171,7 +177,7 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
         for req in ingredientes_receta:
             categoria = req['categoria_nombre'] or ''
             unidad_abrev = (req['receta_unidad_abrev'] or '').lower()
-            unidad_nombre = (req['receta_unidad_nombre'] or '')
+            unidad_nombre = req['receta_unidad_nombre'] or ''
             cantidad_requerida = float(req['cantidad_requerida'])
             factor_receta = float(req['receta_factor_a_base'])
             peso_estimado_base = float(req['peso_estimado_g'])
@@ -254,6 +260,7 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
                         costo_total_receta += costo_ingrediente
                         detalle_costos.append({
                             "ingrediente": req['ingrediente_nombre'],
+                            "ingrediente_id": req['ingrediente_id'],
                             "insumo_comprado": f"{insumo_base['nombre']} (PREDICHO {confianza}%)",
                             "cantidad_usada": unidad_display,
                             "costo_parcial": round(costo_ingrediente, 2),
@@ -274,6 +281,7 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
                 # Si no se pudo predecir ni hay manual vigente (comportamiento original)
                 detalle_costos.append({
                     "ingrediente": req['ingrediente_nombre'],
+                    "ingrediente_id": req['ingrediente_id'],
                     "insumo_comprado": "Sin insumo disponible",
                     "cantidad_usada": unidad_display,
                     "costo_parcial": 0.0,
@@ -296,6 +304,7 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
                     costo_total_receta += costo_ingrediente
                     detalle_costos.append({
                         "ingrediente": req['ingrediente_nombre'],
+                        "ingrediente_id": req['ingrediente_id'],
                         "insumo_comprado": f"{primera_opcion['insumo_nombre']} (PREDICHO {confianza}%)",
                         "cantidad_usada": unidad_display,
                         "costo_parcial": round(costo_ingrediente, 2),
@@ -316,6 +325,7 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
                 # Si no se pudo predecir ni hay manual vigente (comportamiento original)
                 detalle_costos.append({
                     "ingrediente": req['ingrediente_nombre'],
+                    "ingrediente_id": req['ingrediente_id'],
                     "insumo_comprado": "Sin precios disponibles",
                     "cantidad_usada": unidad_display,
                     "costo_parcial": 0.0,
@@ -330,6 +340,7 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
             costo_total_receta += costo_ingrediente
             detalle_costos.append({
                 "ingrediente": req['ingrediente_nombre'],
+                "ingrediente_id": req['ingrediente_id'],
                 "insumo_comprado": mejor_insumo['insumo_nombre'],
                 "cantidad_usada": unidad_display,
                 "costo_parcial": round(costo_ingrediente, 2),
@@ -350,7 +361,10 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
             "ingredientes_sin_precio": sum(1 for d in detalle_costos if d['costo_parcial'] == 0),
             "ingredientes_predichos": sum(1 for d in detalle_costos if d.get('es_prediccion', False)),
             # COM-37: cuántos ingredientes se costearon con precio manual de la BD
-            "ingredientes_manuales": sum(1 for d in detalle_costos if d.get('es_manual', False))
+            "ingredientes_manuales": sum(1 for d in detalle_costos if d.get('es_manual', False)),
+            # COM-37 v2: regla de negocio: solo recetas con precios completos entran
+            # al flujo del comedor (propuestas/planificación).
+            "precio_completo": sum(1 for d in detalle_costos if d['costo_parcial'] == 0) == 0
         }
     except Exception as e:
         print(f"Error en el motor de optimización: {e}")
