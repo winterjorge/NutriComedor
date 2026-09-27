@@ -1,36 +1,26 @@
 """
 routers/ingredientes_admin.py
-Objetivo: COM-37 v5: módulo "Gestión de Ingredientes" exclusivo del Administrador de
+Objetivo: COM-37 v5/v6: módulo "Gestión de Ingredientes" exclusivo del Administrador de
           Sistemas, sobre el modelo de DOS CONCEPTOS:
-            - INGREDIENTE: lo que se cocina; unidad de USO (pizca, cucharadita, taza,
-              rodaja, unidad...) declarada en receta_ingrediente / ingredientes.
-            - INSUMO: lo que se compra; unidad de COMPRA (Kg, L, atado, unidad...);
+            - INGREDIENTE: lo que se cocina; unidad de USO (pizca, cucharadita, taza...).
+            - INSUMO: lo que se compra; unidad de COMPRA (Kg, L, atado, und...);
               origen 'SCRAPER' (SISAP) o 'MANUAL' (registrado por el Admin).
-          Secciones del router:
-            A) Ingredientes: listado con indicadores, crear y editar/renombrar SIN
-               borrado físico (toda edición advierte inconsistencias en el frontend).
-            B) Emparejamiento ingrediente<->insumo: insumos vinculados con precio de
-               hoy y fuente, búsqueda de insumos del scraper, vinculación con
-               equivalencias opcionales, creación de insumo MANUAL (unidad de compra +
-               precio con vigencia + equivalencias en un solo paso), edición y
-               desvinculación de insumos manuales.
-            C) Equivalencias unidad de USO -> gramos (ingredientes_equivalencias):
-               CRUD con desactivación lógica; si no existe equivalencia, el motor
-               aplica la conversión estándar de la unidad de uso.
-            D) Precios manuales por INSUMO (insumos_precios_manuales): períodos con
-               vigencia opcional y validación de solapes por insumo.
-            E) Re-emparejado de insumos huérfanos (ingrediente_id NULL) usando el
-               algoritmo de reconocimiento existente (scraper/classifiers/heuristics.py)
-               más matching por nombre normalizado.
-            LEGACY (COM-37 v1): endpoints de precios manuales POR INGREDIENTE
-               (ingredientes_precios_manuales) conservados como último fallback de
-               resolución de precios; no se eliminan.
-Precedencia de precio (precios_insumos.py): scraper del día > predicción RF (Evaluar)
-          > período manual del insumo > manual legacy del ingrediente. Entre insumos de
-          un mismo ingrediente gana el menor costo por gramo (criterio de compra).
+          Secciones:
+            A) Ingredientes: listado con indicadores, crear y editar/renombrar SIN borrado.
+            B) Emparejamiento ingrediente<->insumo: insumos vinculados con precio de hoy
+               (COM-37 v6: ahora también precio POR UNIDAD DE COMPRA y detalle de la
+               fuente), búsqueda de insumos del scraper, vinculación con equivalencias,
+               creación de insumo MANUAL (unidad + precio con vigencia + equivalencias),
+               edición y desvinculación de insumos manuales.
+            C) Equivalencias unidad de USO -> gramos (CRUD + desactivación lógica).
+            D) Precios manuales por INSUMO (períodos con vigencia opcional, solapes
+               validados, desactivación lógica).
+            E) Re-emparejado de insumos huérfanos (heuristics + nombre normalizado).
+            LEGACY (COM-37 v1): precios manuales POR INGREDIENTE conservados como
+               último fallback de resolución.
 Permisos: todos los endpoints exigen es_admin_sistema (403 en caso contrario).
-Uso: Registrado en main.py con prefijo /api/v1 (include ya existente de COM-37).
-Referencia: ticket COM-37 v5 (solo trazabilidad).
+Uso: Registrado en main.py con prefijo /api/v1 (include existente de COM-37).
+Referencia: tickets COM-37 v5/v6 (solo trazabilidad).
 """
 import unicodedata
 from datetime import date
@@ -42,12 +32,10 @@ from psycopg2.extras import RealDictCursor
 
 from database import get_db
 from permisos import es_admin_sistema
-# COM-37 v5: precio de hoy por insumo (para exhibir fuente y ppg en el listado)
+# COM-37 v5: precio de hoy por insumo (scraper día > manual período) para exhibir fuente
 from precios_insumos import precios_por_gramo_por_insumo
 
 # COM-37: algoritmo de reconocimiento existente del scraper para re-emparejar insumos.
-# Si el paquete no fuera importable en este contexto, el re-emparejado degrada a
-# matching por nombre normalizado (no se rompe el endpoint).
 try:
     from scraper.classifiers.heuristics import clasificar_heuristica_mejorada
     HEURISTICA_DISPONIBLE = True
@@ -55,7 +43,7 @@ except Exception:  # pragma: no cover - degradación controlada
     clasificar_heuristica_mejorada = None
     HEURISTICA_DISPONIBLE = False
 
-router = APIRouter(prefix="/ingredientes-admin", tags=["Gestión de Ingredientes (COM-37 v5)"])
+router = APIRouter(prefix="/ingredientes-admin", tags=["Gestión de Ingredientes (COM-37 v6)"])
 
 
 # ==========================================
@@ -86,18 +74,16 @@ class EquivalenciaItem(BaseModel):
 
 
 class VincularInsumoInput(BaseModel):
-    """Vincula un insumo existente (scraper o manual) al ingrediente."""
     usuario_solicitante_id: int
     insumo_id: int
-    reasignar: bool = False        # permite mover un insumo ya vinculado a otro ingrediente
+    reasignar: bool = False
     equivalencias: List[EquivalenciaItem] = []
 
 
 class CrearInsumoManualInput(BaseModel):
-    """Crea insumo MANUAL + su primer período de precio + equivalencias opcionales."""
     usuario_solicitante_id: int
     nombre: str
-    unidad_medida_id: int          # unidad de COMPRA (Kg, L, atado, und...)
+    unidad_medida_id: int          # unidad de COMPRA
     precio_por_unidad: float
     usar_rango: bool = False
     fecha_inicio: Optional[str] = None
@@ -107,7 +93,6 @@ class CrearInsumoManualInput(BaseModel):
 
 
 class EditarInsumoManualInput(BaseModel):
-    """Solo insumos de origen MANUAL (no se altera el catálogo del scraper)."""
     usuario_solicitante_id: int
     nombre: Optional[str] = None
     unidad_medida_id: Optional[int] = None
@@ -151,15 +136,6 @@ class CrearPrecioManualLegacyInput(BaseModel):
     usuario_solicitante_id: int
     precio_por_unidad: float
     usar_rango: bool = False
-    fecha_inicio: Optional[str] = None
-    fecha_fin: Optional[str] = None
-    observacion: Optional[str] = None
-
-
-class EditarPrecioManualLegacyInput(BaseModel):
-    usuario_solicitante_id: int
-    precio_por_unidad: Optional[float] = None
-    usar_rango: Optional[bool] = None
     fecha_inicio: Optional[str] = None
     fecha_fin: Optional[str] = None
     observacion: Optional[str] = None
@@ -224,7 +200,6 @@ def _validar_unidad(cur, unidad_id: Optional[int]) -> None:
 
 
 def _upsert_equivalencias(cur, ingrediente_id, insumo_id, items: List[EquivalenciaItem], creador_id):
-    """Crea/actualiza equivalencias unidad de USO -> gramos para el par (ing, insumo)."""
     n = 0
     for eq in items or []:
         if eq.gramos_por_unidad_uso is None or eq.gramos_por_unidad_uso <= 0:
@@ -246,6 +221,32 @@ def _upsert_equivalencias(cur, ingrediente_id, insumo_id, items: List[Equivalenc
 def _mapa_categorias(cur):
     cur.execute("SELECT id, nombre FROM categorias_alimentos;")
     return {r['nombre']: r['id'] for r in cur.fetchall()}
+
+
+def _precio_por_unidad_hoy(cur, insumo_id, fuente, fecha_obj):
+    """
+    COM-37 v6: precio EN UNIDAD DE COMPRA vigente hoy para exhibición en el panel:
+      SCRAPER_DIA    -> mínimo precio_prom del día en historial_precios.
+      MANUAL_PERIODO -> período manual activo vigente más reciente.
+    """
+    if fuente == 'SCRAPER_DIA':
+        cur.execute("""
+            SELECT MIN(precio_prom) AS p FROM historial_precios
+            WHERE insumo_id = %s AND fecha = %s AND precio_prom IS NOT NULL AND precio_prom > 0;
+        """, (insumo_id, fecha_obj))
+        fila = cur.fetchone()
+        return float(fila['p']) if fila and fila['p'] else None
+    if fuente == 'MANUAL_PERIODO':
+        cur.execute("""
+            SELECT precio_por_unidad FROM insumos_precios_manuales
+            WHERE insumo_id = %s AND estado_activo = TRUE
+              AND (fecha_inicio IS NULL OR fecha_inicio <= %s)
+              AND (fecha_inicio IS NULL OR fecha_fin IS NULL OR fecha_fin >= %s)
+            ORDER BY fecha_registro DESC LIMIT 1;
+        """, (insumo_id, fecha_obj, fecha_obj))
+        fila = cur.fetchone()
+        return float(fila['precio_por_unidad']) if fila else None
+    return None
 
 
 # ==========================================
@@ -365,10 +366,10 @@ def editar_ingrediente(ingrediente_id: int, data: EditarIngredienteInput, db=Dep
 def buscar_insumos(
     usuario_solicitante_id: int,
     q: str = Query('', description="Texto del nombre del insumo"),
-    solo_sin_vincular: bool = Query(False, description="Solo insumos huérfanos (ingrediente_id NULL)"),
+    solo_sin_vincular: bool = Query(False, description="Solo insumos huérfanos"),
     db=Depends(get_db),
 ):
-    """COM-37 v5: búsqueda de insumos (scraper y manuales) para vincular al ingrediente."""
+    """COM-37 v5: búsqueda de insumos (scraper y manuales) para vincular."""
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         _validar_admin(cur, usuario_solicitante_id)
@@ -400,8 +401,12 @@ def listar_insumos_del_ingrediente(
     fecha: Optional[str] = Query(None, description="Fecha para precio de hoy (default: hoy)"),
     db=Depends(get_db),
 ):
-    """COM-37 v5: insumos vinculados al ingrediente con unidad de compra, último precio
-    scraper, períodos manuales activos, equivalencias y precio por gramo de hoy."""
+    """
+    COM-37 v6: insumos vinculados al ingrediente con unidad de compra, último precio
+    scraper, períodos manuales activos, equivalencias y —nuevo— el precio VIGENTE HOY
+    EN UNIDAD DE COMPRA (precio_por_unidad_hoy) con su fuente y detalle legible, para
+    que lo cargado desde el modal de Evaluar sea visible inmediatamente en el panel.
+    """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         _validar_admin(cur, usuario_solicitante_id)
@@ -429,6 +434,11 @@ def listar_insumos_del_ingrediente(
             opc = precios_hoy.get(f['id'])
             f['precio_por_gramo_hoy'] = opc['ppg'] if opc else None
             f['fuente_precio_hoy'] = opc['fuente'] if opc else None
+            f['detalle_precio_hoy'] = opc['detalle'] if opc else None
+            # COM-37 v6: precio legible en unidad de compra (S/ por Kg, L, und...)
+            f['precio_por_unidad_hoy'] = (
+                _precio_por_unidad_hoy(cur, f['id'], opc['fuente'], fecha_obj) if opc else None
+            )
         return filas
     except HTTPException:
         raise
@@ -474,9 +484,8 @@ def vincular_insumo(ingrediente_id: int, data: VincularInsumoInput, db=Depends(g
 @router.post("/{ingrediente_id}/insumos-manuales", status_code=201)
 def crear_insumo_manual(ingrediente_id: int, data: CrearInsumoManualInput, db=Depends(get_db)):
     """
-    COM-37 v5: crea un insumo MANUAL (origen='MANUAL') vinculado al ingrediente, con su
-    primer período de precio (unidad de COMPRA, vigencia opcional) y equivalencias
-    unidad de USO -> gramos. Todo en una transacción.
+    COM-37 v5: crea insumo MANUAL vinculado al ingrediente + primer período de precio
+    (unidad de COMPRA, vigencia opcional) + equivalencias opcionales, en una transacción.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -569,7 +578,7 @@ def editar_insumo_manual(insumo_id: int, data: EditarInsumoManualInput, db=Depen
 
 @router.put("/insumos/{insumo_id}/desvincular")
 def desvincular_insumo(insumo_id: int, usuario_solicitante_id: int, db=Depends(get_db)):
-    """COM-37 v5: deja el insumo huérfano (ingrediente_id NULL); conserva historial y precios."""
+    """COM-37 v5: deja el insumo huérfano; conserva historial y precios."""
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         _validar_admin(cur, usuario_solicitante_id)
@@ -597,7 +606,7 @@ def listar_equivalencias(
     insumo_id: Optional[int] = Query(None),
     db=Depends(get_db),
 ):
-    """COM-37 v5: equivalencias activas e inactivas del ingrediente (opcionalmente por insumo)."""
+    """COM-37 v5: equivalencias activas e inactivas del ingrediente."""
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         _validar_admin(cur, usuario_solicitante_id)
@@ -689,7 +698,7 @@ def editar_equivalencia(eq_id: int, data: EditarEquivalenciaInput, db=Depends(ge
 
 @router.put("/equivalencias/{eq_id}/desactivar")
 def desactivar_equivalencia(eq_id: int, usuario_solicitante_id: int, db=Depends(get_db)):
-    """COM-37 v5: baja lógica; el motor volverá a la conversión estándar de la unidad de uso."""
+    """COM-37 v5: baja lógica; el motor volverá a la conversión estándar."""
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         _validar_admin(cur, usuario_solicitante_id)
@@ -715,7 +724,7 @@ def desactivar_equivalencia(eq_id: int, usuario_solicitante_id: int, db=Depends(
 # ==========================================
 @router.get("/insumos/{insumo_id}/precios-manuales")
 def listar_precios_insumo(insumo_id: int, usuario_solicitante_id: int, db=Depends(get_db)):
-    """COM-37 v5: períodos manuales del insumo (activos e inactivos), más recientes primero."""
+    """COM-37 v5: períodos manuales del insumo (activos e inactivos)."""
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         _validar_admin(cur, usuario_solicitante_id)
@@ -769,8 +778,7 @@ def crear_precio_insumo(insumo_id: int, data: CrearPrecioInsumoInput, db=Depends
               (data.observacion or '').strip() or None, data.usuario_solicitante_id))
         nuevo = cur.fetchone()
         db.commit()
-        return {'id': nuevo['id'],
-                'message': 'Precio manual registrado para el insumo.'}
+        return {'id': nuevo['id'], 'message': 'Precio manual registrado para el insumo.'}
     except HTTPException:
         raise
     except Exception as e:
@@ -793,7 +801,6 @@ def editar_precio_insumo(periodo_id: int, data: EditarPrecioInsumoInput, db=Depe
         periodo = cur.fetchone()
         if not periodo:
             raise HTTPException(status_code=404, detail="Período de precio manual no encontrado.")
-        enviados = data.dict(exclude_unset=True)
         precio = data.precio_por_unidad if data.precio_por_unidad is not None else float(periodo['precio_por_unidad'])
         if precio <= 0:
             raise HTTPException(status_code=400, detail="El precio por unidad debe ser mayor a cero.")
@@ -854,10 +861,8 @@ def desactivar_precio_insumo(periodo_id: int, usuario_solicitante_id: int, db=De
 @router.post("/reemparejar-insumos")
 def reemparejar_insumos(usuario_solicitante_id: int, db=Depends(get_db)):
     """
-    COM-37 v5: vincula insumos con ingrediente_id NULL usando el algoritmo de
-    reconocimiento existente (heuristics.clasificar_heuristica_mejorada) y matching por
-    nombre normalizado contra el catálogo vigente. Permite que crear/renombrar
-    ingredientes alimente al algoritmo sin reiniciar el scraper.
+    COM-37 v5: vincula insumos con ingrediente_id NULL usando heuristics + matching por
+    nombre normalizado contra el catálogo vigente.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -876,7 +881,6 @@ def reemparejar_insumos(usuario_solicitante_id: int, db=Depends(get_db)):
             nombre_norm = _normalizar(ins['nombre'])
             candidato = None
 
-            # 1) Algoritmo de reconocimiento existente (nombre genérico -> ingrediente)
             if HEURISTICA_DISPONIBLE:
                 try:
                     generico, _cat_id = clasificar_heuristica_mejorada(ins['nombre'], mapa_cat)
@@ -894,7 +898,6 @@ def reemparejar_insumos(usuario_solicitante_id: int, db=Depends(get_db)):
                                 candidato = iid
                                 break
 
-            # 2) Matching directo por nombre normalizado del insumo
             if candidato is None:
                 for iid, inorm in norm_ing:
                     if inorm and inorm == nombre_norm:
@@ -933,7 +936,6 @@ def reemparejar_insumos(usuario_solicitante_id: int, db=Depends(get_db)):
 
 # ==========================================
 # LEGACY COM-37 v1: PRECIOS MANUALES POR INGREDIENTE (fallback de resolución)
-# Se conservan: precios_insumos.mejor_opcion_ingrediente los usa como última fuente.
 # ==========================================
 @router.get("/{ingrediente_id}/precios-manuales")
 def listar_precios_manuales_legacy(ingrediente_id: int, usuario_solicitante_id: int, db=Depends(get_db)):
