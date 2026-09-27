@@ -1,25 +1,29 @@
 /**
  * components/ingredients/GestionIngredientesView.jsx
- * Objetivo: COM-37 v5: pestaña "Gestión de Ingredientes" (exclusiva Admin de Sistemas,
- *           módulo 'gestion_ingredientes') sobre el modelo de DOS CONCEPTOS:
- *             - INGREDIENTE (unidad de USO: pizca, cucharadita, taza, und...).
- *             - INSUMO (unidad de COMPRA: Kg, L, atado, und...; origen SCRAPER|MANUAL).
- *           DOS SECCIONES en la misma vista, más el catálogo de ingredientes:
- *             A) Catálogo de ingredientes: tabla con indicadores de emparejamiento,
- *                crear y editar/renombrar SIN borrado (advertencia de inconsistencias).
- *             B) Emparejamiento ingrediente<->insumo: insumos vinculados con precio de
- *                hoy y fuente; búsqueda de insumos del scraper para vincular (con
- *                equivalencias opcionales); creación de insumo MANUAL con unidad de
- *                compra + precio con vigencia + equivalencias; edición/desvinculación.
- *             C) Equivalencias unidad de USO -> gramos por insumo (CRUD + desactivar).
- *             D) Precios manuales POR INSUMO (períodos con vigencia opcional, solapes
- *                validados en backend, desactivación lógica).
- *           El botón "Re-emparejar insumos" relanza el reconocimiento (heuristics) sobre
- *           insumos huérfanos para alimentar el algoritmo tras crear/renombrar.
+ * Objetivo: COM-37 v5/v6: pestaña "Gestión de Ingredientes" (exclusiva Admin de Sistemas)
+ *           sobre el modelo de DOS CONCEPTOS (ingrediente=uso / insumo=compra).
+ *           Secciones:
+ *             A) Catálogo de ingredientes (crear/editar sin borrado, con advertencia).
+ *             B) Emparejamiento ingrediente<->insumo: insumos vinculados con precio
+ *                vigente HOY en unidad de COMPRA y fuente (COM-37 v6), búsqueda y
+ *                vinculación de insumos del scraper, creación de insumo MANUAL con
+ *                precio+vigencia+equivalencias, edición/desvinculación.
+ *             C) Equivalencias unidad de USO -> gramos (CRUD + desactivar).
+ *             D) Precios manuales POR INSUMO (períodos con vigencia opcional).
+ *           COM-37 v6 (este archivo): FIX de usabilidad reportado por el usuario:
+ *             1) Al seleccionar un ingrediente (fila o botón "Gestionar"), la vista hace
+ *                SCROLL AUTOMÁTICO al panel (antes quedaba debajo de la tabla completa y
+ *                parecía que el botón "no hacía nada").
+ *             2) La Sección D precarga el insumo con períodos manuales (o el primero),
+ *                mostrando de inmediato los precios ingresados desde el modal de Evaluar.
+ *             3) La Sección B muestra el precio vigente en UNIDAD DE COMPRA
+ *                (S/ por Kg/L/und) y su fuente (SCRAPER_DIA / MANUAL_PERIODO), haciendo
+ *                visible en esta vista todo precio cargado desde el recetario.
+ *           Nada existente se elimina; los ajustes quedan comentados con trazabilidad.
  * Uso: Montada por App.jsx en la pestaña "Gestión de Ingredientes".
- * Referencia: ticket COM-37 v5 (solo trazabilidad).
+ * Referencia: tickets COM-37 v5/v6 (solo trazabilidad).
  */
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
     Plus, Edit3, Database, RefreshCw, Loader2, AlertCircle, Coins, Power,
     Sprout, Search, Link2, Package, Scale
@@ -39,6 +43,9 @@ const FORM_PER_VACIO = {
 
 export const GestionIngredientesView = () => {
     const { usuario } = useAuth();
+
+    // COM-37 v6: referencia del panel para scroll automático al seleccionar ingrediente
+    const panelRef = useRef(null);
 
     // ===== Sección A: catálogo =====
     const [ingredientes, setIngredientes] = useState([]);
@@ -107,6 +114,13 @@ export const GestionIngredientesView = () => {
 
     useEffect(() => { cargar(); }, [cargar]);
 
+    // COM-37 v6: scroll automático al panel al seleccionar un ingrediente
+    useEffect(() => {
+        if (ingSel && panelRef.current) {
+            panelRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+    }, [ingSel]);
+
     const categorias = useMemo(() => {
         const map = new Map();
         ingredientes.forEach(i => {
@@ -114,29 +128,6 @@ export const GestionIngredientesView = () => {
         });
         return [...map.entries()].map(([id, nombre]) => ({ id, nombre })).sort((a, b) => a.nombre.localeCompare(b.nombre));
     }, [ingredientes]);
-
-    const cargarInsumos = useCallback(async (ing) => {
-        setCargandoInsumos(true);
-        setErrorSeccion('');
-        try {
-            setInsumos(await api.getInsumosDelIngrediente(ing.id, usuario.id));
-        } catch (e) {
-            setErrorSeccion(e.message);
-        } finally {
-            setCargandoInsumos(false);
-        }
-    }, [usuario.id]);
-
-    const cargarEquivalencias = useCallback(async (ing) => {
-        setCargandoEq(true);
-        try {
-            setEquivalencias(await api.getEquivalencias(ing.id, usuario.id));
-        } catch (e) {
-            setErrorSeccion(e.message);
-        } finally {
-            setCargandoEq(false);
-        }
-    }, [usuario.id]);
 
     const cargarPeriodos = useCallback(async (insumoId) => {
         if (!insumoId) { setPeriodos([]); return; }
@@ -150,10 +141,44 @@ export const GestionIngredientesView = () => {
         }
     }, [usuario.id]);
 
+    // COM-37 v6: precarga en Sección D del insumo con períodos manuales (o el primero),
+    // para mostrar de inmediato los precios ingresados desde el modal de Evaluar.
+    const cargarInsumos = useCallback(async (ing) => {
+        setCargandoInsumos(true);
+        setErrorSeccion('');
+        try {
+            const lista = await api.getInsumosDelIngrediente(ing.id, usuario.id);
+            setInsumos(lista);
+            const pre = lista.find(x => (x.n_precios_manuales || 0) > 0)
+                || lista.find(x => x.origen === 'MANUAL')
+                || lista[0];
+            if (pre) {
+                setInsumoPreciosSel(String(pre.id));
+                cargarPeriodos(pre.id);
+            } else {
+                setInsumoPreciosSel('');
+                setPeriodos([]);
+            }
+        } catch (e) {
+            setErrorSeccion(e.message);
+        } finally {
+            setCargandoInsumos(false);
+        }
+    }, [usuario.id, cargarPeriodos]);
+
+    const cargarEquivalencias = useCallback(async (ing) => {
+        setCargandoEq(true);
+        try {
+            setEquivalencias(await api.getEquivalencias(ing.id, usuario.id));
+        } catch (e) {
+            setErrorSeccion(e.message);
+        } finally {
+            setCargandoEq(false);
+        }
+    }, [usuario.id]);
+
     const seleccionarIngrediente = (ing) => {
         setIngSel(ing);
-        setInsumoPreciosSel('');
-        setPeriodos([]);
         setFormEq({ insumo_id: '', unidad_uso_id: '', gramos_por_unidad_uso: '', observacion: '' });
         setEqEditId(null);
         setFormPer(FORM_PER_VACIO);
@@ -465,7 +490,8 @@ export const GestionIngredientesView = () => {
                         ) : ingredientes.length === 0 ? (
                             <tr><td colSpan="8" className="p-8 text-center text-slate-500">No hay ingredientes registrados.</td></tr>
                         ) : ingredientes.map(i => (
-                            <tr key={i.id} className={`hover:bg-slate-50 cursor-pointer ${ingSel?.id === i.id ? 'bg-emerald-50' : ''} ${i.n_insumos_con_precio_scraper === 0 && i.n_insumos_manuales === 0 ? 'bg-amber-50/60' : ''}`}
+                            <tr key={i.id}
+                                className={`hover:bg-slate-50 cursor-pointer ${ingSel?.id === i.id ? 'bg-emerald-50' : ''} ${i.n_insumos_con_precio_scraper === 0 && i.n_insumos_manuales === 0 ? 'bg-amber-50/60' : ''}`}
                                 onClick={() => seleccionarIngrediente(i)}>
                                 <td className="p-3 font-medium text-slate-800">{i.nombre}</td>
                                 <td className="p-3 text-slate-600">{i.categoria_nombre || '—'}</td>
@@ -476,17 +502,19 @@ export const GestionIngredientesView = () => {
                                     {i.n_insumos_con_precio_scraper > 0 ? (
                                         <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-full text-xs font-bold">{i.n_insumos_con_precio_scraper}</span>
                                     ) : (
-                                        <span className="px-2 py-0.5 bg-amber-100 text-amber-700 rounded-full text-xs font-bold" title="Sin precios del scraper">0</span>
+                                        <span className="px-2 py-0.5 bg-amber-100 text-amber-700 rounded-full text-xs font-bold" title="Sin precios del scraper: revise insumos manuales">0</span>
                                     )}
                                 </td>
                                 <td className="p-3 text-center text-slate-600">{i.n_equivalencias}</td>
                                 <td className="p-3" onClick={(e) => e.stopPropagation()}>
                                     <div className="flex justify-end gap-2">
-                                        <button onClick={() => seleccionarIngrediente(i)} title="Gestionar insumos, equivalencias y precios"
+                                        <button onClick={() => seleccionarIngrediente(i)}
+                                            title="Gestionar insumos, equivalencias y precios"
                                             className="p-1.5 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded-lg transition-colors">
                                             <Package size={15} />
                                         </button>
-                                        <button onClick={() => abrirEditar(i)} title="Editar / renombrar (advertencia de inconsistencias)"
+                                        <button onClick={() => abrirEditar(i)}
+                                            title="Editar / renombrar (advertencia de inconsistencias)"
                                             className="p-1.5 bg-slate-100 text-slate-700 hover:bg-slate-200 rounded-lg transition-colors">
                                             <Edit3 size={15} />
                                         </button>
@@ -499,17 +527,18 @@ export const GestionIngredientesView = () => {
             </div>
 
             {/* ===== Panel del ingrediente seleccionado: secciones B, C y D ===== */}
+            {/* COM-37 v6: ref para scroll automático (el panel quedaba fuera de pantalla) */}
             {ingSel && (
-                <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-6">
+                <div ref={panelRef} className="bg-white border border-emerald-300 rounded-xl p-5 space-y-6 shadow-sm">
                     <div className="flex flex-wrap items-center justify-between gap-3">
                         <h3 className="font-bold text-slate-800 flex items-center gap-2">
-                            <Package className="text-blue-600" size={18} /> {ingSel.nombre}
+                            <Package className="text-blue-600" size={18} /> Panel de: {ingSel.nombre}
                             <span className="text-xs font-normal text-slate-500">
                                 (unidad de uso: {ingSel.unidad_nombre})
                             </span>
                         </h3>
                         <div className="flex gap-2">
-                            <button onClick={() => { setModalBuscarInsumo(true); setResultadosInsumo([]); setQInsumo(''); }}
+                            <button onClick={() => { setModalBuscarInsumo(true); setResultadosInsumo([]); setQInsumo(ingSel.nombre || ''); }}
                                 className="flex items-center gap-1 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-medium transition-colors">
                                 <Search size={13} /> Vincular insumo del scraper
                             </button>
@@ -532,7 +561,7 @@ export const GestionIngredientesView = () => {
 
                     {/* ----- Sección B: insumos vinculados ----- */}
                     <div>
-                        <p className="text-xs font-bold text-slate-700 mb-2 flex items-center gap-1"><Link2 size={13} /> Insumos vinculados (compra)</p>
+                        <p className="text-xs font-bold text-slate-700 mb-2 flex items-center gap-1"><Link2 size={13} /> Insumos vinculados (unidad de compra) y precio vigente hoy</p>
                         {cargandoInsumos ? (
                             <div className="p-6 text-center text-blue-600"><Loader2 className="animate-spin mx-auto" size={20} /></div>
                         ) : insumos.length === 0 ? (
@@ -545,9 +574,10 @@ export const GestionIngredientesView = () => {
                                             <th className="p-2 font-semibold">Insumo</th>
                                             <th className="p-2 font-semibold">Origen</th>
                                             <th className="p-2 font-semibold">Unidad compra</th>
-                                            <th className="p-2 font-semibold">Último precio scraper</th>
-                                            <th className="p-2 font-semibold">Precio hoy (por g)</th>
+                                            {/* COM-37 v6: precio legible en unidad de compra + fuente */}
+                                            <th className="p-2 font-semibold">Precio hoy (unidad compra)</th>
                                             <th className="p-2 font-semibold">Fuente</th>
+                                            <th className="p-2 font-semibold">Último precio scraper</th>
                                             <th className="p-2 text-center">Períodos man.</th>
                                             <th className="p-2 text-center">Equiv.</th>
                                             <th className="p-2 text-right">Acciones</th>
@@ -563,17 +593,32 @@ export const GestionIngredientesView = () => {
                                                     </span>
                                                 </td>
                                                 <td className="p-2 text-slate-600">{ins.unidad_nombre} ({ins.unidad_abrev})</td>
+                                                <td className="p-2 font-bold text-slate-800">
+                                                    {ins.precio_por_unidad_hoy != null
+                                                        ? `S/ ${Number(ins.precio_por_unidad_hoy).toFixed(2)} / ${ins.unidad_abrev}`
+                                                        : '—'}
+                                                </td>
+                                                <td className="p-2">
+                                                    {ins.fuente_precio_hoy ? (
+                                                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                                            ins.fuente_precio_hoy === 'MANUAL_PERIODO' ? 'bg-red-100 text-red-700'
+                                                            : ins.fuente_precio_hoy === 'SCRAPER_DIA' ? 'bg-emerald-100 text-emerald-700'
+                                                            : 'bg-amber-100 text-amber-700'}`}>
+                                                            {ins.fuente_precio_hoy}
+                                                        </span>
+                                                    ) : (
+                                                        <span className="text-slate-400">sin precio</span>
+                                                    )}
+                                                </td>
                                                 <td className="p-2 text-slate-600">
                                                     {ins.ultimo_precio_scraper ? `S/ ${Number(ins.ultimo_precio_scraper).toFixed(2)} (${ins.fecha_ultimo_precio})` : '—'}
                                                 </td>
-                                                <td className="p-2 text-slate-600">{ins.precio_por_gramo_hoy ? ins.precio_por_gramo_hoy.toFixed(5) : '—'}</td>
-                                                <td className="p-2 text-slate-600">{ins.fuente_precio_hoy || '—'}</td>
                                                 <td className="p-2 text-center text-slate-600">{ins.n_precios_manuales}</td>
                                                 <td className="p-2 text-center text-slate-600">{ins.n_equivalencias}</td>
                                                 <td className="p-2">
                                                     <div className="flex justify-end gap-1">
                                                         <button onClick={() => { setInsumoPreciosSel(String(ins.id)); cargarPeriodos(ins.id); }}
-                                                            title="Precios manuales del insumo"
+                                                            title="Ver/gestionar precios manuales del insumo"
                                                             className="p-1 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded transition-colors">
                                                             <Coins size={13} />
                                                         </button>
@@ -681,7 +726,8 @@ export const GestionIngredientesView = () => {
                     <div>
                         <p className="text-xs font-bold text-slate-700 mb-2 flex items-center gap-1"><Coins size={13} /> Precios manuales por insumo (unidad de compra)</p>
                         <div className="flex gap-2 mb-3">
-                            <select value={insumoPreciosSel} onChange={(e) => { setInsumoPreciosSel(e.target.value); setPerEditId(null); setFormPer(FORM_PER_VACIO); cargarPeriodos(e.target.value); }}
+                            <select value={insumoPreciosSel}
+                                onChange={(e) => { setInsumoPreciosSel(e.target.value); setPerEditId(null); setFormPer(FORM_PER_VACIO); cargarPeriodos(e.target.value); }}
                                 className={`${inputCls} max-w-xs`}>
                                 <option value="">Seleccionar insumo...</option>
                                 {insumos.map(ins => <option key={ins.id} value={ins.id}>{ins.nombre} ({ins.unidad_abrev})</option>)}
@@ -701,6 +747,7 @@ export const GestionIngredientesView = () => {
                                                 <p className="text-[10px] text-slate-500">
                                                     {p.fecha_inicio ? `Vigencia ${p.fecha_inicio} → ${p.fecha_fin || 'abierto'}` : 'Vigencia permanente'}
                                                     {p.observacion ? ` · ${p.observacion}` : ''}
+                                                    {p.creado_por_nombre ? ` · por ${p.creado_por_nombre}` : ''}
                                                 </p>
                                             </div>
                                             {p.estado_activo && (
@@ -835,7 +882,7 @@ export const GestionIngredientesView = () => {
                         <div className="bg-blue-700 text-white p-4 flex items-center gap-2">
                             <Search size={18} />
                             <p className="font-bold text-sm flex-1">Vincular insumo del scraper a {ingSel.nombre}</p>
-                            <button onClick={() => setModalBuscarInsumo(false)} className="p-1 hover:bg-blue-800 rounded"><AlertCircle size={0} />✕</button>
+                            <button onClick={() => setModalBuscarInsumo(false)} className="p-1 hover:bg-blue-800 rounded">✕</button>
                         </div>
                         <div className="p-4 space-y-3 overflow-y-auto">
                             <div className="flex gap-2">
