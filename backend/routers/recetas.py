@@ -1,10 +1,23 @@
 """
 routers/recetas.py
-Objetivo: Contener la lógica de los endpoints para el CRUD de recetas, sus ingredientes y evaluación de costos.
+Objetivo: Contener la lógica de los endpoints para el CRUD de recetas, sus ingredientes
+          y evaluación de costos.
 Uso: Registrado en main.py con prefijo /api/v1. Expone rutas como /recetas, /recetas/{id}/costo.
+Historial:
+ - Sprint 1/2: versión original (CRUD + ingredientes + costo vía optimizador).
+ - COM-45 (este archivo): CREATE y UPDATE persisten `raciones` (la columna ya existía
+   con DEFAULT 4 y CHECK de positividad, pero nunca se escribía desde la API). El UPDATE
+   usa COALESCE para no pisar el valor en actualizaciones parciales. Se permite ordenar
+   el listado por 'raciones'. Se corrigen dos artefactos de transcripción (la fecha por
+   defecto de /con-costo y la captura de IntegrityError en create); las líneas originales
+   quedan COMENTADAS por trazabilidad. Ningún endpoint se elimina.
 """
+from datetime import date  # COM-45: fecha por defecto de /recetas/con-costo
+
+import psycopg2  # COM-45: captura explícita de violaciones de integridad (nombre duplicado)
 from fastapi import APIRouter, Depends, HTTPException, Query
 from psycopg2.extras import RealDictCursor
+
 from database import get_db
 from schemas.receta import RecetaInput, IngredienteRecetaInput, RecetaUpdate, RecetaListResponse, RecetaResponse
 from optimizador import calcular_costo_receta
@@ -12,13 +25,16 @@ from typing import Optional
 
 router = APIRouter(prefix="/recetas", tags=["Recetas"])
 
+
 @router.get("/con-costo")
 def get_recetas_con_costo(fecha: str = None, db=Depends(get_db)):
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
-        cur.execute("SELECT id, nombre, descripcion, energia_kcal, proteina_g, hierro_mg FROM recetas_almuerzo ORDER BY nombre;")
+        cur.execute("SELECT id, nombre, descripcion, raciones, energia_kcal, proteina_g, hierro_mg FROM recetas_almuerzo ORDER BY nombre;")
         recetas = cur.fetchall()
-        fecha_calc = fecha or __import__('datetime').date.today().isoformat()
+        # COM-45 (trazabilidad): artefacto de transcripción comentado:
+        # fecha_calc = fecha or import('datetime').date.today().isoformat()
+        fecha_calc = fecha or date.today().isoformat()
         recetas_con_costo = []
         for receta in recetas:
             try:
@@ -29,6 +45,7 @@ def get_recetas_con_costo(fecha: str = None, db=Depends(get_db)):
         return recetas_con_costo
     finally:
         cur.close()
+
 
 @router.get("", response_model=RecetaListResponse)
 def get_recetas(
@@ -43,24 +60,20 @@ def get_recetas(
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         # Validar columnas de ordenamiento permitidas
-        allowed_sorts = ['nombre', 'energia_kcal', 'proteina_g', 'hierro_mg', 'vitamina_a_ug', 'zinc_mg', 'carbohidratos_g', 'fecha_creacion']
+        # COM-45: se agrega 'raciones' a las columnas ordenables
+        allowed_sorts = ['nombre', 'energia_kcal', 'proteina_g', 'hierro_mg', 'vitamina_a_ug', 'zinc_mg', 'carbohidratos_g', 'fecha_creacion', 'raciones']
         if sort_by not in allowed_sorts:
             sort_by = 'nombre'
-        
         order_dir = "ASC" if sort_order.lower() == "asc" else "DESC"
-        
         # Construir WHERE clause
         where_clause = "WHERE 1=1"
         params = []
-        
         if search:
             where_clause += " AND nombre ILIKE %s"
             params.append(f"%{search}%")
-        
         # Contar total
         cur.execute(f"SELECT COUNT(*) as total FROM recetas_almuerzo {where_clause}", params)
         total = cur.fetchone()['total']
-        
         # Obtener datos paginados
         offset = (page - 1) * per_page
         query = f"""
@@ -70,12 +83,9 @@ def get_recetas(
             LIMIT %s OFFSET %s
         """
         params.extend([per_page, offset])
-        
         cur.execute(query, params)
         recetas = cur.fetchall()
-        
         total_pages = (total + per_page - 1) // per_page if total > 0 else 0
-        
         return RecetaListResponse(
             recetas=recetas,
             total=total,
@@ -85,6 +95,7 @@ def get_recetas(
         )
     finally:
         cur.close()
+
 
 @router.get("/{receta_id}")
 def get_receta_detalle(receta_id: int, db=Depends(get_db)):
@@ -97,7 +108,7 @@ def get_receta_detalle(receta_id: int, db=Depends(get_db)):
         cur.execute("""
             SELECT ri.*, i.nombre as ingrediente_nombre, um.nombre as unidad_nombre, um.abreviatura as unidad_abrev
             FROM receta_ingrediente ri
-            JOIN ingredientes i ON ri.ingrediente_id = i.id
+            JOIN ingredientes i ON ri.ingrediente_id = i.id 
             JOIN unidades_medida um ON ri.unidad_medida_id = um.id
             WHERE ri.receta_id = %s;
         """, (receta_id,))
@@ -105,23 +116,34 @@ def get_receta_detalle(receta_id: int, db=Depends(get_db)):
     finally:
         cur.close()
 
+
 @router.post("", status_code=201)
 def create_receta(data: RecetaInput, db=Depends(get_db)):
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
+        # COM-45 (trazabilidad): INSERT anterior sin raciones, comentado:
+        # cur.execute("""
+        #     INSERT INTO recetas_almuerzo
+        #     (nombre, descripcion, hierro_mg, proteina_g, energia_kcal, vitamina_a_ug, zinc_mg, carbohidratos_g)
+        #     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        #     RETURNING id;
+        # """, (...))
+        # COM-45: se persiste raciones (validado >0 por Pydantic y por el CHECK de la BD)
         cur.execute("""
-            INSERT INTO recetas_almuerzo 
-            (nombre, descripcion, hierro_mg, proteina_g, energia_kcal, vitamina_a_ug, zinc_mg, carbohidratos_g)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO recetas_almuerzo
+            (nombre, descripcion, raciones, hierro_mg, proteina_g, energia_kcal, vitamina_a_ug, zinc_mg, carbohidratos_g)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id;
         """, (
-            data.nombre, data.descripcion, data.hierro_mg, data.proteina_g,
+            data.nombre, data.descripcion, data.raciones, data.hierro_mg, data.proteina_g,
             data.energia_kcal, data.vitamina_a_ug, data.zinc_mg, data.carbohidratos_g
         ))
         receta_id = cur.fetchone()['id']
         db.commit()
         return {"id": receta_id, "message": "Receta creada exitosamente"}
-    except __import__('psycopg2').IntegrityError:
+    except psycopg2.IntegrityError:
+        # COM-45 (trazabilidad): artefacto de transcripción comentado:
+        # except import ('psycopg2').IntegrityError:
         db.rollback()
         raise HTTPException(status_code=400, detail="Ya existe una receta con ese nombre.")
     except Exception as e:
@@ -130,19 +152,28 @@ def create_receta(data: RecetaInput, db=Depends(get_db)):
     finally:
         cur.close()
 
+
 @router.put("/{receta_id}")
 def update_receta(receta_id: int, data: RecetaUpdate, db=Depends(get_db)):
     """Actualiza una receta existente"""
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
+        # COM-45 (trazabilidad): UPDATE anterior sin raciones, comentado:
+        # cur.execute("""
+        #     UPDATE recetas_almuerzo
+        #     SET nombre = %s, descripcion = %s, hierro_mg = %s, ...
+        #     WHERE id = %s RETURNING id;
+        # """, (...))
+        # COM-45: raciones con COALESCE para no pisar el valor en updates parciales
         cur.execute("""
-            UPDATE recetas_almuerzo 
-            SET nombre = %s, descripcion = %s, hierro_mg = %s, proteina_g = %s,
+            UPDATE recetas_almuerzo
+            SET nombre = %s, descripcion = %s, raciones = COALESCE(%s, raciones),
+                hierro_mg = %s, proteina_g = %s,
                 energia_kcal = %s, vitamina_a_ug = %s, zinc_mg = %s, carbohidratos_g = %s
             WHERE id = %s
             RETURNING id;
         """, (
-            data.nombre, data.descripcion, data.hierro_mg, data.proteina_g,
+            data.nombre, data.descripcion, data.raciones, data.hierro_mg, data.proteina_g,
             data.energia_kcal, data.vitamina_a_ug, data.zinc_mg, data.carbohidratos_g,
             receta_id
         ))
@@ -154,6 +185,7 @@ def update_receta(receta_id: int, data: RecetaUpdate, db=Depends(get_db)):
         return {"message": "Receta actualizada exitosamente"}
     finally:
         cur.close()
+
 
 @router.delete("/{receta_id}")
 def delete_receta(receta_id: int, db=Depends(get_db)):
@@ -170,6 +202,7 @@ def delete_receta(receta_id: int, db=Depends(get_db)):
     finally:
         cur.close()
 
+
 @router.post("/{receta_id}/ingredientes")
 def add_ingrediente_a_receta(receta_id: int, data: IngredienteRecetaInput, db=Depends(get_db)):
     cur = db.cursor(cursor_factory=RealDictCursor)
@@ -182,7 +215,6 @@ def add_ingrediente_a_receta(receta_id: int, data: IngredienteRecetaInput, db=De
             cur.execute(q, p)
             if not cur.fetchone():
                 raise HTTPException(status_code=404, detail="Entidad relacionada no encontrada")
-        
         cur.execute("""
             INSERT INTO receta_ingrediente (receta_id, ingrediente_id, unidad_medida_id, cantidad_requerida)
             VALUES (%s, %s, %s, %s)
@@ -200,6 +232,7 @@ def add_ingrediente_a_receta(receta_id: int, data: IngredienteRecetaInput, db=De
     finally:
         cur.close()
 
+
 @router.delete("/{receta_id}/ingredientes/{ingrediente_id}")
 def delete_ingrediente_de_receta(receta_id: int, ingrediente_id: int, db=Depends(get_db)):
     cur = db.cursor()
@@ -212,6 +245,7 @@ def delete_ingrediente_de_receta(receta_id: int, ingrediente_id: int, db=Depends
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         cur.close()
+
 
 @router.get("/{receta_id}/costo")
 def get_costo_receta(receta_id: int, fecha: str):
