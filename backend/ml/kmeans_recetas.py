@@ -17,13 +17,15 @@ Historial:
  - COM-37 v5: costeo sobre precios_insumos.py (equivalencias uso->gramos + mejor insumo).
  - COM-37 v5-fix: fallback_ultima_fecha para días sin corrida del scraper; blindaje de
    silhouette_score (n_samples > n_clusters) y mensaje de error guía.
- - COM-37 v7 (este archivo): COHERENCIA DE FUENTES con Evaluar (optimizador): la
-   predicción Random Forest también cuenta como precio válido para la completitud
-   (jerarquía: scraper día/última corrida > manual insumo > legacy ingrediente >
-   predicción RF, menor costo entre insumos). Sin esto, un día sin scraper dejaba
-   "precio_incompleto" a recetas que en Evaluar aparecen con filas PREDICHO.
+ - COM-37 v7: la predicción Random Forest cuenta como fuente de precio válida para la
+   completitud (misma jerarquía que Evaluar).
+ - COM-47 (este archivo): FIX de doble división nutricional. Los campos
+   hierro_mg/proteina_g/energia_kcal de recetas_almuerzo YA ESTÁN POR RACIÓN; se usan
+   SIN recalcular. Las líneas que los dividían entre `raciones` quedan COMENTADAS.
+   Los precios y gramos de ingredientes SÍ se calculan sobre raciones (costo total de
+   la preparación / raciones = costo por ración), sin cambios.
 Uso: Importado por routers/kmeans.py y por ml/greedy_search.py (reglas R1/R2).
-Referencia: ticket COM-5 (solo trazabilidad).
+Referencia: tickets COM-5 / COM-37 / COM-47 (solo trazabilidad).
 """
 import re
 import json
@@ -35,7 +37,7 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
 
-# COM-37 v5: resolución unificada de precios y conversión estándar de unidades
+# COM-37 v5: resolución unificada de precios por insumo/ingrediente y conversión estándar
 from precios_insumos import (
     precios_por_gramo_por_insumo,
     mejor_opcion_ingrediente,
@@ -298,13 +300,11 @@ def _opcion_con_prediccion(cur, ing_id, fecha, precios_insumo, peso_estimado_g):
     """
     COM-37 v7: mejor opción de precio del ingrediente con la MISMA jerarquía que
     Evaluar: scraper (día o última corrida) > manual insumo > legacy ingrediente >
-    predicción RF (menor costo entre los insumos del ingrediente). Retorna dict de
-    opción o None si ninguna fuente aplica.
+    predicción RF (menor costo entre los insumos del ingrediente).
     """
     opc = mejor_opcion_ingrediente(cur, ing_id, fecha, precios_insumo)
     if opc:
         return opc
-    # COM-37 v7: fallback de predicción RF (coherente con optimizador.calcular_costo_receta)
     cur.execute("""
         SELECT ins.id, ins.nombre, ins.origen,
                um.abreviatura, um.tipo_magnitud, um.factor_a_base
@@ -409,8 +409,9 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
           'precio_incompleto' y la lista de ingredientes faltantes.
     COM-37 v5: el costo por ración usa gramos de la unidad de USO (equivalencias o
     conversión estándar) × precio por gramo del MEJOR insumo del ingrediente.
-    COM-37 v5-fix: precios con fallback_ultima_fecha=True (planifica con la última
-    corrida del scraper si hoy no hubo).
+    COM-47: la NUTRICIÓN (hierro/proteína/energía) se toma DIRECTA de la tabla
+    recetas_almuerzo, que ya la almacena POR RACIÓN; no se divide entre raciones.
+    El PRECIO sí se calcula sobre la preparación completa y se divide entre raciones.
     Retorna (filas, excluidas).
     """
     # COM-5 v4: reglas de proteínas configurables por el Admin de Sistemas
@@ -571,6 +572,8 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
         #     if nut:
         #         nut_match += 1
 
+        # COM-47: raciones se usa SOLO para el precio (costo preparación / raciones);
+        # la nutrición de la tabla ya está por ración y no se recalcula.
         rac = float(rec['raciones']) if rec['raciones'] else 4.0
         costo_total = costo_acum.get(rec['id'], 0.0)
 
@@ -609,10 +612,14 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
         filas.append({
             'receta_id': rec['id'],
             'nombre': rec['nombre'],
-            # COM-5 v5: nutrición POR RACIÓN desde las columnas ya presentes en el SELECT
-            'energia_kcal': round(float(rec['energia_kcal'] or 0) / rac, 2),
-            'hierro_mg': round(float(rec['hierro_mg'] or 0) / rac, 2),
-            'proteina_g': round(float(rec['proteina_g'] or 0) / rac, 2),
+            # COM-47 (trazabilidad): división anterior entre raciones COMENTADA; los
+            # valores de recetas_almuerzo YA están por ración y se usan sin recalcular:
+            # 'energia_kcal': round(float(rec['energia_kcal'] or 0) / rac, 2),
+            # 'hierro_mg': round(float(rec['hierro_mg'] or 0) / rac, 2),
+            # 'proteina_g': round(float(rec['proteina_g'] or 0) / rac, 2),
+            'energia_kcal': round(float(rec['energia_kcal'] or 0), 2),
+            'hierro_mg': round(float(rec['hierro_mg'] or 0), 2),
+            'proteina_g': round(float(rec['proteina_g'] or 0), 2),
             'fibra_g': 0.0,
             'precio_soles': round(precio_racion, 2),
             'nivel_precio': nivel,
@@ -672,9 +679,8 @@ def entrenar_y_persistir(cur):
     persistencia del modelo activo y su asignación receta->cluster.
     COM-5 v6: los centroides persistidos en `centroides` van en UNIDADES REALES por
     ración (inverse_transform); los estandarizados quedan en parametros.centroides_z.
-    COM-37 v5-fix: silhouette solo se calcula si n_samples > n_clusters (sklearn exige
-    labels <= n_samples-1); con muestras insuficientes se registra 0.0 en lugar de
-    lanzar ValueError (que el router convertía en 400).
+    COM-37 v5-fix: silhouette solo se calcula si n_samples > n_clusters.
+    COM-47: el dataset nutricional proviene directo de la tabla (ya por ración).
     Retorna el resumen del entrenamiento (dict). El caller gestiona el commit.
     """
     k, bajo_max, medio_max = _parametros_kmeans(cur)
