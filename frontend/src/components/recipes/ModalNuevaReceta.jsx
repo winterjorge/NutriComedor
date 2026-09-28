@@ -1,25 +1,19 @@
 /**
  * components/recipes/ModalNuevaReceta.jsx
  * Objetivo: Modal de creación y edición de recetas. Gestiona los datos nutricionales
- *           (hierro, proteína, energía, vitamina A, zinc, carbohidratos) y la lista
- *           dinámica de ingredientes con sus unidades de medida y cantidades requeridas.
+ *           (hierro, proteína, energía, vitamina A, zinc, carbohidratos), la cantidad
+ *           de raciones (COM-45) y la lista dinámica de ingredientes con sus unidades
+ *           de medida y cantidades requeridas.
  * Uso: Importado por RecipesView.jsx y GestionRecetas.jsx. Se controla mediante las props
  *      `isOpen`, `onClose`, `onSuccess` y `recetaEditar` (activa el modo edición).
- *
- * CORRECCIÓN DE BUG (Ticket Jira COM-16):
- *  - Causa original: el contenedor externo combinaba `items-center` con `overflow-y-auto`
- *    y la caja interna crecía sin altura máxima; con listas largas de ingredientes la parte
- *    superior (encabezado e "Información General") quedaba recortada e inaccesible.
- *  - Solución: el modal tiene altura máxima (max-h-[90vh]) con layout de columna:
- *    encabezado fijo, cuerpo con scroll interno y pie de acciones fijo.
- *  - Lista de ingredientes como cuadrícula compacta tipo tabla: encabezados de columna
- *    únicos, filas numeradas y fondos alternados para facilitar su lectura.
- *
- * MEJORA UX (Ticket Jira COM-18):
- *  - Confirmación modal antes de Guardar, Cancelar (o cerrar con X) y Eliminar ingrediente,
- *    para evitar pérdidas de trabajo por clics accidentales (reutiliza ModalConfirmacion).
- *  - El mensaje de éxito deja de ser un alert() nativo y pasa a un ModalExito con el
- *    mismo diseño de la web.
+ * Historial:
+ *  - COM-16: fix de scroll/recorte del modal (max-h-[90vh], cuerpo scrolleable, pie fijo).
+ *  - COM-18: confirmación modal antes de Guardar/Cancelar/Eliminar ingrediente y
+ *    ModalExito en lugar de alert() nativo.
+ *  - COM-45 (este archivo): campo "Raciones *" (entero mayor a cero) en Información
+ *    General: default 4 al crear, precargado al editar, validación que BLOQUEA el
+ *    guardado si queda vacío o es <= 0, y envío del campo al backend (schemas/router
+ *    ya lo persisten). Nada existente se elimina; las adiciones van marcadas COM-45.
  */
 import React, { useState, useEffect, useRef } from 'react';
 import { X, Plus, Trash2 } from 'lucide-react';
@@ -35,6 +29,7 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
     const [formData, setFormData] = useState({
         nombre: '',
         descripcion: '',
+        raciones: '4',          // COM-45: default 4 raciones (entero > 0, obligatorio en UI)
         hierro_mg: '',
         proteina_g: '',
         energia_kcal: '',
@@ -42,26 +37,20 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
         zinc_mg: '',
         carbohidratos_g: ''
     });
-
     // Lista dinámica de ingredientes (siempre inicia con 1 fila)
     const [ingredientes, setIngredientes] = useState([
         { ingrediente_id: '', cantidad_requerida: '', unidad_medida_id: '' }
     ]);
-
     // Catálogos cargados desde la API para alimentar los selects
     const [unidadesMedida, setUnidadesMedida] = useState([]);
     const [ingredientesDisponibles, setIngredientesDisponibles] = useState([]);
-
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
-
     // UX (COM-18): modal de confirmación para acciones sensibles.
     // Estructura: { tipo: 'guardar' | 'cancelar' | 'eliminar', index?: number }
     const [modalConf, setModalConf] = useState(null);
-
     // UX (COM-18): mensaje del modal de éxito (string vacío = cerrado)
     const [mensajeExito, setMensajeExito] = useState('');
-
     // Referencia al cuerpo scrolleable para subir el scroll al mostrar errores
     const cuerpoRef = useRef(null);
 
@@ -99,6 +88,8 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
             setFormData({
                 nombre: data.receta.nombre || '',
                 descripcion: data.receta.descripcion || '',
+                // COM-45: precarga raciones; si la receta antigua no tuviera valor, default 4
+                raciones: data.receta.raciones != null ? String(data.receta.raciones) : '4',
                 hierro_mg: data.receta.hierro_mg || '',
                 proteina_g: data.receta.proteina_g || '',
                 energia_kcal: data.receta.energia_kcal || '',
@@ -126,6 +117,7 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
         setFormData({
             nombre: '',
             descripcion: '',
+            raciones: '4',   // COM-45: default 4 raciones al crear
             hierro_mg: '',
             proteina_g: '',
             energia_kcal: '',
@@ -170,10 +162,17 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
         }
     };
 
-    // Valida nombre de receta y que cada fila de ingrediente esté completa
+    // Valida nombre de receta, raciones (COM-45) y que cada fila de ingrediente esté completa
     const validarFormulario = () => {
         if (!formData.nombre.trim()) {
             mostrarError('El nombre de la receta es obligatorio');
+            return false;
+        }
+        // COM-45: raciones obligatorias en la interfaz: entero mayor a cero, no vacío
+        const racionesNum = Number(formData.raciones);
+        if (formData.raciones === '' || formData.raciones === null || formData.raciones === undefined
+            || !Number.isInteger(racionesNum) || racionesNum <= 0) {
+            mostrarError('La cantidad de raciones es obligatoria y debe ser un número entero mayor a 0');
             return false;
         }
         for (let i = 0; i < ingredientes.length; i++) {
@@ -195,7 +194,6 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
     };
 
     // ===== UX (COM-18): SOLICITUDES DE CONFIRMACIÓN (no ejecutan la acción directamente) =====
-
     // Submit del formulario: valida y, si todo es correcto, pide confirmación de guardado
     const solicitarGuardado = (e) => {
         e.preventDefault();
@@ -252,6 +250,8 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
             const recetaData = {
                 nombre: formData.nombre,
                 descripcion: formData.descripcion,
+                // COM-45: se envían las raciones validadas (entero > 0) al backend
+                raciones: parseInt(formData.raciones, 10),
                 hierro_mg: parseFloat(formData.hierro_mg) || null,
                 proteina_g: parseFloat(formData.proteina_g) || null,
                 energia_kcal: parseFloat(formData.energia_kcal) || null,
@@ -328,7 +328,6 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
             <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
                 {/* Altura máxima 90vh + layout de columna => encabezado y pie fijos, cuerpo scrolleable */}
                 <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden">
-
                     {/* ===== Encabezado fijo (siempre visible) ===== */}
                     <div className="flex justify-between items-center px-6 py-4 border-b border-slate-200 bg-white shrink-0">
                         <h3 className="font-bold text-xl text-slate-800">
@@ -343,20 +342,16 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
                             <X size={24} />
                         </button>
                     </div>
-
                     {/* El form envuelve cuerpo scrolleable + pie fijo para que el submit funcione desde el pie */}
                     <form onSubmit={solicitarGuardado} className="flex flex-col flex-1 min-h-0">
-
                         {/* ===== Cuerpo con scroll interno ===== */}
                         <div ref={cuerpoRef} className="flex-1 overflow-y-auto p-6">
-
                             {/* Mensaje de error de validación */}
                             {error && (
                                 <div className="mb-4 p-4 bg-red-50 border border-red-200 text-red-700 rounded-lg">
                                     {error}
                                 </div>
                             )}
-
                             {/* ===== Sección: Información General ===== */}
                             <div className="mb-6">
                                 <h4 className="text-lg font-semibold text-slate-700 mb-4">Información General</h4>
@@ -387,6 +382,27 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
                                             className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
                                             placeholder="Descripción de la receta..."
                                         />
+                                    </div>
+                                    {/* COM-45: cantidad de raciones para las que está pensada la receta */}
+                                    <div>
+                                        <label className="block text-sm font-medium text-slate-700 mb-1">
+                                            Raciones *
+                                        </label>
+                                        <input
+                                            type="number"
+                                            name="raciones"
+                                            value={formData.raciones}
+                                            onChange={handleInputChange}
+                                            step="1"
+                                            min="1"
+                                            className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                                            placeholder="Ej: 4"
+                                            title="Número de raciones que produce la preparación (entero mayor a 0)"
+                                            required
+                                        />
+                                        <p className="text-[11px] text-slate-400 mt-1">
+                                            La nutrición y el costo se analizan por ración (COM-47 v2).
+                                        </p>
                                     </div>
                                     <div>
                                         <label className="block text-sm font-medium text-slate-700 mb-1">
@@ -468,7 +484,6 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
                                     </div>
                                 </div>
                             </div>
-
                             {/* ===== Sección: Ingredientes (cuadrícula tipo tabla) ===== */}
                             <div className="mb-2">
                                 {/* Encabezado de sección con contador y botón de agregar */}
@@ -488,7 +503,6 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
                                         Agregar Ingrediente
                                     </button>
                                 </div>
-
                                 {/* Encabezados de columna ÚNICOS para toda la lista */}
                                 <div className="grid grid-cols-12 gap-2 px-3 pb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
                                     <span className="col-span-6">Ingrediente</span>
@@ -496,7 +510,6 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
                                     <span className="col-span-3">Unidad *</span>
                                     <span className="col-span-1 text-center">Acción</span>
                                 </div>
-
                                 {/* Área de scroll propia para la lista de ingredientes */}
                                 <div className="space-y-2 overflow-y-auto max-h-72 pr-1">
                                     {ingredientes.map((ing, index) => (
@@ -526,7 +539,6 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
                                                     ))}
                                                 </select>
                                             </div>
-
                                             {/* Cantidad requerida */}
                                             <div className="col-span-2">
                                                 <input
@@ -541,7 +553,6 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
                                                     required
                                                 />
                                             </div>
-
                                             {/* Unidad de medida */}
                                             <div className="col-span-3">
                                                 <select
@@ -559,7 +570,6 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
                                                     ))}
                                                 </select>
                                             </div>
-
                                             {/* Botón eliminar fila (pide confirmación COM-18) */}
                                             <div className="col-span-1 flex justify-center">
                                                 <button
@@ -577,7 +587,6 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
                                 </div>
                             </div>
                         </div>
-
                         {/* ===== Pie fijo con acciones (siempre visible) ===== */}
                         <div className="flex justify-end gap-3 px-6 py-4 border-t border-slate-200 bg-slate-50 shrink-0">
                             {/* UX (COM-18): Cancelar pide confirmación antes de descartar cambios */}
@@ -600,7 +609,6 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
                     </form>
                 </div>
             </div>
-
             {/* Modal de confirmación para acciones sensibles (guardar/cancelar/eliminar) */}
             <ModalConfirmacion
                 isOpen={!!modalConf}
@@ -609,7 +617,6 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
                 mensaje={obtenerMensajeConfirmacion()}
                 tipo={modalConf?.tipo === 'eliminar' ? 'danger' : 'warning'}
             />
-
             {/* Modal de éxito con el diseño de la web (reemplaza al alert nativo) */}
             <ModalExito
                 isOpen={!!mensajeExito}
