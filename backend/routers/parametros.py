@@ -10,8 +10,10 @@ from database import get_db
 
 router = APIRouter(prefix="/parametros", tags=["Parámetros"])
 
+
 class ParametroUpdate(BaseModel):
     valor: str
+
 
 @router.get("")
 def get_parametros(categoria: str = None, db=Depends(get_db)):
@@ -23,21 +25,30 @@ def get_parametros(categoria: str = None, db=Depends(get_db)):
         if categoria:
             query += " WHERE categoria = %s"
             params.append(categoria.upper())
-        
         cur.execute(query, params)
         registros = cur.fetchall()
-        
         resultado = {}
         for r in registros:
             val = r['valor']
-            if r['tipo_dato'] == 'INTEGER': val = int(val)
-            elif r['tipo_dato'] == 'FLOAT': val = float(val)
-            elif r['tipo_dato'] == 'BOOLEAN': val = val.lower() == 'true'
+            if r['tipo_dato'] == 'INTEGER':
+                val = int(val)
+            elif r['tipo_dato'] == 'FLOAT':
+                val = float(val)
+            elif r['tipo_dato'] == 'BOOLEAN':
+                val = val.lower() == 'true'
             resultado[r['clave']] = val
-            
         return resultado
+    except HTTPException:
+        raise
+    except Exception as e:
+        # FIX: responder SIEMPRE con JSON válido. Antes la excepción sin controlar
+        # devolvía texto plano "Internal Server Error" y el frontend fallaba con
+        # "Unexpected token 'I' ... is not valid JSON".
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error al leer parámetros del sistema: {str(e)}")
     finally:
         cur.close()
+
 
 @router.put("/{clave}")
 def update_parametro(clave: str, data: ParametroUpdate, db=Depends(get_db)):
@@ -52,6 +63,8 @@ def update_parametro(clave: str, data: ParametroUpdate, db=Depends(get_db)):
             raise HTTPException(status_code=404, detail="Parámetro no encontrado")
         db.commit()
         return {"message": f"Parámetro {clave} actualizado exitosamente"}
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
