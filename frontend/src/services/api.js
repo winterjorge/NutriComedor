@@ -19,14 +19,14 @@
  *           bloque MODELOS_ML (panel de gráficos exclusivo del Admin).
  *   COM-38: resetearClaveUsuario (reset/cambio de clave por Admin de Sistemas).
  *   COM-39: bloque DIRECTIVOS DE COMEDOR (búsqueda por distrito, listado, lotes).
- *   COM-37 v1: bloque GESTION_INGREDIENTES (ingredientes CRUD sin borrado, precios
- *           manuales por ingrediente con vigencia, re-emparejado).
- *   COM-37 v5 (este archivo): se AMPLÍA GESTION_INGREDIENTES con el modelo de DOS
- *           CONCEPTOS (ingrediente=uso / insumo=compra): insumos del ingrediente con
- *           precio de hoy y fuente, búsqueda de insumos, vinculación con equivalencias,
- *           creación/edición/desvinculación de insumos MANUALES, CRUD de equivalencias
- *           (unidad de uso -> gramos) y CRUD de precios manuales POR INSUMO.
- *           Los métodos v1 de precios por ingrediente se conservan como LEGACY.
+ *   COM-37 v1/v5/v6: bloque GESTION_INGREDIENTES (ingredientes CRUD sin borrado,
+ *           insumos del ingrediente con precio de hoy y fuente, búsqueda y vinculación
+ *           de insumos, insumos manuales, equivalencias uso->gramos, precios manuales
+ *           por insumo, legacy por ingrediente, re-emparejado y duplicados/fusión v8).
+ *   COM-48 (este archivo): en el bloque RECETAS se agregan:
+ *           getComponentesReceta (catálogo Ensalada/Plato de fondo/Refresco/Fruta) y
+ *           limpiarIngredientesReceta (DELETE de todas las líneas, para la sincronización
+ *           de edición del modal con componentes). Ningún método existente se modifica.
  */
 
 const API_BASE = '/api/v1';
@@ -198,9 +198,8 @@ export const api = {
     },
 
     // ==========================================
-    // GESTIÓN DE INGREDIENTES (COM-37 v1 + COM-37 v5) — exclusivo Admin de Sistemas
+    // GESTIÓN DE INGREDIENTES (COM-37 v1/v5/v6/v8) — exclusivo Admin de Sistemas
     // ==========================================
-    // --- Ingredientes (CRUD sin borrado) ---
     getIngredientesAdmin: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/ingredientes-admin?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener ingredientes'));
@@ -224,8 +223,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al actualizar el ingrediente'));
         return response.json();
     },
-
-    // --- COM-37 v5: Sección B: emparejamiento ingrediente <-> insumo ---
     getInsumosDelIngrediente: async (ingredienteId, usuarioSolicitanteId, fecha) => {
         const params = new URLSearchParams({ usuario_solicitante_id: String(usuarioSolicitanteId) });
         if (fecha) params.append('fecha', fecha);
@@ -275,8 +272,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al desvincular el insumo'));
         return response.json();
     },
-
-    // --- COM-37 v5: Sección C: equivalencias unidad de uso -> gramos ---
     getEquivalencias: async (ingredienteId, usuarioSolicitanteId, insumoId) => {
         const params = new URLSearchParams({ usuario_solicitante_id: String(usuarioSolicitanteId) });
         if (insumoId) params.append('insumo_id', insumoId);
@@ -309,8 +304,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al desactivar la equivalencia'));
         return response.json();
     },
-
-    // --- COM-37 v5: Sección D: precios manuales POR INSUMO ---
     getPreciosManualesInsumo: async (insumoId, usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/ingredientes-admin/insumos/${insumoId}/precios-manuales?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener precios del insumo'));
@@ -341,8 +334,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al desactivar el precio manual'));
         return response.json();
     },
-
-    // --- COM-37 v5: re-emparejado de insumos huérfanos ---
     reemparejarInsumos: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/ingredientes-admin/reemparejar-insumos?usuario_solicitante_id=${usuarioSolicitanteId}`, {
             method: 'POST'
@@ -350,8 +341,21 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al re-emparejar insumos'));
         return response.json();
     },
-
-    // --- LEGACY COM-37 v1: precios manuales POR INGREDIENTE (fallback de resolución) ---
+    getDuplicadosIngredientes: async (usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/duplicados?usuario_solicitante_id=${usuarioSolicitanteId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al detectar duplicados'));
+        return response.json();
+    },
+    fusionarIngrediente: async (destinoId, data) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/${destinoId}/fusionar`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al fusionar ingredientes'));
+        return response.json();
+    },
+    // LEGACY COM-37 v1: precios manuales por ingrediente (fallback de resolución)
     getPreciosManuales: async (ingredienteId, usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/ingredientes-admin/${ingredienteId}/precios-manuales?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener precios manuales'));
@@ -744,7 +748,7 @@ export const api = {
     },
 
     // ==========================================
-    // RECETAS
+    // RECETAS (+ COM-48: componentes y limpieza de líneas)
     // ==========================================
     getRecetas: async (params = {}) => {
         const queryString = new URLSearchParams(params).toString();
@@ -802,6 +806,21 @@ export const api = {
     deleteIngredienteReceta: async (recetaId, ingredienteId) => {
         const response = await fetch(`${API_BASE}/recetas/${recetaId}/ingredientes/${ingredienteId}`, { method: 'DELETE' });
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al eliminar ingrediente'));
+        return response.json();
+    },
+    // COM-48: catálogo activo de componentes de receta (Ensalada, Plato de fondo,
+    // Refresco, Fruta y futuros), ordenado para exhibición.
+    getComponentesReceta: async () => {
+        const response = await fetch(`${API_BASE}/recetas/componentes`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener componentes'));
+        return response.json();
+    },
+    // COM-48: elimina TODAS las líneas de ingredientes de una receta. Lo usa el modal de
+    // edición antes de re-grabar las filas con su componente (con componentes, un mismo
+    // ingrediente puede tener varias filas y borrarlo por id las perdería todas).
+    limpiarIngredientesReceta: async (recetaId) => {
+        const response = await fetch(`${API_BASE}/recetas/${recetaId}/ingredientes`, { method: 'DELETE' });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al limpiar los ingredientes de la receta'));
         return response.json();
     },
 
