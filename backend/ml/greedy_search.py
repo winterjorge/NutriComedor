@@ -11,14 +11,11 @@ Historial:
    sobre precios_insumos.py con equivalencias uso->gramos.
  - COM-37 v7: la predicción RF cuenta como fuente de precio válida para completitud;
    fallback_ultima_fecha para días sin corrida del scraper.
- - COM-47 v1 (CORREGIDO por COM-47 v2): se había usado la nutrición de tabla directa
-   asumiéndola por ración; eso propagó valores de la PREPARACIÓN completa al scoring,
-   menús y resúmenes ("multiplicados").
- - COM-47 v2 (este archivo): semántica definitiva: nutrición de recetas_almuerzo =
-   PREPARACIÓN completa => POR RACIÓN se divide entre raciones para scoring, menús y
-   resúmenes; costo por ración = costo preparación / raciones; cantidades de
-   ingredientes por ración = cantidad / raciones (el costeo por gramo ya es equivalente).
-   Las líneas de COM-47 v1 quedan COMENTADAS por trazabilidad.
+ - COM-47 v2: se dividió la nutrición de tabla entre raciones (interpretación errónea).
+ - COM-47 v3 (este archivo): FIX definitivo: la nutrición de recetas_almuerzo YA ESTÁ
+   POR RACIÓN tal como se captura; se usa SIN dividir en _cargar_recetas_cluster (la
+   división v2 queda COMENTADA). La división entre raciones aplica SOLO a cantidades
+   de ingredientes y al costo (costo_racion = costo preparación / raciones).
 Uso: Importado por routers/propuestas_menu.py. Todas las funciones reciben un cursor
      psycopg2 (RealDictCursor); el caller gestiona la transacción.
 Referencia: tickets COM-8 / COM-37 / COM-47 (solo trazabilidad).
@@ -218,11 +215,10 @@ def _opcion_con_prediccion(cur, ing_id, fecha, precios_insumo, peso_estimado_g):
 def _cargar_recetas_cluster(cur):
     """
     Recetas del modelo K-means activo con nutrición POR RACIÓN.
-    COM-47 v2: los campos hierro_mg / proteina_g / energia_kcal de recetas_almuerzo
-    corresponden a la PREPARACIÓN completa; se dividen entre raciones para obtener el
-    valor POR RACIÓN que usan scoring, menús y resúmenes. (COM-47 v1, que los usaba
-    directos, queda COMENTADO por trazabilidad.) `raciones` también se conserva para
-    el costo por ración.
+    COM-47 v3: los campos hierro_mg / proteina_g / energia_kcal de recetas_almuerzo
+    YA están por ración tal como se capturan en el modal: se usan DIRECTOS, sin
+    dividir entre raciones (la división de COM-47 v2 queda COMENTADA). `raciones`
+    se conserva únicamente para el cálculo del costo por ración.
     Retorna (recetas, modelo_id).
     """
     cur.execute("SELECT id FROM kmeans_modelos WHERE activo = TRUE ORDER BY id DESC LIMIT 1;")
@@ -250,14 +246,14 @@ def _cargar_recetas_cluster(cur):
             'cluster_codigo': r['cluster_codigo'],
             'cluster_etiqueta': r['cluster_etiqueta'],
             'raciones': rac,
-            # COM-47 v2: nutrición POR RACIÓN = preparación / raciones.
-            # COM-47 v1 (trazabilidad, CORREGIDO): uso directo sin división comentado:
-            # 'hierro_mg': float(r['hierro_mg'] or 0),
-            # 'proteina_g': float(r['proteina_g'] or 0),
-            # 'energia_kcal': float(r['energia_kcal'] or 0),
-            'hierro_mg': float(r['hierro_mg'] or 0) / rac,
-            'proteina_g': float(r['proteina_g'] or 0) / rac,
-            'energia_kcal': float(r['energia_kcal'] or 0) / rac,
+            # COM-47 v3: nutrición POR RACIÓN tal como se capturó (sin dividir).
+            # COM-47 v2 (trazabilidad): división entre raciones COMENTADA:
+            # 'hierro_mg': float(r['hierro_mg'] or 0) / rac,
+            # 'proteina_g': float(r['proteina_g'] or 0) / rac,
+            # 'energia_kcal': float(r['energia_kcal'] or 0) / rac,
+            'hierro_mg': float(r['hierro_mg'] or 0),
+            'proteina_g': float(r['proteina_g'] or 0),
+            'energia_kcal': float(r['energia_kcal'] or 0),
             'costo_racion': 0.0,            # se completa en _costear_recetas
             'precio_completo': False,       # COM-37 v2: se completa en _costear_recetas
             'ingredientes_sin_precio': [],  # COM-37 v2: auditoría de faltantes
@@ -268,12 +264,12 @@ def _cargar_recetas_cluster(cur):
 
 def _costear_recetas(cur, recetas, fecha: date):
     """
-    COM-37 v5/v7 + COM-47 v2: calcula el costo POR RACIÓN de cada receta: gramos de la
+    COM-37 v5/v7 + COM-47 v3: calcula el costo POR RACIÓN de cada receta: gramos de la
     unidad de USO de cada línea (equivalencia o conversión estándar) × precio por gramo
     de la MEJOR opción del ingrediente, sumado para la preparación completa y dividido
-    entre raciones (equivalente a dividir cada cantidad entre raciones antes de costear).
-    Deja los ingredientes NORMALIZADOS como dicts {nombre, categoria} y marca
-    precio_completo / ingredientes_sin_precio para la regla del flujo del comedor.
+    entre raciones (única división permitida: cantidades y costos). Deja los
+    ingredientes NORMALIZADOS como dicts {nombre, categoria} y marca precio_completo /
+    ingredientes_sin_precio para la regla del flujo del comedor.
     """
     ids = [r['receta_id'] for r in recetas]
     if not ids:
@@ -329,7 +325,7 @@ def _costear_recetas(cur, recetas, fecha: date):
 
     for r in recetas:
         total = costo_acum.get(r['receta_id'], 0.0)
-        # COM-47 v2: costo POR RACIÓN (la preparación completa se divide entre raciones)
+        # COM-47 v3: la división entre raciones aplica SOLO al precio (costo por ración)
         r['costo_racion'] = round(total / r['raciones'], 2)
         r['ingredientes'] = nombres_acum.get(r['receta_id'], [])
         tot = lineas_tot.get(r['receta_id'], 0)
@@ -401,7 +397,8 @@ def _score(rec, pesos, mm, usada: bool) -> float:
     """
     Score lineal ponderado POR RACIÓN: hierro/proteína/energía suman, precio resta.
     El peso 'variedad' bonifica recetas aún no usadas en la semana.
-    COM-47 v2: las features nutricionales que recibe están POR RACIÓN (tabla/raciones).
+    COM-47 v3: las features nutricionales que recibe están POR RACIÓN tal como se
+    capturan en el modal (sin divisiones adicionales).
     """
     s = (pesos.get('hierro', 0) * _z(rec['hierro_mg'], *mm['hierro']) +
          pesos.get('proteina', 0) * _z(rec['proteina_g'], *mm['proteina']) +
@@ -418,7 +415,8 @@ def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
     COM-8 v2: Greedy por DÍA SELECCIONADO: elige la receta de mayor score del cluster
     objetivo de la rotación (fallback: todas), sin repetir platos mientras haya
     alternativas y respetando el presupuesto acumulado (con tolerancia del 5%).
-    COM-47 v2: el menú expone nutrición POR RACIÓN y costo POR RACIÓN.
+    COM-47 v3: el menú expone nutrición POR RACIÓN (valores directos de la tabla) y
+    costo POR RACIÓN.
     """
     mm = _minmax(todas)
     usadas = set()
@@ -465,7 +463,7 @@ def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
             'cluster_etiqueta': elegida['cluster_etiqueta'],
             'costo_racion': elegida['costo_racion'],
             'costo_total_dia': costo_dia,
-            # COM-47 v2: nutrición POR RACIÓN (preparación / raciones)
+            # COM-47 v3: nutrición POR RACIÓN directa de la tabla (sin recalcular)
             'energia_kcal': round(elegida['energia_kcal'], 2),
             'proteina_g': round(elegida['proteina_g'], 2),
             'hierro_mg': round(elegida['hierro_mg'], 2),
@@ -505,10 +503,10 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
                             creado_por_id: int, fecha_referencia: date = None,
                             seed: int = 0, dias_semana: list = None):
     """
-    COM-8 v2/v3 + COM-37 v2/v4/v5/v7 + COM-47 v2: Genera y persiste las 3 propuestas de
+    COM-8 v2/v3 + COM-37 v2/v4/v5/v7 + COM-47 v3: Genera y persiste las 3 propuestas de
     menú semanal (NUTRI, ECONO, BALANCE) para los DÍAS DE COCINA indicados, usando SOLO
     recetas que cumplan, en este orden:
-      1) nutrición cargada (energía no nula; analizada POR RACIÓN),
+      1) nutrición cargada (energía no nula; valores POR RACIÓN directos de la tabla),
       2) precios COMPLETOS con la misma jerarquía de fuentes que Evaluar,
       3) reglas de proteína VIGENTES R1/R2 configuradas en K-means.
     Retorna el payload completo, incluyendo las recetas excluidas por precio incompleto
@@ -581,7 +579,7 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
         resumen = {
             'costo_total_semana': costo_total,
             'costo_racion_promedio': round(costo_total / max(total_comensales * len(menu), 1), 2),
-            # COM-47 v2: promedios nutricionales POR RACIÓN del menú elegido
+            # COM-47 v3: promedios nutricionales POR RACIÓN (valores directos de tabla)
             'calorias_promedio_dia': round(sum(d['energia_kcal'] for d in menu) / max(len(menu), 1), 2),
             'hierro_promedio_dia': round(sum(d['hierro_mg'] for d in menu) / max(len(menu), 1), 2),
             'proteina_promedio_dia': round(sum(d['proteina_g'] for d in menu) / max(len(menu), 1), 2),
