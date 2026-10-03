@@ -19,16 +19,11 @@ Historial:
    silhouette_score (n_samples > n_clusters) y mensaje de error guía.
  - COM-37 v7: la predicción Random Forest cuenta como fuente de precio válida para la
    completitud (misma jerarquía que Evaluar).
- - COM-47 v1 (CORREGIDO por COM-47 v2): se había eliminado la división nutricional
-   asumiendo que la tabla ya estaba por ración; eso mostró valores de la PREPARACIÓN
-   completa ("multiplicados") en clusters y análisis.
- - COM-47 v2 (este archivo): semántica definitiva acordada con la administradora:
-     * recetas_almuerzo.hierro_mg/proteina_g/energia_kcal = valores de la PREPARACIÓN
-       completa (todas las raciones).
-     * NUTRICIÓN POR RACIÓN = valor de tabla / raciones (se analiza y persiste así).
-     * CANTIDADES de ingredientes por ración = cantidad / raciones (costeo equivalente).
-     * COSTO POR RACIÓN = costo de la preparación / raciones (sin cambios).
-   Las líneas de COM-47 v1 (uso directo sin división) quedan COMENTADAS por trazabilidad.
+ - COM-47 v2: se dividió la nutrición de tabla entre raciones (interpretación errónea).
+ - COM-47 v3 (este archivo): FIX definitivo acordado con la administradora: los valores
+   nutricionales de recetas_almuerzo YA SON POR RACIÓN tal como se capturan; se usan
+   SIN dividir en el dataset (la división v2 queda COMENTADA). La división entre
+   raciones aplica SOLO a cantidades de ingredientes y al costo (precio por ración).
 Uso: Importado por routers/kmeans.py y por ml/greedy_search.py (reglas R1/R2).
 Referencia: tickets COM-5 / COM-37 / COM-47 (solo trazabilidad).
 """
@@ -412,12 +407,10 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
           de precio (scraper día/última corrida, manual insumo, legacy ingrediente o
           predicción RF — COM-37 v7), la receta se excluye con motivo
           'precio_incompleto' y la lista de ingredientes faltantes.
-    COM-47 v2 (semántica definitiva):
-      * Nutrición de recetas_almuerzo = PREPARACIÓN completa => POR RACIÓN se obtiene
-        dividiendo entre raciones (se analiza y persiste por ración).
-      * Costo de la preparación (gramos de unidad de USO × precio por gramo del mejor
-        insumo) => POR RACIÓN se obtiene dividiendo entre raciones.
-      * Nunca se multiplican valores por ración en ninguna vista ni motor.
+    COM-47 v3: la NUTRICIÓN se toma DIRECTA de recetas_almuerzo (los valores ya están
+    POR RACIÓN tal como se capturan); NO se dividen entre raciones. La división entre
+    raciones aplica SOLO al costo (costo de preparación / raciones = precio por ración)
+    y a las cantidades de ingredientes (vía gramos por línea).
     Retorna (filas, excluidas).
     """
     # COM-5 v4: reglas de proteínas configurables por el Admin de Sistemas
@@ -578,7 +571,8 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
         #     if nut:
         #         nut_match += 1
 
-        # COM-47 v2: raciones es el divisor común de nutrición y precio (análisis por porción)
+        # COM-47 v3: raciones se usa SOLO para el precio (costo preparación / raciones);
+        # la nutrición de la tabla ya está por ración y no se toca.
         rac = float(rec['raciones']) if rec['raciones'] else 4.0
         costo_total = costo_acum.get(rec['id'], 0.0)
 
@@ -617,14 +611,14 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
         filas.append({
             'receta_id': rec['id'],
             'nombre': rec['nombre'],
-            # COM-47 v2: nutrición POR RACIÓN = preparación completa / raciones.
-            # COM-47 v1 (trazabilidad, CORREGIDO): uso directo sin división comentado:
-            # 'energia_kcal': round(float(rec['energia_kcal'] or 0), 2),
-            # 'hierro_mg': round(float(rec['hierro_mg'] or 0), 2),
-            # 'proteina_g': round(float(rec['proteina_g'] or 0), 2),
-            'energia_kcal': round(float(rec['energia_kcal'] or 0) / rac, 2),
-            'hierro_mg': round(float(rec['hierro_mg'] or 0) / rac, 2),
-            'proteina_g': round(float(rec['proteina_g'] or 0) / rac, 2),
+            # COM-47 v3: nutrición POR RACIÓN tal como se capturó (sin dividir).
+            # COM-47 v2 (trazabilidad): división entre raciones COMENTADA:
+            # 'energia_kcal': round(float(rec['energia_kcal'] or 0) / rac, 2),
+            # 'hierro_mg': round(float(rec['hierro_mg'] or 0) / rac, 2),
+            # 'proteina_g': round(float(rec['proteina_g'] or 0) / rac, 2),
+            'energia_kcal': round(float(rec['energia_kcal'] or 0), 2),
+            'hierro_mg': round(float(rec['hierro_mg'] or 0), 2),
+            'proteina_g': round(float(rec['proteina_g'] or 0), 2),
             'fibra_g': 0.0,
             'precio_soles': round(precio_racion, 2),
             'nivel_precio': nivel,
@@ -685,8 +679,7 @@ def entrenar_y_persistir(cur):
     COM-5 v6: los centroides persistidos en `centroides` van en UNIDADES REALES por
     ración (inverse_transform); los estandarizados quedan en parametros.centroides_z.
     COM-37 v5-fix: silhouette solo se calcula si n_samples > n_clusters.
-    COM-47 v2: el dataset nutricional y económico es POR RACIÓN (tabla/raciones y
-    costo preparación/raciones).
+    COM-47 v3: el dataset nutricional usa los valores por ración tal como se capturan.
     Retorna el resumen del entrenamiento (dict). El caller gestiona el commit.
     """
     k, bajo_max, medio_max = _parametros_kmeans(cur)
