@@ -19,14 +19,16 @@
  *           bloque MODELOS_ML (panel de gráficos exclusivo del Admin).
  *   COM-38: resetearClaveUsuario (reset/cambio de clave por Admin de Sistemas).
  *   COM-39: bloque DIRECTIVOS DE COMEDOR (búsqueda por distrito, listado, lotes).
- *   COM-37 v1/v5/v6: bloque GESTION_INGREDIENTES (ingredientes CRUD sin borrado,
+ *   COM-37 v1/v5/v6/v8: bloque GESTION_INGREDIENTES (ingredientes CRUD sin borrado,
  *           insumos del ingrediente con precio de hoy y fuente, búsqueda y vinculación
  *           de insumos, insumos manuales, equivalencias uso->gramos, precios manuales
- *           por insumo, legacy por ingrediente, re-emparejado y duplicados/fusión v8).
- *   COM-48 (este archivo): en el bloque RECETAS se agregan:
- *           getComponentesReceta (catálogo Ensalada/Plato de fondo/Refresco/Fruta) y
- *           limpiarIngredientesReceta (DELETE de todas las líneas, para la sincronización
- *           de edición del modal con componentes). Ningún método existente se modifica.
+ *           por insumo, legacy por ingrediente, re-emparejado y duplicados/fusión).
+ *   COM-48: en RECETAS: getComponentesReceta (catálogo Ensalada/Plato de fondo/
+ *           Refresco/Fruta) y limpiarIngredientesReceta (DELETE de todas las líneas).
+ *   COM-48 v2 (este archivo): en RECETAS se agregan getCategoriasAlimentos y
+ *           createIngredienteDesdeReceta (alta de ingrediente de catálogo desde el
+ *           modal de receta, gate por módulo 'recetario' o Admin). Ningún método
+ *           existente se modifica.
  */
 
 const API_BASE = '/api/v1';
@@ -748,7 +750,8 @@ export const api = {
     },
 
     // ==========================================
-    // RECETAS (+ COM-48: componentes y limpieza de líneas)
+    // RECETAS (+ COM-48: componentes y limpieza de líneas; + COM-48 v2: categorías y
+    // alta de ingredientes desde el modal)
     // ==========================================
     getRecetas: async (params = {}) => {
         const queryString = new URLSearchParams(params).toString();
@@ -815,12 +818,28 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener componentes'));
         return response.json();
     },
-    // COM-48: elimina TODAS las líneas de ingredientes de una receta. Lo usa el modal de
-    // edición antes de re-grabar las filas con su componente (con componentes, un mismo
-    // ingrediente puede tener varias filas y borrarlo por id las perdería todas).
+    // COM-48: elimina TODAS las líneas de ingredientes de una receta (sincronización de
+    // edición del modal con componentes).
     limpiarIngredientesReceta: async (recetaId) => {
         const response = await fetch(`${API_BASE}/recetas/${recetaId}/ingredientes`, { method: 'DELETE' });
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al limpiar los ingredientes de la receta'));
+        return response.json();
+    },
+    // COM-48 v2: catálogo de categorías de alimentos (sub-formulario de nuevo ingrediente)
+    getCategoriasAlimentos: async () => {
+        const response = await fetch(`${API_BASE}/recetas/categorias`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener categorías'));
+        return response.json();
+    },
+    // COM-48 v2: crea un ingrediente de catálogo desde el modal de receta y devuelve su
+    // id para dejarlo seleccionado en la fila (gate: módulo 'recetario' o Admin).
+    createIngredienteDesdeReceta: async (data) => {
+        const response = await fetch(`${API_BASE}/recetas/ingredientes-nuevos`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al crear el ingrediente'));
         return response.json();
     },
 
