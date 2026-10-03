@@ -3,9 +3,21 @@ routers/comedores.py
 Objetivo: Endpoints de comedores (COM-21): CRUD, asociación de usuarios, estado por
           comedor, contexto de selección (COM-20) y búsqueda para el autocompletado
           del flujo de creación/edición de usuarios (corrección COM-26).
+Historial:
+ - COM-21: versión original con campos de texto.
+ - COM-27: el frontend adopta la cascada geográfica, pero el backend no se actualizó.
+ - COM-44 (este archivo): alineación backend <-> frontend COM-27.
+     * `listar_comedores` hace JOIN con `departamentos`, `provincias`, `distritos`
+       para exponer `departamento_nombre`/`provincia_nombre`/`distrito_nombre` (la
+       columna "Ubicación" del listado vuelve a mostrar la cascada resuelta).
+     * `crear_comedor` recibe los FK (`departamento_id`/`provincia_id`/`distrito_id`)
+       como fuente de verdad, valida su existencia, obtiene los nombres vía SELECT y
+       los guarda en la cache de texto de la tabla `comedores`.
+     * `actualizar_comedor` aplica la misma lógica cuando cambian los FK.
 Uso: Registrado en main.py con prefijo /api/v1.
 Nota: Mientras no exista middleware JWT, el solicitante se identifica mediante
       `usuario_solicitante_id` en el payload (el frontend lo envía desde la sesión).
+Referencia: tickets COM-21 / COM-27 / COM-44 (solo trazabilidad).
 """
 from fastapi import APIRouter, Depends, HTTPException
 from psycopg2.extras import RealDictCursor
@@ -41,27 +53,78 @@ def _validar_permiso_admin(cur, usuario_id: int, comedor_id: int):
         )
 
 
+def _resolver_ubicacion(cur, departamento_id, provincia_id, distrito_id):
+    """
+    COM-44: resuelve los nombres de departamento/provincia/distrito desde los FK de la
+    cascada. Retorna dict con nombres y valida que las entidades existan y pertenezcan
+    a la jerarquía correcta (distrito dentro de provincia, provincia dentro de departamento).
+    """
+    cur.execute("SELECT id, nombre FROM departamentos WHERE id = %s;", (departamento_id,))
+    dep = cur.fetchone()
+    if not dep:
+        raise HTTPException(status_code=400, detail=f"Departamento con id {departamento_id} no existe.")
+
+    cur.execute("""
+        SELECT id, nombre, departamento_id FROM provincias
+        WHERE id = %s AND departamento_id = %s;
+    """, (provincia_id, departamento_id))
+    prov = cur.fetchone()
+    if not prov:
+        raise HTTPException(status_code=400,
+                            detail=f"La provincia {provincia_id} no pertenece al departamento {departamento_id}.")
+
+    cur.execute("""
+        SELECT id, nombre, provincia_id FROM distritos
+        WHERE id = %s AND provincia_id = %s;
+    """, (distrito_id, provincia_id))
+    dist = cur.fetchone()
+    if not dist:
+        raise HTTPException(status_code=400,
+                            detail=f"El distrito {distrito_id} no pertenece a la provincia {provincia_id}.")
+
+    return {
+        "departamento": dep['nombre'],
+        "ciudad": prov['nombre'],
+        "distrito": dist['nombre'],
+    }
+
+
 # ==========================================
 # ENDPOINTS DE COMEDORES (CATÁLOGO)
 # ==========================================
 @router.get("")
 def listar_comedores(departamento: str = None, distrito: str = None,
                      nombre: str = None, db=Depends(get_db)):
-    """Lista comedores con filtros opcionales por departamento, distrito o nombre."""
+    """
+    Lista comedores con filtros opcionales por departamento, distrito o nombre.
+    COM-44: JOIN con las tablas de la cascada para exponer los nombres resueltos
+    (departamento_nombre, provincia_nombre, distrito_nombre) y seguir soportando
+    los filtros legacy sobre los textos cacheados.
+    """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
-        query = "SELECT * FROM comedores WHERE 1=1"
+        query = """
+            SELECT c.*,
+                   d.nombre AS departamento_nombre,
+                   p.nombre AS provincia_nombre,
+                   di.nombre AS distrito_nombre
+            FROM comedores c
+            LEFT JOIN departamentos d ON d.id = c.departamento_id
+            LEFT JOIN provincias p ON p.id = c.provincia_id
+            LEFT JOIN distritos di ON di.id = c.distrito_id
+            WHERE 1=1
+        """
         params = []
         if departamento:
-            query += " AND departamento ILIKE %s"
-            params.append(departamento)
+            query += " AND (c.departamento ILIKE %s OR d.nombre ILIKE %s)"
+            params.extend([f"%{departamento}%", f"%{departamento}%"])
         if distrito:
-            query += " AND distrito ILIKE %s"
-            params.append(distrito)
+            query += " AND (c.distrito ILIKE %s OR di.nombre ILIKE %s)"
+            params.extend([f"%{distrito}%", f"%{distrito}%"])
         if nombre:
-            query += " AND nombre ILIKE %s"
+            query += " AND c.nombre ILIKE %s"
             params.append(f"%{nombre}%")
-        query += " ORDER BY departamento, ciudad, distrito, nombre;"
+        query += " ORDER BY COALESCE(d.nombre, c.departamento), COALESCE(p.nombre, c.ciudad), COALESCE(di.nombre, c.distrito), c.nombre;"
         cur.execute(query, params)
         return cur.fetchall()
     finally:
@@ -116,18 +179,27 @@ def buscar_comedores(q: str = "", db=Depends(get_db)):
     """
     COM-26: búsqueda de comedores por nombre o ubicación (departamento, ciudad, distrito).
     Alimenta el campo de texto con autocompletado del formulario de usuarios.
+    COM-44: filtra también por los nombres resueltos desde la cascada.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         like = f"%{q}%" if q.strip() else "%"
         cur.execute("""
-            SELECT id, nombre, departamento, ciudad, distrito, zona
-            FROM comedores
-            WHERE nombre ILIKE %s OR departamento ILIKE %s
-               OR ciudad ILIKE %s OR distrito ILIKE %s
-            ORDER BY nombre
+            SELECT c.id, c.nombre,
+                   COALESCE(d.nombre, c.departamento) AS departamento,
+                   COALESCE(p.nombre, c.ciudad) AS ciudad,
+                   COALESCE(di.nombre, c.distrito) AS distrito,
+                   c.zona
+            FROM comedores c
+            LEFT JOIN departamentos d ON d.id = c.departamento_id
+            LEFT JOIN provincias p ON p.id = c.provincia_id
+            LEFT JOIN distritos di ON di.id = c.distrito_id
+            WHERE c.nombre ILIKE %s OR c.departamento ILIKE %s
+               OR c.ciudad ILIKE %s OR c.distrito ILIKE %s
+               OR d.nombre ILIKE %s OR p.nombre ILIKE %s OR di.nombre ILIKE %s
+            ORDER BY c.nombre
             LIMIT 15;
-        """, (like, like, like, like))
+        """, (like, like, like, like, like, like, like))
         return cur.fetchall()
     finally:
         cur.close()
@@ -217,23 +289,34 @@ def verificar_membresia(usuario_id: int, comedor_id: int = None,
 
 
 # ==========================================
-# CRUD DE COMEDORES (COM-21)
+# CRUD DE COMEDORES (COM-21 + COM-44)
 # ==========================================
 @router.post("", status_code=201)
 def crear_comedor(data: ComedorCreate, db=Depends(get_db)):
-    """Crea un comedor. Regla COM-21/COM-22: exclusivo del Administrador de Sistemas."""
+    """
+    Crea un comedor. Regla COM-21/COM-22: exclusivo del Administrador de Sistemas.
+    COM-44: recibe los FK de la cascada (departamento_id/provincia_id/distrito_id),
+    valida su existencia y jerarquía, resuelve los nombres y los inserta junto con los
+    FK (cache de texto para filtros legacy).
+    """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         if not es_admin_sistema(cur, data.usuario_solicitante_id):
             raise HTTPException(status_code=403,
-                            detail="Solo el Administrador del Sistema puede crear comedores.")
+                                detail="Solo el Administrador del Sistema puede crear comedores.")
+
+        # COM-44: resolver nombres desde la cascada y validar jerarquía
+        nombres = _resolver_ubicacion(cur, data.departamento_id, data.provincia_id, data.distrito_id)
+
         cur.execute("""
             INSERT INTO comedores
-            (departamento, ciudad, distrito, zona, nombre, direccion, link_ubicacion, fecha_fundacion)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                (departamento_id, provincia_id, distrito_id,
+                 departamento, ciudad, distrito, zona, nombre, direccion, link_ubicacion, fecha_fundacion)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id;
-        """, (data.departamento, data.ciudad, data.distrito, data.zona,
-              data.nombre, data.direccion, data.link_ubicacion, data.fecha_fundacion))
+        """, (data.departamento_id, data.provincia_id, data.distrito_id,
+              nombres['departamento'], nombres['ciudad'], nombres['distrito'],
+              data.zona, data.nombre, data.direccion, data.link_ubicacion, data.fecha_fundacion))
         nuevo_id = cur.fetchone()["id"]
         db.commit()
         return {"id": nuevo_id, "message": "Comedor creado exitosamente."}
@@ -250,10 +333,20 @@ def crear_comedor(data: ComedorCreate, db=Depends(get_db)):
 
 @router.get("/{comedor_id}")
 def obtener_comedor(comedor_id: int, db=Depends(get_db)):
-    """Detalle de un comedor por id."""
+    """Detalle de un comedor por id. COM-44: incluye nombres resueltos desde la cascada."""
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
-        cur.execute("SELECT * FROM comedores WHERE id = %s;", (comedor_id,))
+        cur.execute("""
+            SELECT c.*,
+                   d.nombre AS departamento_nombre,
+                   p.nombre AS provincia_nombre,
+                   di.nombre AS distrito_nombre
+            FROM comedores c
+            LEFT JOIN departamentos d ON d.id = c.departamento_id
+            LEFT JOIN provincias p ON p.id = c.provincia_id
+            LEFT JOIN distritos di ON di.id = c.distrito_id
+            WHERE c.id = %s;
+        """, (comedor_id,))
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Comedor no encontrado.")
@@ -264,17 +357,40 @@ def obtener_comedor(comedor_id: int, db=Depends(get_db)):
 
 @router.put("/{comedor_id}")
 def actualizar_comedor(comedor_id: int, data: ComedorUpdate, db=Depends(get_db)):
-    """Actualización parcial de comedor (admin sistema o quien gestiona el comedor)."""
+    """
+    Actualización parcial de comedor (admin sistema o quien gestiona el comedor).
+    COM-44: si llegan FK de la cascada, valida jerarquía y refresca los textos cacheados.
+    """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         if not _existe_comedor(cur, comedor_id):
             raise HTTPException(status_code=404, detail="Comedor no encontrado.")
         _validar_permiso_admin(cur, data.usuario_solicitante_id, comedor_id)
 
-        campos = {k: v for k, v in data.dict(exclude_unset=True).items()
+        campos = {k: v for k, v in data.model_dump(exclude_unset=True).items()
                   if k != "usuario_solicitante_id" and v is not None}
         if not campos:
             raise HTTPException(status_code=400, detail="No hay campos para actualizar.")
+
+        # COM-44: si cambian FK, resolver nombres y refrescar la cache
+        fk_keys = ("departamento_id", "provincia_id", "distrito_id")
+        if any(k in campos for k in fk_keys):
+            # Usar el nuevo valor si viene, o el actual para los que no vienen
+            cur.execute("SELECT departamento_id, provincia_id, distrito_id FROM comedores WHERE id = %s;",
+                        (comedor_id,))
+            actuales = cur.fetchone()
+            dep_id = campos.get("departamento_id", actuales["departamento_id"])
+            prov_id = campos.get("provincia_id", actuales["provincia_id"])
+            dist_id = campos.get("distrito_id", actuales["distrito_id"])
+            if dep_id and prov_id and dist_id:
+                nombres = _resolver_ubicacion(cur, dep_id, prov_id, dist_id)
+                campos["departamento_id"] = dep_id
+                campos["provincia_id"] = prov_id
+                campos["distrito_id"] = dist_id
+                campos["departamento"] = nombres["departamento"]
+                campos["ciudad"] = nombres["ciudad"]
+                campos["distrito"] = nombres["distrito"]
+
         sets = ", ".join([f"{k} = %s" for k in campos.keys()])
         cur.execute(f"UPDATE comedores SET {sets} WHERE id = %s RETURNING id;",
                     list(campos.values()) + [comedor_id])
@@ -325,7 +441,7 @@ def asociar_usuario(comedor_id: int, data: AsociarUsuarioInput, db=Depends(get_d
 
         if data.rol not in ROLES_COMEDOR:
             raise HTTPException(status_code=400,
-                            detail=f"Rol inválido. Permitidos: {', '.join(ROLES_COMEDOR)}.")
+                                detail=f"Rol inválido. Permitidos: {', '.join(ROLES_COMEDOR)}.")
         cur.execute("SELECT 1 FROM usuarios WHERE id = %s;", (data.usuario_id,))
         if not cur.fetchone():
             raise HTTPException(status_code=404, detail="Usuario no encontrado.")
@@ -333,7 +449,7 @@ def asociar_usuario(comedor_id: int, data: AsociarUsuarioInput, db=Depends(get_d
                     (data.usuario_id, comedor_id))
         if cur.fetchone():
             raise HTTPException(status_code=400,
-                            detail="El usuario ya está asociado a este comedor. Use el endpoint de estado para reactivarlo.")
+                                detail="El usuario ya está asociado a este comedor. Use el endpoint de estado para reactivarlo.")
         cur.execute("""
             INSERT INTO usuario_comedor (usuario_id, comedor_id, rol, estado_activo)
             VALUES (%s, %s, %s, TRUE)
@@ -382,7 +498,7 @@ def cambiar_estado_usuario(comedor_id: int, usuario_id: int,
                 """, (comedor_id, ROL_ADMIN_COMEDOR))
                 if cur.fetchone()["n"] <= 1:
                     raise HTTPException(status_code=400,
-                                    detail="No se puede desactivar al último administrador activo del comedor.")
+                                        detail="No se puede desactivar al último administrador activo del comedor.")
 
         if data.estado_activo:
             cur.execute("""
@@ -397,6 +513,7 @@ def cambiar_estado_usuario(comedor_id: int, usuario_id: int,
                     fecha_desactivacion = CURRENT_TIMESTAMP - INTERVAL '5 hours'
                 WHERE usuario_id = %s AND comedor_id = %s;
             """, (data.usuario_solicitante_id, usuario_id, comedor_id))
+
         db.commit()
         accion = "activado" if data.estado_activo else "desactivado"
         return {"message": f"Usuario {accion} en el comedor exitosamente."}

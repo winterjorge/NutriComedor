@@ -33,11 +33,19 @@ Historial de integraciones:
            se COMENTA _asegurar_membresias_piloto y su llamada. Los únicos usuarios de
            arranque son los dos admins canónicos (clave provisoria Admin2026); todos
            los demás se crean manualmente desde la interfaz (COM-26 / COM-39).
- - COM-37 (este archivo): paso 14 de esquema de Gestión de Ingredientes: tabla
+ - COM-37: paso de esquema de Gestión de Ingredientes: tabla
            ingredientes_precios_manuales (precios promedio manuales con vigencia
            opcional, por unidad estándar del ingrediente) y módulo de vista
            'gestion_ingredientes' ligado EXCLUSIVAMENTE al rol Administrador de
            Sistemas, con auditoría automática en logs en cada arranque.
+ - COM-44 (este archivo): la tabla `comedores` gana las columnas FK de la cascada
+           geográfica COM-27 (departamento_id, provincia_id, distrito_id). En volumen
+           nuevo las trae el CREATE TABLE; en volumen existente un paso idempotente
+           (ALTER ... ADD COLUMN IF NOT EXISTS + backfill condicional WHERE
+           departamento_id IS NULL) las agrega y completa desde los nombres de texto
+           legacy. El paso corre DESPUÉS del esquema de ubicaciones (COM-27) porque
+           las FK referencian departamentos/provincias/distritos. Con esto se elimina
+           la necesidad de cualquier script de migración de una sola ejecución.
 """
 import time
 import psycopg2
@@ -137,6 +145,9 @@ ADD COLUMN IF NOT EXISTS clave_provisoria BOOLEAN NOT NULL DEFAULT TRUE;
 
 # =========================================================================
 # DDL: COM-21 (MULTI-COMEDOR) - Catálogo de comedores a nivel nacional.
+# COM-44: el CREATE ya incluye las columnas FK de la cascada geográfica
+# (departamento_id, provincia_id, distrito_id) para volúmenes nuevos; en volúmenes
+# existentes las agrega el paso idempotente _aplicar_cascada_comedores (ver abajo).
 # =========================================================================
 DDL_COMEDORES = """
 CREATE TABLE IF NOT EXISTS comedores (
@@ -149,9 +160,55 @@ CREATE TABLE IF NOT EXISTS comedores (
     direccion TEXT,
     link_ubicacion TEXT,
     fecha_fundacion DATE,
+    -- COM-44: FK de la cascada COM-27 (fuente de verdad de la ubicación); los textos
+    -- anteriores se conservan como cache de nombres para filtros legacy.
+    departamento_id INT REFERENCES departamentos(id),
+    provincia_id INT REFERENCES provincias(id),
+    distrito_id INT REFERENCES distritos(id),
     fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP - INTERVAL '5 hours'
 );
 """
+
+# =========================================================================
+# COM-44: paso idempotente para volúmenes existentes. Agrega las columnas FK si
+# faltan y completa (backfill) desde los nombres de texto legacy. El backfill es
+# condicional (WHERE ..._id IS NULL), por lo que en el segundo arranque ya no hace nada.
+# =========================================================================
+DDL_COMEDORES_CASCADA = """
+ALTER TABLE comedores
+    ADD COLUMN IF NOT EXISTS departamento_id INT REFERENCES departamentos(id),
+    ADD COLUMN IF NOT EXISTS provincia_id INT REFERENCES provincias(id),
+    ADD COLUMN IF NOT EXISTS distrito_id INT REFERENCES distritos(id);
+"""
+
+BACKFILL_COMEDORES_CASCADA = [
+    # 1) Departamento por nombre de texto
+    """
+    UPDATE comedores c
+    SET departamento_id = d.id
+    FROM departamentos d
+    WHERE c.departamento_id IS NULL
+      AND LOWER(TRIM(c.departamento)) = LOWER(TRIM(d.nombre));
+    """,
+    # 2) Provincia: nombre de ciudad + departamento ya resuelto
+    """
+    UPDATE comedores c
+    SET provincia_id = p.id
+    FROM provincias p
+    WHERE c.provincia_id IS NULL
+      AND LOWER(TRIM(c.ciudad)) = LOWER(TRIM(p.nombre))
+      AND (c.departamento_id IS NULL OR p.departamento_id = c.departamento_id);
+    """,
+    # 3) Distrito: nombre de distrito + provincia ya resuelta
+    """
+    UPDATE comedores c
+    SET distrito_id = d.id
+    FROM distritos d
+    WHERE c.distrito_id IS NULL
+      AND LOWER(TRIM(c.distrito)) = LOWER(TRIM(d.nombre))
+      AND (c.provincia_id IS NULL OR d.provincia_id = c.provincia_id);
+    """,
+]
 
 # =========================================================================
 # DDL: COM-21 - Asociación usuario-comedor (muchos a muchos).
@@ -424,6 +481,20 @@ def _asegurar_membresia_sistema_admins(cur):
 
 
 # =========================================================================
+# COM-44: aplica la cascada geográfica a `comedores` de forma idempotente.
+# Debe ejecutarse DESPUÉS de aplicar_esquema_ubicaciones (las FK referencian
+# departamentos/provincias/distritos). Retorna el número de filas backfilled.
+# =========================================================================
+def _aplicar_cascada_comedores(cur):
+    cur.execute(DDL_COMEDORES_CASCADA)
+    backfilled = 0
+    for sentencia in BACKFILL_COMEDORES_CASCADA:
+        cur.execute(sentencia)
+        backfilled += cur.rowcount or 0
+    return backfilled
+
+
+# =========================================================================
 # COM-40 v2 (trazabilidad): función COMENTADA. En COM-40 v1 aseguraba la membresía
 # Directivo/Presidente del comedor default para el usuario piloto del seed
 # (DNI 43604221). Con COM-40 v2 la carga inicial NO crea usuarios de comedor ni les
@@ -565,8 +636,9 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
     purga de membresías de comedor de admins.
     COM-40 v2: el arranque NO crea usuarios de comedor ni membresías de piloto;
     los únicos usuarios creados son los admins canónicos 00000000 y 99999999.
-    COM-37: paso 14 de esquema de Gestión de Ingredientes (precios manuales con
+    COM-37: paso de esquema de Gestión de Ingredientes (precios manuales con
     vigencia + módulo 'gestion_ingredientes' exclusivo del Admin) con auditoría.
+    COM-44: cascada geográfica de comedores (FK + backfill idempotente) con auditoría.
     """
     conn = None
     for intento in range(1, reintentos + 1):
@@ -642,6 +714,18 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
                   AND r.nombre ILIKE 'administrador de sistema%';
             """)
             enlaces_gi = int(cur.fetchone()['n'])
+            # 14. COM-44: cascada geográfica de comedores (FK + backfill idempotente).
+            #     Debe ir después del paso 9 (ubicaciones) porque las FK referencian
+            #     departamentos/provincias/distritos.
+            backfill_comedores = _aplicar_cascada_comedores(cur)
+            cur.execute("""
+                SELECT COUNT(*) AS total,
+                       COUNT(departamento_id) AS con_fk
+                FROM comedores;
+            """)
+            fila_cascada = cur.fetchone()
+            comedores_total = int(fila_cascada['total'] or 0)
+            comedores_con_fk = int(fila_cascada['con_fk'] or 0)
             conn.commit()
             cur.close()
             if migrados:
@@ -664,9 +748,16 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
             if not tabla_pm_ok or enlaces_gi < 1:
                 print("[BOOTSTRAP] COM-37: [AVISO] Esquema de gestión de ingredientes incompleto; "
                       "se reintentará en el próximo arranque.")
+            # COM-44: auditoría de la cascada geográfica de comedores
+            print(f"[BOOTSTRAP] COM-44: cascada de comedores -> backfill de este arranque={backfill_comedores} fila(s); "
+                  f"comedores con FK geográfica={comedores_con_fk}/{comedores_total}.")
+            if comedores_total > 0 and comedores_con_fk < comedores_total:
+                print("[BOOTSTRAP] COM-44: [AVISO] Hay comedores sin FK geográfica resuelta "
+                      "(nombres de texto no coinciden con el catálogo COM-27); se reintentará el backfill en el próximo arranque.")
             print("[BOOTSTRAP] Esquema dinámico verificado/creado correctamente "
                   "(incluye ubicación COM-27, K-means COM-5, propuestas COM-8, módulos ML COM-36, "
-                  "separación de deberes COM-40/COM-40 v2 y gestión de ingredientes COM-37).")
+                  "separación de deberes COM-40/COM-40 v2, gestión de ingredientes COM-37 "
+                  "y cascada de comedores COM-44).")
             return True
         except Exception as e:
             print(f"[BOOTSTRAP] Intento {intento}/{reintentos} fallido: {e}")
