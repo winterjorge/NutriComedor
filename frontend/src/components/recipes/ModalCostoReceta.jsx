@@ -1,24 +1,23 @@
 /**
  * components/recipes/ModalCostoReceta.jsx
  * Objetivo: Modal "Evaluar" del Recetario: desglose del costo de una receta en una
- *           fecha dada (unidad de USO, insumo seleccionado real/predicho/manual y costo
- *           parcial) + totales por receta y por ración.
+ *           fecha dada, agrupado por componente (COM-48), con totales por receta y
+ *           por ración.
  * Historial:
  *  - Sprint 2: versión original autoconsultante con filas rojas sin precio y aviso ámbar.
- *  - COM-37 (roto): variante que esperaba `costoData` por props; comentada.
- *  - COM-37 v2: auto-fetch + filas manuales ("Obtenido de la Base de Datos") + badge de
- *    costo completo + formulario inline de precio manual (solo Admin).
- *  - COM-37 v5/v6: botón "Asignar insumo/precio" por fila sin precio (solo Admin) con
- *    modal simplificado de un solo ingrediente (vincular scraper o crear manual).
- *  - COM-37 v8: confirmación "Vincular y fusionar" cuando el insumo pertenece a otro
- *    ingrediente (fusión de sinónimos, COM-37 v8).
- *  - COM-48 (este archivo): el detalle se AGRUPA POR COMPONENTE (Ensalada, Plato de
- *    fondo, Refresco, Fruta...) con encabezado de sección y SUBTOTAL por componente,
- *    usando componente_nombre/componente_orden que expone el optimizador. Las filas
- *    conservan su estilo por fuente (real / PREDICHO / manual / sin precio) y todas las
- *    funciones anteriores (asignar insumo/precio, fusión, badges, avisos) se conservan.
+ *  - COM-37 v2/v5/v6: filas manuales ("Obtenido de la Base de Datos"), badge de costo
+ *    completo y botón "Asignar insumo/precio" con modal simplificado (vincular scraper
+ *    o crear insumo manual con unidad+precio+vigencia+equivalencia).
+ *  - COM-37 v8: confirmación "Vincular y fusionar" para sinónimos.
+ *  - COM-48: detalle agrupado por componente con subtotales.
+ *  - COM-49 (este archivo): cada fila muestra la AUDITORÍA del costeo debajo del
+ *    insumo seleccionado: cantidad × gramos_por_unidad = gramos_totales @ S/ ppg por
+ *    gramo (precio de compra y unidad de compra), para validar a simple vista que el
+ *    costo corresponde a la porción real de la línea (ej. 0.5 Kg × 1000 g = 500 g ×
+ *    S/ 0.012/g = S/ 6.00). El subtotal y el costo por ración reflejan ahora el costo
+ *    sin piso de 0.10; el valor con piso se conserva solo como referencia de compra.
  * Uso: Montado por RecipesView.jsx con props { isOpen, onClose, receta, fecha, onChangeFecha }.
- * Referencia: tickets COM-37 / COM-48 (solo trazabilidad).
+ * Referencia: tickets COM-37 / COM-48 / COM-49 (solo trazabilidad).
  */
 import React, { useState, useEffect, useMemo } from 'react';
 import {
@@ -28,12 +27,6 @@ import {
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 
-// COM-37 (trazabilidad): variante rota que esperaba datos por props, comentada:
-// export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, costoData }) => {
-//     if (!isOpen || !costoData) return null;   // <- RecipesView nunca envió costoData
-//     ...
-// };
-
 export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha }) => {
     const { usuario } = useAuth();
     const esAdminSistema = usuario?.rol === 'Administrador Sistema';
@@ -42,11 +35,9 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
     const [cargando, setCargando] = useState(false);
     const [fechaLocal, setFechaLocal] = useState(fecha || new Date().toISOString().split('T')[0]);
 
-    // COM-37 v5: catálogo de ingredientes (unidad de uso por defecto) y unidades
     const [ingPorId, setIngPorId] = useState({});
     const [unidades, setUnidades] = useState([]);
 
-    // COM-37 v5/v6: modal simplificado "Asignar insumo/precio" (una fila sin precio)
     const [modalAsignar, setModalAsignar] = useState(null);
     const [tabAsignar, setTabAsignar] = useState('scraper');
     const [qAsignar, setQAsignar] = useState('');
@@ -60,7 +51,6 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
     const [guardandoAsignar, setGuardandoAsignar] = useState(false);
     const [errorAsignar, setErrorAsignar] = useState('');
     const [exitoPrecio, setExitoPrecio] = useState('');
-    // COM-37 v8: confirmación de fusión cuando el insumo pertenece a otro ingrediente
     const [confirmFusion, setConfirmFusion] = useState(null);
 
     const cargarCosto = async (fechaEval) => {
@@ -100,7 +90,6 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [isOpen, receta]);
 
-    // COM-37 v5: si es admin y hay filas sin precio, carga catálogo y unidades
     useEffect(() => {
         if (!isOpen || !esAdminSistema) return;
         const faltantes = (datos?.detalle_insumos || []).filter(d => d.error);
@@ -176,7 +165,6 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
         }
     };
 
-    // COM-37 v8: si el insumo pertenece a OTRO ingrediente, pedir confirmación de fusión
     const pedirVincular = (ins) => {
         if (ins.ingrediente_id && ins.ingrediente_id !== modalAsignar.ingrediente_id) {
             setConfirmFusion(ins);
@@ -248,9 +236,6 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
         }
     };
 
-    // COM-37 v2 (trazabilidad): formulario inline legacy de precio manual por
-    // ingrediente, COMENTADO (reemplazado por el modal simplificado v5/v8).
-
     if (!isOpen || !receta) return null;
 
     const sinPrecio = datos?.ingredientes_sin_precio || 0;
@@ -259,11 +244,25 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
     const inputCls = "w-full px-2 py-1.5 border border-slate-300 rounded-lg text-xs outline-none focus:ring-2 focus:ring-emerald-500";
     const labelCls = "text-[10px] font-bold text-slate-600 block mb-0.5";
 
-    // ---------- Render de una fila de ingrediente (COM-48: reutilizado por grupo) ----------
+    // ---------- COM-49: línea de auditoría del costeo por fila ----------
+    const auditoriaLinea = (d) => {
+        if (d.error || d.gramos_totales == null) return null;
+        const precioCompra = d.precio_por_unidad_compra != null
+            ? ` · precio compra S/ ${Number(d.precio_por_unidad_compra).toFixed(2)}/${d.unidad_compra_abrev || '?'}`
+            : '';
+        return (
+            <span className="block text-[10px] text-slate-400 mt-0.5">
+                {d.cantidad} {d.unidad_uso_abrev} × {d.gramos_por_unidad} g = {d.gramos_totales} g
+                {' '}@ S/ {Number(d.ppg).toFixed(4)}/g{precioCompra}
+                {d.equivalencia_usada ? ' · equivalencia admin' : ''}
+            </span>
+        );
+    };
+
     const renderFila = (d, key) => (
         <tr key={key} className={d.error || d.es_manual ? 'bg-red-50' : 'hover:bg-slate-50'}>
-            <td className="p-2 font-medium">{d.ingrediente}</td>
-            <td className="p-2">
+            <td className="p-2 font-medium align-top">{d.ingrediente}</td>
+            <td className="p-2 align-top">
                 {d.error ? (
                     <span className="text-red-600 text-xs flex items-center gap-1 flex-wrap">
                         <AlertCircle size={12} /> {d.error}
@@ -279,16 +278,21 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
                 ) : d.es_manual ? (
                     <span className="text-red-600 text-xs flex items-center gap-1 font-semibold">
                         <Database size={12} /> {d.insumo_comprado}
+                        {auditoriaLinea(d)}
                     </span>
                 ) : d.es_prediccion ? (
                     <span className="text-amber-600 text-xs flex items-center gap-1 font-semibold">
                         <TrendingUp size={12} /> {d.insumo_comprado}
+                        {auditoriaLinea(d)}
                     </span>
                 ) : (
-                    <span className="text-slate-700">{d.insumo_comprado}</span>
+                    <span className="text-slate-700">
+                        {d.insumo_comprado}
+                        {auditoriaLinea(d)}
+                    </span>
                 )}
             </td>
-            <td className={`p-2 text-right font-bold ${d.error ? 'text-red-600' : 'text-emerald-700'}`}>
+            <td className={`p-2 text-right font-bold align-top ${d.error ? 'text-red-600' : 'text-emerald-700'}`}>
                 {d.error ? <span>S/ 0.00</span> : `S/${d.costo_parcial?.toFixed(2) || '0.00'}`}
             </td>
         </tr>
@@ -297,7 +301,6 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm">
             <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl overflow-hidden flex flex-col max-h-[90vh]">
-                {/* Encabezado */}
                 <div className="flex justify-between items-center p-5 border-b bg-emerald-600 text-white">
                     <h3 className="font-bold text-lg">{receta.nombre}</h3>
                     <button onClick={onClose} title="Cerrar">
@@ -306,7 +309,6 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
                 </div>
 
                 <div className="p-6 overflow-y-auto">
-                    {/* Fecha + costo por ración */}
                     <div className="flex justify-between items-end mb-4 gap-3 flex-wrap">
                         <input
                             type="date"
@@ -321,7 +323,6 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
                         )}
                     </div>
 
-                    {/* Badge de completitud de precios (regla del flujo del comedor) */}
                     {datos && !datos.error && (
                         <div className={`mb-4 px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 ${
                             completo ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
@@ -345,7 +346,6 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
                                         <th className="p-2 text-right">Costo</th>
                                     </tr>
                                 </thead>
-                                {/* COM-48: cuerpo agrupado por componente con subtotales */}
                                 <tbody>
                                     {gruposComponente.map(g => (
                                         <React.Fragment key={g.nombre}>
@@ -363,7 +363,6 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
                                 </tbody>
                             </table>
 
-                            {/* Avisos inferiores */}
                             {sinPrecio > 0 && !esAdminSistema && (
                                 <div className="mt-4 bg-amber-50 border border-amber-200 rounded-lg p-3 text-amber-800 text-sm">
                                     <p className="font-semibold mb-1">⚠ Ingredientes sin precio:</p>
@@ -425,7 +424,6 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
                         </div>
 
                         <div className="p-4 overflow-y-auto space-y-4">
-                            {/* Pestañas */}
                             <div className="grid grid-cols-2 gap-2">
                                 <button
                                     onClick={() => setTabAsignar('scraper')}
@@ -447,7 +445,6 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
                                 </div>
                             )}
 
-                            {/* COM-37 v8: confirmación de fusión de sinónimos */}
                             {confirmFusion && (
                                 <div className="p-3 bg-amber-50 border border-amber-300 rounded-xl text-amber-900 text-xs space-y-2">
                                     <p className="font-bold flex items-center gap-1"><GitMerge size={13} /> El insumo pertenece a otro ingrediente</p>
@@ -476,7 +473,6 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
                                 </div>
                             )}
 
-                            {/* Vía 1: buscar y vincular insumo del scraper */}
                             {tabAsignar === 'scraper' && !confirmFusion && (
                                 <div className="space-y-2">
                                     <div className="flex gap-2">
@@ -522,7 +518,6 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
                                 </div>
                             )}
 
-                            {/* Vía 2: registrar insumo manual con precio y equivalencia */}
                             {tabAsignar === 'manual' && (
                                 <div className="space-y-3">
                                     <div className="grid grid-cols-2 gap-2">
