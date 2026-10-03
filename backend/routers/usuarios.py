@@ -7,10 +7,24 @@ Objetivo: Endpoints del módulo de gestión de usuarios: creación y edición de
           edición de la política de contraseñas.
 Uso: Registrado en main.py con prefijo /api/v1.
 Permisos (COM-26): la matriz de creación por perfil y el alcance del solicitante
-     (municipalidades o comedores permitidos) se validan con permisos.py.
+          (municipalidades o comedores permitidos) se validan con permisos.py.
+Historial:
+ - COM-26: flujo por perfil con alcance validado y cargos permanentes no repetibles.
+ - COM-56 (este archivo): REFUERZO BACKEND (punto 3 confirmado):
+     * `_anotar_comedores_con_municipalidad`: cada comedor del alcance (contexto de
+       creación y detalle de flujo) lleva `municipalidad_id` (municipalidad de su
+       distrito, JOIN por FK con fallback por nombres) y los ids de la cascada
+       (departamento_id/provincia_id/distrito_id) para que el frontend filtre los
+       "comedores de acceso" por jurisdicción SIN comparar textos y pueda precargar
+       la cascada al editar.
+     * `_anotar_municipalidades_con_geo`: las municipalidades del detalle llevan sus
+       ids de cascada para precargar la ubicación en edición de administrativos.
+     * Ninguna validación existente se endurece ni se relaja; solo se enriquece el
+       payload de lectura. Lo anterior queda comentado donde se reemplaza.
 """
 from fastapi import APIRouter, Depends, HTTPException
 from psycopg2.extras import RealDictCursor
+
 from database import get_db, get_parametros_dict
 from schemas.gestion_usuarios import (
     UsuarioCreate, UsuarioUpdate,
@@ -74,6 +88,114 @@ def _comedores_del_usuario(cur, usuario_id: int):
     return [row["comedor_id"] for row in cur.fetchall()]
 
 
+def _columnas_tabla(cur, tabla: str):
+    """COM-56: nombres de columnas de una tabla pública (detección defensiva)."""
+    cur.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = 'public' AND table_name = %s;",
+        (tabla,))
+    return {r["column_name"] for r in cur.fetchall()}
+
+
+def _anotar_comedores_con_municipalidad(cur, comedores):
+    """
+    COM-56 (refuerzo): enriquece cada comedor del alcance con:
+      * municipalidad_id: municipalidad del distrito del comedor (FK
+        municipalidades.distrito_id = comedores.distrito_id; fallback por nombres
+        distrito+provincia si la FK no existiera).
+      * departamento_id / provincia_id / distrito_id: ids de la cascada COM-27 para
+        precargar la ubicación geográfica en el modal de edición.
+    El frontend usa municipalidad_id para filtrar "comedores de acceso" por
+    jurisdicción sin comparar textos.
+    """
+    if not comedores:
+        return comedores
+    ids = [c["id"] for c in comedores]
+    cols_m = _columnas_tabla(cur, "municipalidades")
+    cols_c = _columnas_tabla(cur, "comedores")
+
+    # Ids geográficos de la cascada (comedores.distrito_id -> distritos)
+    geo = {}
+    if "distrito_id" in cols_c:
+        cur.execute("""
+            SELECT c.id AS comedor_id, d.id AS distrito_id,
+                   d.provincia_id, d.departamento_id
+            FROM comedores c
+            JOIN distritos d ON d.id = c.distrito_id
+            WHERE c.id = ANY(%s);
+        """, (ids,))
+        for r in cur.fetchall():
+            geo[r["comedor_id"]] = {
+                "distrito_id": r["distrito_id"],
+                "provincia_id": r["provincia_id"],
+                "departamento_id": r["departamento_id"],
+            }
+
+    # municipalidad_id por FK de distrito
+    mapa_muni = {}
+    if "distrito_id" in cols_m and "distrito_id" in cols_c:
+        cur.execute("""
+            SELECT DISTINCT ON (c.id) c.id AS comedor_id, m.id AS municipalidad_id
+            FROM comedores c
+            JOIN municipalidades m ON m.distrito_id = c.distrito_id
+            WHERE c.id = ANY(%s)
+            ORDER BY c.id, m.id;
+        """, (ids,))
+        for r in cur.fetchall():
+            mapa_muni[r["comedor_id"]] = r["municipalidad_id"]
+
+    # Fallback por nombres (distrito + provincia) si la FK no resolviera nada
+    if not mapa_muni:
+        cur.execute("SELECT id, departamento, provincia, distrito FROM municipalidades;")
+        munis = cur.fetchall()
+        for c in comedores:
+            for m in munis:
+                if (m["distrito"] or "").strip().lower() == (c["distrito"] or "").strip().lower() and \
+                   (m["provincia"] or "").strip().lower() == (c["ciudad"] or "").strip().lower():
+                    mapa_muni[c["id"]] = m["id"]
+                    break
+
+    for c in comedores:
+        c["municipalidad_id"] = mapa_muni.get(c["id"])
+        g = geo.get(c["id"], {})
+        c["distrito_id"] = g.get("distrito_id")
+        c["provincia_id"] = g.get("provincia_id")
+        c["departamento_id"] = g.get("departamento_id")
+    return comedores
+
+
+def _anotar_municipalidades_con_geo(cur, municipalidades):
+    """
+    COM-56 (refuerzo): agrega departamento_id/provincia_id/distrito_id a cada
+    municipalidad (vía municipalidades.distrito_id -> distritos) para que el modal de
+    edición precargue la cascada de ubicación del administrativo.
+    """
+    if not municipalidades:
+        return municipalidades
+    cols_m = _columnas_tabla(cur, "municipalidades")
+    if "distrito_id" not in cols_m:
+        for m in municipalidades:
+            m["distrito_id"] = None
+            m["provincia_id"] = None
+            m["departamento_id"] = None
+        return municipalidades
+    ids = [m["id"] for m in municipalidades]
+    cur.execute("""
+        SELECT m.id AS municipalidad_id, d.id AS distrito_id,
+               d.provincia_id, d.departamento_id
+        FROM municipalidades m
+        JOIN distritos d ON d.id = m.distrito_id
+        WHERE m.id = ANY(%s);
+    """, (ids,))
+    geo = {r["municipalidad_id"]: r for r in cur.fetchall()}
+    for m in municipalidades:
+        g = geo.get(m["id"])
+        m["distrito_id"] = g["distrito_id"] if g else None
+        m["provincia_id"] = g["provincia_id"] if g else None
+        m["departamento_id"] = g["departamento_id"] if g else None
+    return municipalidades
+
+
 def _validar_grupo_rol_perfil(cur, data) -> None:
     """
     COM-26: valida que el grupo enviado corresponda al perfil objetivo y que el rol
@@ -86,7 +208,7 @@ def _validar_grupo_rol_perfil(cur, data) -> None:
     grupo = cur.fetchone()
     if not grupo or grupo["nombre"] != nombre_grupo_esperado:
         raise HTTPException(status_code=400,
-                        detail=f"El grupo no corresponde al perfil {data.perfil_objetivo}.")
+                            detail=f"El grupo no corresponde al perfil {data.perfil_objetivo}.")
     cur.execute("SELECT 1 FROM roles_grupo WHERE id = %s AND grupo_id = %s;",
                 (data.rol_id, data.grupo_id))
     if not cur.fetchone():
@@ -96,26 +218,26 @@ def _validar_grupo_rol_perfil(cur, data) -> None:
 def _validar_alcance(cur, solicitante_id: int, data) -> None:
     """
     COM-26: valida el alcance según el perfil objetivo:
-      - ADMINISTRATIVO: municipalidades obligatorias y dentro del alcance del solicitante.
-      - DIRECTIVO/OPERATIVO: comedores obligatorios, dentro del alcance, y cargos
-        permanentes no repetibles libres (Presidente/Tesorero/Secretario).
+    - ADMINISTRATIVO: municipalidades obligatorias y dentro del alcance del solicitante.
+    - DIRECTIVO/OPERATIVO: comedores obligatorios, dentro del alcance, y cargos
+      permanentes no repetibles libres (Presidente/Tesorero/Secretario).
     """
     if data.perfil_objetivo == PERFIL_ADMINISTRATIVO:
         if not data.municipalidad_ids:
             raise HTTPException(status_code=400,
-                            detail="Debe indicar al menos una municipalidad para el perfil Administrativo.")
+                                detail="Debe indicar al menos una municipalidad para el perfil Administrativo.")
         permitidas = {m["id"] for m in alcance_municipalidades(cur, solicitante_id)}
         if not set(data.municipalidad_ids) <= permitidas:
             raise HTTPException(status_code=403,
-                            detail="Solo puede asignar municipalidades a las que usted pertenece.")
+                                detail="Solo puede asignar municipalidades a las que usted pertenece.")
     elif data.perfil_objetivo in (PERFIL_DIRECTIVO, PERFIL_OPERATIVO):
         if not data.comedor_ids:
             raise HTTPException(status_code=400,
-                            detail="Debe indicar al menos un comedor para este perfil.")
+                                detail="Debe indicar al menos un comedor para este perfil.")
         permitidos = {c["id"] for c in alcance_comedores(cur, solicitante_id)}
         if not set(data.comedor_ids) <= permitidos:
             raise HTTPException(status_code=403,
-                            detail="Solo puede asignar comedores a los que usted pertenece.")
+                                detail="Solo puede asignar comedores a los que usted pertenece.")
         excluir = getattr(data, "_excluir_usuario_id", None)
         if es_cargo_no_repetible(cur, data.rol_id):
             for comedor_id in data.comedor_ids:
@@ -130,9 +252,9 @@ def _validar_alcance(cur, solicitante_id: int, data) -> None:
 def _insertar_membresias(cur, usuario_id: int, data) -> None:
     """
     COM-26: inserta las membresías del usuario según el perfil objetivo:
-      - Sistema: membresía global al grupo de sistema.
-      - Administrativo: membresía global + asociación a municipalidades.
-      - Directivo/Operativo: membresía por comedor + vínculo legacy usuario_comedor.
+    - Sistema: membresía global al grupo de sistema.
+    - Administrativo: membresía global + asociación a municipalidades.
+    - Directivo/Operativo: membresía por comedor + vínculo legacy usuario_comedor.
     """
     if data.perfil_objetivo == PERFIL_ADMIN_SISTEMA:
         cur.execute("""
@@ -170,7 +292,7 @@ def _insertar_membresias(cur, usuario_id: int, data) -> None:
 
 
 # ==========================================
-# CONTEXTO DE CREACIÓN (COM-26)
+# CONTEXTO DE CREACIÓN (COM-26 + COM-56)
 # ==========================================
 @router.get("/contexto-creacion")
 def contexto_creacion(usuario_solicitante_id: int, db=Depends(get_db)):
@@ -178,13 +300,15 @@ def contexto_creacion(usuario_solicitante_id: int, db=Depends(get_db)):
     COM-26: datos para el formulario dinámico de creación/edición de usuarios:
     perfil del creador, perfiles que puede crear, grupos/roles disponibles por perfil
     y alcance del solicitante (municipalidades y/o comedores permitidos).
+    COM-56: los comedores del alcance salen ANOTADOS con municipalidad_id e ids de
+    cascada (refuerzo backend) para el filtrado por jurisdicción en la UI.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         perfil_creador = obtener_perfil_usuario(cur, usuario_solicitante_id)
         if not perfil_creador:
             raise HTTPException(status_code=403,
-                            detail="Su usuario no tiene perfil asignado; no puede crear ni editar usuarios.")
+                                detail="Su usuario no tiene perfil asignado; no puede crear ni editar usuarios.")
         perfiles_permitidos = sorted(MATRIZ_CREACION_PERFILES.get(perfil_creador, set()))
 
         grupos_disponibles = []
@@ -209,6 +333,8 @@ def contexto_creacion(usuario_solicitante_id: int, db=Depends(get_db)):
             municipalidades = alcance_municipalidades(cur, usuario_solicitante_id)
         if PERFIL_DIRECTIVO in perfiles_permitidos or PERFIL_OPERATIVO in perfiles_permitidos:
             comedores = alcance_comedores(cur, usuario_solicitante_id)
+            # COM-56 (refuerzo): anotación con municipalidad_id y geo de cascada
+            comedores = _anotar_comedores_con_municipalidad(cur, comedores)
 
         return {
             "perfil_creador": perfil_creador,
@@ -243,7 +369,7 @@ def actualizar_politica_clave(data: PoliticaClaveUpdate, db=Depends(get_db)):
     try:
         if not puede_gestionar_politicas_clave(cur, data.usuario_solicitante_id):
             raise HTTPException(status_code=403,
-                            detail="Sin permiso: se requiere el privilegio de Políticas de Contraseñas.")
+                                detail="Sin permiso: se requiere el privilegio de Políticas de Contraseñas.")
         vigente = _politica_vigente(db)
         longitud_min = data.longitud_min if data.longitud_min is not None else int(vigente[PARAM_LONG_MIN])
         longitud_max = data.longitud_max if data.longitud_max is not None else int(vigente[PARAM_LONG_MAX])
@@ -292,8 +418,8 @@ def listar_usuarios(q: str = None, estado: str = None, comedor_id: int = None,
                     db=Depends(get_db), usuario_solicitante_id: int = None):
     """
     Lista usuarios con filtros:
-      - Con comedor_id: usuarios del comedor (requiere permiso de gestión del comedor).
-      - Sin comedor_id: listado global (requiere privilegio de gestión global).
+    - Con comedor_id: usuarios del comedor (requiere permiso de gestión del comedor).
+    - Sin comedor_id: listado global (requiere privilegio de gestión global).
     """
     if usuario_solicitante_id is None:
         raise HTTPException(status_code=400, detail="Debe indicar el usuario solicitante.")
@@ -304,7 +430,7 @@ def listar_usuarios(q: str = None, estado: str = None, comedor_id: int = None,
                 from permisos import puede_gestionar_usuarios_comedor
                 if not puede_gestionar_usuarios_comedor(cur, usuario_solicitante_id, comedor_id):
                     raise HTTPException(status_code=403,
-                                    detail="Sin permiso sobre los usuarios de este comedor.")
+                                        detail="Sin permiso sobre los usuarios de este comedor.")
             query = """
                 SELECT u.id, u.tipo_documento, u.documento_identidad, u.nombres,
                        u.apellido_paterno, u.apellido_materno, u.rol,
@@ -318,7 +444,7 @@ def listar_usuarios(q: str = None, estado: str = None, comedor_id: int = None,
         else:
             if not puede_gestionar_usuarios_global(cur, usuario_solicitante_id):
                 raise HTTPException(status_code=403,
-                                detail="Sin permiso: se requiere el privilegio de Gestión de Usuarios.")
+                                    detail="Sin permiso: se requiere el privilegio de Gestión de Usuarios.")
             query = """
                 SELECT id, tipo_documento, documento_identidad, nombres,
                        apellido_paterno, apellido_materno, rol,
@@ -327,13 +453,13 @@ def listar_usuarios(q: str = None, estado: str = None, comedor_id: int = None,
                 WHERE 1=1
             """
             params = []
-        if q:
-            query += " AND (documento_identidad ILIKE %s OR nombres ILIKE %s OR apellido_paterno ILIKE %s)"
-            params.extend([f"%{q}%", f"%{q}%", f"%{q}%"])
-        if estado == "activos":
-            query += " AND estado_activo = TRUE"
-        elif estado == "inactivos":
-            query += " AND estado_activo = FALSE"
+            if q:
+                query += " AND (documento_identidad ILIKE %s OR nombres ILIKE %s OR apellido_paterno ILIKE %s)"
+                params.extend([f"%{q}%", f"%{q}%", f"%{q}%"])
+            if estado == "activos":
+                query += " AND estado_activo = TRUE"
+            elif estado == "inactivos":
+                query += " AND estado_activo = FALSE"
         query += " ORDER BY nombres, apellido_paterno;"
         cur.execute(query, params)
         return cur.fetchall()
@@ -349,19 +475,21 @@ def crear_usuario(data: UsuarioCreate, db=Depends(get_db)):
     """
     COM-26: crea un usuario con membresías y alcance según el perfil objetivo,
     aplicando la matriz de creación del solicitante:
-      - Admin de Sistemas: crea Sistema (sin datos extra), Administrativo (municipalidades)
-        y Directivo (comedores). No crea Operativo.
-      - Administrativo: solo crea Administrativo para sus propias municipalidades.
-      - Directivo: crea Directivo y Operativo para sus propios comedores (cargos
-        permanentes no repetibles validados).
-      - Operativo: no crea usuarios.
+    - Admin de Sistemas: crea Sistema (sin datos extra), Administrativo (municipalidades)
+      y Directivo (comedores). No crea Operativo.
+    - Administrativo: solo crea Administrativo para sus propias municipalidades.
+    - Directivo: crea Directivo y Operativo para sus propios comedores (cargos
+      permanentes no repetibles validados).
+    - Operativo: no crea usuarios.
     La clave inicial es provisoria (cambio obligatorio en el primer login).
+    COM-56: para Administrativos el frontend envía UNA municipalidad (la de la cascada);
+    el backend sigue aceptando la lista y validando alcance (sin cambios de contrato).
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         if not puede_crear_perfil(cur, data.usuario_solicitante_id, data.perfil_objetivo):
             raise HTTPException(status_code=403,
-                            detail=f"Su perfil no permite crear usuarios del perfil {data.perfil_objetivo}.")
+                                detail=f"Su perfil no permite crear usuarios del perfil {data.perfil_objetivo}.")
         _validar_grupo_rol_perfil(cur, data)
         cur.execute("SELECT 1 FROM usuarios WHERE documento_identidad = %s;",
                     (data.documento_identidad.strip(),))
@@ -387,7 +515,6 @@ def crear_usuario(data: UsuarioCreate, db=Depends(get_db)):
         ))
         nuevo_id = cur.fetchone()["id"]
         _insertar_membresias(cur, nuevo_id, data)
-
         db.commit()
         return {"id": nuevo_id,
                 "message": "Usuario creado exitosamente. Deberá cambiar su clave en el primer ingreso."}
@@ -408,22 +535,24 @@ def editar_usuario(usuario_id: int, data: UsuarioUpdate, db=Depends(get_db)):
     """
     COM-26: edita los datos personales del usuario y reemplaza las membresías del grupo
     correspondiente al perfil objetivo. Reglas:
-      - El solicitante debe poder crear el perfil objetivo (matriz de creación).
-      - No se permite la autoedición desde este flujo (evita auto-desasignaciones).
-      - Alcance validado como en la creación; los cargos permanentes no repetibles se
-        validan excluyendo al propio usuario editado.
-      - Comedores/municipalidades retirados de la lista quedan desactivados (auditable).
+    - El solicitante debe poder crear el perfil objetivo (matriz de creación).
+    - No se permite la autoedición desde este flujo (evita auto-desasignaciones).
+    - Alcance validado como en la creación; los cargos permanentes no repetibles se
+      validan excluyendo al propio usuario editado.
+    - Comedores/municipalidades retirados de la lista quedan desactivados (auditable).
+    COM-56: para Administrativos el frontend envía UNA municipalidad (la de la cascada);
+    las municipales legacy adicionales quedan desactivadas por el flujo existente.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         if usuario_id == data.usuario_solicitante_id:
             raise HTTPException(status_code=400,
-                            detail="No puedes editar tu propia cuenta desde este flujo.")
+                                detail="No puedes editar tu propia cuenta desde este flujo.")
         if not _existe_usuario(cur, usuario_id):
             raise HTTPException(status_code=404, detail="Usuario no encontrado.")
         if not puede_crear_perfil(cur, data.usuario_solicitante_id, data.perfil_objetivo):
             raise HTTPException(status_code=403,
-                            detail=f"Su perfil no permite editar usuarios del perfil {data.perfil_objetivo}.")
+                                detail=f"Su perfil no permite editar usuarios del perfil {data.perfil_objetivo}.")
         _validar_grupo_rol_perfil(cur, data)
 
         if data.documento_identidad:
@@ -450,7 +579,6 @@ def editar_usuario(usuario_id: int, data: UsuarioUpdate, db=Depends(get_db)):
             data.nombres, data.apellido_paterno, data.apellido_materno,
             data.fecha_nacimiento, usuario_id,
         ))
-
         cur.execute("DELETE FROM usuario_grupo WHERE usuario_id = %s AND grupo_id = %s;",
                     (usuario_id, data.grupo_id))
         _insertar_membresias(cur, usuario_id, data)
@@ -477,7 +605,6 @@ def editar_usuario(usuario_id: int, data: UsuarioUpdate, db=Depends(get_db)):
                             fecha_desactivacion = CURRENT_TIMESTAMP - INTERVAL '5 hours'
                         WHERE usuario_id = %s AND comedor_id = %s;
                     """, (data.usuario_solicitante_id, usuario_id, comedor_id))
-
         db.commit()
         return {"message": "Usuario actualizado exitosamente."}
     except HTTPException:
@@ -490,7 +617,7 @@ def editar_usuario(usuario_id: int, data: UsuarioUpdate, db=Depends(get_db)):
 
 
 # ==========================================
-# DETALLE DE FLUJO PARA EDICIÓN (COM-26)
+# DETALLE DE FLUJO PARA EDICIÓN (COM-26 + COM-56)
 # ==========================================
 @router.get("/{usuario_id}/detalle-flujo")
 def detalle_flujo_usuario(usuario_id: int, usuario_solicitante_id: int, db=Depends(get_db)):
@@ -499,6 +626,9 @@ def detalle_flujo_usuario(usuario_id: int, usuario_solicitante_id: int, db=Depen
     grupo/rol actual y alcance vigente (municipalidades y/o comedores del usuario).
     Permiso: el solicitante debe poder editar el perfil del usuario objetivo
     (matriz de creación por perfil).
+    COM-56 (refuerzo): municipalidades y comedores salen anotados con los ids de la
+    cascada (y los comedores con municipalidad_id) para precargar la ubicación y
+    filtrar comedores por jurisdicción en el modal de edición.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -507,10 +637,10 @@ def detalle_flujo_usuario(usuario_id: int, usuario_solicitante_id: int, db=Depen
         perfil_objetivo = obtener_perfil_usuario(cur, usuario_id)
         if not perfil_objetivo:
             raise HTTPException(status_code=400,
-                            detail="El usuario no tiene membresías activas para editar en este flujo.")
+                                detail="El usuario no tiene membresías activas para editar en este flujo.")
         if not puede_crear_perfil(cur, usuario_solicitante_id, perfil_objetivo):
             raise HTTPException(status_code=403,
-                            detail="Su perfil no permite editar usuarios de este perfil.")
+                                detail="Su perfil no permite editar usuarios de este perfil.")
 
         cur.execute("""
             SELECT id, tipo_documento, documento_identidad, nombres, apellido_paterno,
@@ -541,6 +671,8 @@ def detalle_flujo_usuario(usuario_id: int, usuario_solicitante_id: int, db=Depen
                 ORDER BY m.nombre;
             """, (usuario_id,))
             municipalidades = cur.fetchall()
+            # COM-56 (refuerzo): geo de cascada para precargar la ubicación
+            municipalidades = _anotar_municipalidades_con_geo(cur, municipalidades)
         elif perfil_objetivo in (PERFIL_DIRECTIVO, PERFIL_OPERATIVO):
             cur.execute("""
                 SELECT DISTINCT c.id, c.nombre, c.departamento, c.ciudad, c.distrito
@@ -551,6 +683,8 @@ def detalle_flujo_usuario(usuario_id: int, usuario_solicitante_id: int, db=Depen
                 ORDER BY c.nombre;
             """, (usuario_id,))
             comedores = cur.fetchall()
+            # COM-56 (refuerzo): municipalidad_id + geo de cascada por comedor
+            comedores = _anotar_comedores_con_municipalidad(cur, comedores)
 
         return {
             "usuario": usuario,
@@ -574,12 +708,12 @@ def cambiar_estado_cuenta(usuario_id: int, data: CambiarEstadoCuentaInput, db=De
     try:
         if not puede_gestionar_usuarios_global(cur, data.usuario_solicitante_id):
             raise HTTPException(status_code=403,
-                            detail="Sin permiso: se requiere el privilegio de Gestión de Usuarios.")
+                                detail="Sin permiso: se requiere el privilegio de Gestión de Usuarios.")
         if not _existe_usuario(cur, usuario_id):
             raise HTTPException(status_code=404, detail="Usuario no encontrado.")
         if usuario_id == data.usuario_solicitante_id:
             raise HTTPException(status_code=400,
-                            detail="No puedes bloquear o desbloquear tu propia cuenta.")
+                                detail="No puedes bloquear o desbloquear tu propia cuenta.")
         cur.execute("UPDATE usuarios SET estado_activo = %s WHERE id = %s;",
                     (data.estado_activo, usuario_id))
         db.commit()
@@ -617,7 +751,7 @@ def desbloquear_reintentos(usuario_id: int, data: DesbloqueoReintentosInput, db=
                     break
         if not autorizado:
             raise HTTPException(status_code=403,
-                            detail="Sin permiso: requiere Gestión de Usuarios global o ser admin de un comedor del usuario.")
+                                detail="Sin permiso: requiere Gestión de Usuarios global o ser admin de un comedor del usuario.")
         cur.execute("""
             UPDATE usuarios
             SET bloqueado = FALSE, intentos_fallidos = 0
