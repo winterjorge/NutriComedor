@@ -8,28 +8,36 @@
  *  - COM-16: fix de scroll/recorte del modal (max-h-[90vh], cuerpo scrolleable, pie fijo).
  *  - COM-18: confirmación modal antes de Guardar/Cancelar/Eliminar y ModalExito.
  *  - COM-45: campo "Raciones *" obligatorio (entero > 0, default 4).
- *  - COM-48 (este archivo): esquema multi-componente:
- *      * Cada fila de ingrediente pertenece a un componente (selector implícito por
- *        sección: las filas se agrupan visualmente bajo su componente y se agregan con
- *        el botón de cada sección). El mismo ingrediente puede repetirse en componentes
- *        distintos con cantidades INDEPENDIENTES.
- *      * Catálogo de componentes cargado de api.getComponentesReceta() (extensible: si
- *        mañana existe 'Sopa', aparece solo).
- *      * Edición: sincronización mediante api.limpiarIngredientesReceta(recetaId) +
- *        re-grabado de todas las filas con su componente (el borrado por ingrediente
- *        del esquema anterior perdería filas duplicadas en varios componentes); el
- *        bucle anterior queda COMENTADO por trazabilidad.
- *      * Validación: componente obligatorio por fila (garantizado por la sección),
- *        ingrediente/cantidad/unidad obligatorios por fila, al menos 1 fila en total.
+ *  - COM-48: esquema multi-componente: filas agrupadas por componente con cantidades
+ *    independientes por componente; edición sincronizada vía limpiarIngredientesReceta
+ *    + re-grabado de filas con componente explícito.
+ *  - COM-48 v2 (este archivo): alta de ingredientes DE CATÁLOGO sin salir del modal:
+ *      * Botón "+ Nuevo" junto al selector de ingrediente de cada fila.
+ *      * Sub-modal con nombre, categoría (opcional), unidad de uso y peso estimado,
+ *        validado en UI antes de enviar (nombre >= 2, unidad obligatoria, peso > 0).
+ *      * Al guardar: api.createIngredienteDesdeReceta (gate backend módulo 'recetario'
+ *        o Admin), recarga el catálogo disponible y DEJA EL NUEVO INGREDIENTE
+ *        SELECCIONADO EN LA FILA SOLICITANTE, con aviso verde dentro del modal.
+ *    Nada existente se elimina; las adiciones van marcadas COM-48 v2.
  * Uso: Importado por RecipesView.jsx. Props: isOpen, onClose, onSuccess, recetaEditar.
  */
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Plus, Trash2 } from 'lucide-react';
+import { X, Plus, Trash2, Sprout } from 'lucide-react';
 import { api } from '../../services/api';
+import { useAuth } from '../../context/AuthContext';
 import { ModalConfirmacion } from '../common/ModalConfirmacion';
 import { ModalExito } from '../common/ModalExito';
 
+// COM-48 v2: formulario vacío del sub-modal de nuevo ingrediente
+const FORM_NUEVO_ING_VACIO = {
+    nombre: '',
+    categoria_id: '',
+    unidad_medida_id: '',
+    peso_estimado_g: '100'
+};
+
 export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) => {
+    const { usuario } = useAuth();
     // Indica si el modal opera en modo edición (true) o creación (false)
     const esEdicion = !!recetaEditar;
 
@@ -52,6 +60,14 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
     // Catálogos cargados desde la API para alimentar los selects
     const [unidadesMedida, setUnidadesMedida] = useState([]);
     const [ingredientesDisponibles, setIngredientesDisponibles] = useState([]);
+    // COM-48 v2: catálogo de categorías para el sub-modal de nuevo ingrediente
+    const [categorias, setCategorias] = useState([]);
+    // COM-48 v2: sub-modal de nuevo ingrediente { uid } = fila solicitante
+    const [modalNuevoIng, setModalNuevoIng] = useState(null);
+    const [formNuevoIng, setFormNuevoIng] = useState(FORM_NUEVO_ING_VACIO);
+    const [guardandoNuevoIng, setGuardandoNuevoIng] = useState(false);
+    const [errorNuevoIng, setErrorNuevoIng] = useState('');
+    const [avisoNuevoIng, setAvisoNuevoIng] = useState('');
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
     // UX (COM-18): modal de confirmación para acciones sensibles.
@@ -81,17 +97,19 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
         }
     }, [isOpen, recetaEditar]);
 
-    // Carga unidades, ingredientes disponibles y componentes; prepara filas iniciales
+    // Carga unidades, ingredientes disponibles, componentes y categorías (COM-48 v2)
     const cargarDatosIniciales = async () => {
         try {
-            const [unidades, ingredientesDisp, comps] = await Promise.all([
+            const [unidades, ingredientesDisp, comps, cats] = await Promise.all([
                 api.getUnidadesMedida(),
                 api.getIngredientesDisponibles(),
-                api.getComponentesReceta()   // COM-48
+                api.getComponentesReceta(),   // COM-48
+                api.getCategoriasAlimentos()  // COM-48 v2
             ]);
             setUnidadesMedida(unidades);
             setIngredientesDisponibles(ingredientesDisp);
             setComponentes(comps || []);
+            setCategorias(cats || []);
             if (esEdicion && recetaEditar) {
                 await cargarRecetaParaEditar();
             } else {
@@ -155,6 +173,11 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
         const inicial = (comps.find(c => c.nombre === 'Plato de fondo') || comps[0]);
         setIngredientes(inicial ? [filaVacia(inicial.id)] : []);
         setError('');
+        // COM-48 v2: se limpia también el estado del sub-modal de nuevo ingrediente
+        setModalNuevoIng(null);
+        setFormNuevoIng(FORM_NUEVO_ING_VACIO);
+        setErrorNuevoIng('');
+        setAvisoNuevoIng('');
     };
 
     // Fija el error y sube el scroll del cuerpo para que el mensaje sea visible
@@ -186,6 +209,54 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
         setIngredientes(prev => prev.filter(row => row.uid !== uid));
     };
 
+    // ===== COM-48 v2: SUB-MODAL DE NUEVO INGREDIENTE =====
+    const abrirNuevoIngrediente = (uid) => {
+        setFormNuevoIng({ ...FORM_NUEVO_ING_VACIO });
+        setErrorNuevoIng('');
+        setModalNuevoIng({ uid });
+    };
+
+    const guardarNuevoIngrediente = async () => {
+        const nombre = (formNuevoIng.nombre || '').trim();
+        if (nombre.length < 2) {
+            setErrorNuevoIng('El nombre del ingrediente es obligatorio (mínimo 2 caracteres).');
+            return;
+        }
+        if (!formNuevoIng.unidad_medida_id) {
+            setErrorNuevoIng('Seleccione la unidad de uso del ingrediente.');
+            return;
+        }
+        const peso = Number(formNuevoIng.peso_estimado_g);
+        if (!peso || peso <= 0) {
+            setErrorNuevoIng('El peso estimado debe ser un número mayor a 0.');
+            return;
+        }
+        setGuardandoNuevoIng(true);
+        setErrorNuevoIng('');
+        try {
+            const res = await api.createIngredienteDesdeReceta({
+                usuario_solicitante_id: usuario.id,
+                nombre,
+                categoria_id: formNuevoIng.categoria_id === '' ? null : Number(formNuevoIng.categoria_id),
+                unidad_medida_id: Number(formNuevoIng.unidad_medida_id),
+                peso_estimado_g: peso,
+            });
+            // Recarga el catálogo y deja el nuevo ingrediente seleccionado en la fila solicitante
+            const disp = await api.getIngredientesDisponibles();
+            setIngredientesDisponibles(disp);
+            if (modalNuevoIng && modalNuevoIng.uid != null) {
+                handleIngredienteChange(modalNuevoIng.uid, 'ingrediente_id', String(res.id));
+            }
+            setAvisoNuevoIng(res.message || `Ingrediente '${res.nombre}' creado y seleccionado en la fila.`);
+            setModalNuevoIng(null);
+            setFormNuevoIng(FORM_NUEVO_ING_VACIO);
+        } catch (e) {
+            setErrorNuevoIng(e.message);
+        } finally {
+            setGuardandoNuevoIng(false);
+        }
+    };
+
     // Valida nombre, raciones (COM-45), y cada fila de ingrediente con su componente (COM-48)
     const validarFormulario = () => {
         if (!formData.nombre.trim()) {
@@ -207,9 +278,6 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
         // COM-48: validación por componente y fila (el componente siempre viene de la sección)
         for (const comp of componentes) {
             const filas = ingredientes.filter(i => i.componente_id === comp.id);
-            filas.forEach((ing, idx) => {
-                // se recorre completo para reportar el primer error con contexto
-            });
             for (let i = 0; i < filas.length; i++) {
                 const ing = filas[i];
                 const etiqueta = `${comp.nombre} · fila ${i + 1}`;
@@ -537,11 +605,17 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
                                         </span>
                                     </h4>
                                 </div>
-                                <p className="text-[11px] text-slate-500 mb-4">
+                                <p className="text-[11px] text-slate-500 mb-2">
                                     Cada receta se compone de componentes (Ensalada, Plato de fondo, Refresco, Fruta).
                                     Un mismo ingrediente puede usarse en varios componentes con cantidades independientes
                                     (ej. limón en la ensalada y en el refresco).
                                 </p>
+                                {/* COM-48 v2: aviso de ingrediente creado en línea */}
+                                {avisoNuevoIng && (
+                                    <div className="mb-3 p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-emerald-700 text-xs flex items-center gap-2">
+                                        <Sprout size={14} /> {avisoNuevoIng}
+                                    </div>
+                                )}
                                 {componentes.length === 0 ? (
                                     <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-sm">
                                         No se pudo cargar el catálogo de componentes. Verifique la conexión o recargue.
@@ -570,85 +644,94 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
                                                 </div>
                                                 {/* Filas del componente */}
                                                 <div className="p-3 space-y-2 bg-white">
-                            {/* Encabezados de columna ÚNICOS por componente */}
-                            <div className="grid grid-cols-12 gap-2 px-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
-                                <span className="col-span-6">Ingrediente</span>
-                                <span className="col-span-2">Cantidad *</span>
-                                <span className="col-span-3">Unidad *</span>
-                                <span className="col-span-1 text-center">Acción</span>
-                            </div>
-                            {filas.length === 0 ? (
-                                <p className="text-[11px] text-slate-400 px-2 py-2">
-                                    Sin ingredientes en este componente. Use "Agregar ingrediente".
-                                </p>
-                            ) : (
-                                filas.map((ing) => (
-                                    <div
-                                        key={ing.uid}
-                                        className="grid grid-cols-12 gap-2 items-center border border-slate-200 rounded-lg px-2 py-2 bg-white"
-                                    >
-                                        {/* Select de ingrediente */}
-                                        <div className="col-span-6">
-                                            <select
-                                                value={ing.ingrediente_id}
-                                                onChange={(e) => handleIngredienteChange(ing.uid, 'ingrediente_id', e.target.value)}
-                                                className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-sm bg-white"
-                                                aria-label={`Ingrediente en ${comp.nombre}`}
-                                                required
-                                            >
-                                                <option value="">Seleccionar...</option>
-                                                {ingredientesDisponibles.map(item => (
-                                                    <option key={item.id} value={item.id}>
-                                                        {item.nombre}
-                                                    </option>
-                                                ))}
-                                            </select>
-                                        </div>
-                                        {/* Cantidad requerida */}
-                                        <div className="col-span-2">
-                                            <input
-                                                type="number"
-                                                value={ing.cantidad_requerida}
-                                                onChange={(e) => handleIngredienteChange(ing.uid, 'cantidad_requerida', e.target.value)}
-                                                step="0.01"
-                                                min="0.01"
-                                                className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-sm"
-                                                placeholder="Ej: 100"
-                                                aria-label={`Cantidad en ${comp.nombre}`}
-                                                required
-                                            />
-                                        </div>
-                                        {/* Unidad de medida */}
-                                        <div className="col-span-3">
-                                            <select
-                                                value={ing.unidad_medida_id}
-                                                onChange={(e) => handleIngredienteChange(ing.uid, 'unidad_medida_id', e.target.value)}
-                                                className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-sm bg-white"
-                                                aria-label={`Unidad en ${comp.nombre}`}
-                                                required
-                                            >
-                                                <option value="">Seleccionar...</option>
-                                                {unidadesMedida.map(um => (
-                                                    <option key={um.id} value={um.id}>
-                                                        {um.nombre}
-                                                    </option>
-                                                ))}
-                                            </select>
-                                        </div>
-                                        {/* Botón eliminar fila (pide confirmación COM-18) */}
-                                        <div className="col-span-1 flex justify-center">
-                                            <button
-                                                type="button"
-                                                onClick={() => solicitarEliminacion(ing.uid)}
-                                                className="p-1.5 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                                                aria-label={`Eliminar fila de ${comp.nombre}`}
-                                            >
-                                                <Trash2 size={16} />
-                                            </button>
-                                        </div>
-                                    </div>
-                                ))
-                            )}
+                                                    {/* Encabezados de columna ÚNICOS por componente */}
+                                                    <div className="grid grid-cols-12 gap-2 px-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                                                        <span className="col-span-6">Ingrediente</span>
+                                                        <span className="col-span-2">Cantidad *</span>
+                                                        <span className="col-span-3">Unidad *</span>
+                                                        <span className="col-span-1 text-center">Acción</span>
+                                                    </div>
+                                                    {filas.length === 0 ? (
+                                                        <p className="text-[11px] text-slate-400 px-2 py-2">
+                                                            Sin ingredientes en este componente. Use "Agregar ingrediente".
+                                                        </p>
+                                                    ) : (
+                                                        filas.map((ing) => (
+                                                            <div
+                                                                key={ing.uid}
+                                                                className="grid grid-cols-12 gap-2 items-center border border-slate-200 rounded-lg px-2 py-2 bg-white"
+                                                            >
+                                                                {/* Select de ingrediente + botón COM-48 v2 de alta en línea */}
+                                                                <div className="col-span-6 flex items-center gap-1">
+                                                                    <select
+                                                                        value={ing.ingrediente_id}
+                                                                        onChange={(e) => handleIngredienteChange(ing.uid, 'ingrediente_id', e.target.value)}
+                                                                        className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-sm bg-white"
+                                                                        aria-label={`Ingrediente en ${comp.nombre}`}
+                                                                        required
+                                                                    >
+                                                                        <option value="">Seleccionar...</option>
+                                                                        {ingredientesDisponibles.map(item => (
+                                                                            <option key={item.id} value={item.id}>
+                                                                                {item.nombre}
+                                                                            </option>
+                                                                        ))}
+                                                                    </select>
+                                                                    {/* COM-48 v2: crea el ingrediente faltante sin salir del modal */}
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => abrirNuevoIngrediente(ing.uid)}
+                                                                        title="Nuevo ingrediente (se creará en el catálogo y quedará seleccionado en esta fila)"
+                                                                        className="shrink-0 p-1.5 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded-lg transition-colors"
+                                                                    >
+                                                                        <Plus size={14} />
+                                                                    </button>
+                                                                </div>
+                                                                {/* Cantidad requerida */}
+                                                                <div className="col-span-2">
+                                                                    <input
+                                                                        type="number"
+                                                                        value={ing.cantidad_requerida}
+                                                                        onChange={(e) => handleIngredienteChange(ing.uid, 'cantidad_requerida', e.target.value)}
+                                                                        step="0.01"
+                                                                        min="0.01"
+                                                                        className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-sm"
+                                                                        placeholder="Ej: 100"
+                                                                        aria-label={`Cantidad en ${comp.nombre}`}
+                                                                        required
+                                                                    />
+                                                                </div>
+                                                                {/* Unidad de medida */}
+                                                                <div className="col-span-3">
+                                                                    <select
+                                                                        value={ing.unidad_medida_id}
+                                                                        onChange={(e) => handleIngredienteChange(ing.uid, 'unidad_medida_id', e.target.value)}
+                                                                        className="w-full px-3 py-1.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-sm bg-white"
+                                                                        aria-label={`Unidad en ${comp.nombre}`}
+                                                                        required
+                                                                    >
+                                                                        <option value="">Seleccionar...</option>
+                                                                        {unidadesMedida.map(um => (
+                                                                            <option key={um.id} value={um.id}>
+                                                                                {um.nombre}
+                                                                            </option>
+                                                                        ))}
+                                                                    </select>
+                                                                </div>
+                                                                {/* Botón eliminar fila (pide confirmación COM-18) */}
+                                                                <div className="col-span-1 flex justify-center">
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => solicitarEliminacion(ing.uid)}
+                                                                        className="p-1.5 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                                                                        aria-label={`Eliminar fila de ${comp.nombre}`}
+                                                                    >
+                                                                        <Trash2 size={16} />
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                        ))
+                                                    )}
                                                 </div>
                                             </div>
                                         );
@@ -678,6 +761,100 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
                     </form>
                 </div>
             </div>
+
+            {/* ===== COM-48 v2: SUB-MODAL DE NUEVO INGREDIENTE (sobre el modal de receta) ===== */}
+            {modalNuevoIng && (
+                <div className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/60">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+                        <div className="bg-blue-700 text-white p-4 flex items-center gap-2">
+                            <Sprout size={18} />
+                            <p className="font-bold text-sm flex-1">Nuevo ingrediente de catálogo</p>
+                            <button onClick={() => setModalNuevoIng(null)} className="p-1 hover:bg-blue-800 rounded" title="Cerrar">
+                                <X size={18} />
+                            </button>
+                        </div>
+                        <div className="p-4 space-y-3">
+                            {errorNuevoIng && (
+                                <div className="p-2.5 bg-red-50 border border-red-200 rounded-lg text-red-700 text-xs">
+                                    {errorNuevoIng}
+                                </div>
+                            )}
+                            <div>
+                                <label className="block text-xs font-semibold text-slate-600 mb-1">Nombre *</label>
+                                <input
+                                    type="text"
+                                    value={formNuevoIng.nombre}
+                                    onChange={(e) => setFormNuevoIng({ ...formNuevoIng, nombre: e.target.value })}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                                    placeholder="Ej: Maracuyá"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-semibold text-slate-600 mb-1">Categoría (opcional)</label>
+                                <select
+                                    value={formNuevoIng.categoria_id}
+                                    onChange={(e) => setFormNuevoIng({ ...formNuevoIng, categoria_id: e.target.value })}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500"
+                                >
+                                    <option value="">Sin categoría</option>
+                                    {categorias.map(c => (
+                                        <option key={c.id} value={c.id}>{c.nombre}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block text-xs font-semibold text-slate-600 mb-1">Unidad de uso *</label>
+                                    <select
+                                        value={formNuevoIng.unidad_medida_id}
+                                        onChange={(e) => setFormNuevoIng({ ...formNuevoIng, unidad_medida_id: e.target.value })}
+                                        className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500"
+                                    >
+                                        <option value="">Seleccionar...</option>
+                                        {unidadesMedida.map(u => (
+                                            <option key={u.id} value={u.id}>{u.nombre} ({u.abreviatura})</option>
+                                        ))}
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-semibold text-slate-600 mb-1">Peso estimado (g) *</label>
+                                    <input
+                                        type="number"
+                                        min="1"
+                                        step="1"
+                                        value={formNuevoIng.peso_estimado_g}
+                                        onChange={(e) => setFormNuevoIng({ ...formNuevoIng, peso_estimado_g: e.target.value })}
+                                        className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                                        title="Gramos por unidad para unidades discretas (und, diente, rama...)"
+                                    />
+                                </div>
+                            </div>
+                            <p className="text-[10px] text-slate-500">
+                                El ingrediente se crea en el catálogo global y queda seleccionado en la fila solicitante.
+                                Luego podrá vincularle insumos/precios desde Gestión de Ingredientes o Evaluar.
+                            </p>
+                            <div className="flex gap-2 pt-1">
+                                <button
+                                    type="button"
+                                    onClick={() => setModalNuevoIng(null)}
+                                    className="flex-1 px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-sm font-medium transition-colors"
+                                >
+                                    Cancelar
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={guardarNuevoIngrediente}
+                                    disabled={guardandoNuevoIng}
+                                    className="flex-1 px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+                                >
+                                    {guardandoNuevoIng ? 'Creando...' : 'Crear y seleccionar'}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Modal de confirmación para acciones sensibles (guardar/cancelar/eliminar) */}
             <ModalConfirmacion
                 isOpen={!!modalConf}
