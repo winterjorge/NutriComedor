@@ -1,24 +1,21 @@
 /**
  * components/reportes/ReportesView.jsx
- * Objetivo: Pestaña "Reportes" con resumen operativo del sistema: contadores de
- *           comedores, usuarios, recetas y planificaciones guardadas, y el estado
- *           agregado del padrón de ventas del día.
- *           COM-50 (HU-10): se integra además el panel "Resumen ejecutivo y
- *           recomendaciones": reporte del menú generado/plan vigente con costo total,
- *           costo por comensal, gráfico de barras de % del presupuesto usado por día y
- *           sugerencias automáticas de ahorro/alertas/variedad, para la rendición de
- *           cuentas de la voluntaria administradora ante su organización.
+ * Objetivo: Pestaña "Reportes": resumen operativo del sistema (contadores y ventas del
+ *           día) + COM-50 "Resumen ejecutivo y recomendaciones" (menú del plan vigente,
+ *           costo total, costo por comensal, barras de % de presupuesto por día y
+ *           sugerencias automáticas de ahorro/alertas/variedad, HU-10).
  * Historial:
  *  - Sprint 3/4: versión original (KPIs agregados + ventas del día).
- *  - COM-50 (este archivo): nuevo panel al final de la vista (nada existente se elimina):
- *      * Comedor: el de la sesión; si el perfil es SISTEMA (sin comedor fijo), selector.
- *      * Plan: selector de propuestas/planificaciones del comedor o "automático"
- *        (precedencia del backend: última seleccionada -> última propuesta -> última
- *        planificación guardada).
- *      * Tarjetas de resumen, barras de uso de presupuesto por día, tabla del menú y
- *        lista de sugerencias tipadas (ahorro / alerta / variedad).
+ *  - COM-50 v1: panel de reporte de gestión integrado en esta pestaña.
+ *  - COM-50 v2 (este archivo): fix de los errores de consola con perfil no admin:
+ *      * El KPI "Usuarios del sistema" SOLO se consulta si el perfil es Admin de
+ *        Sistemas (antes se pedía con usuario_solicitante_id=0 => 403 siempre, y 403
+ *        por permiso para Presidente/Tesorero); para el resto se muestra "—" sin llamada.
+ *      * El KPI "Recetas" usa el total del listado paginado (antes contaba solo la
+ *        primera página, mostrando 0 o un número parcial).
+ *      * Se muestra la nota de degradación de sugerencias si el backend la incluye.
+ *    Nada existente se elimina; lo ajustado queda comentado por trazabilidad.
  * Uso: Renderizado por App.jsx en la pestaña "Reportes" (módulo 'reportes').
- * Referencia: tickets COM-50 / HU-10 (solo trazabilidad).
  */
 import React, { useState, useEffect, useCallback } from 'react';
 import {
@@ -42,6 +39,8 @@ const FUENTE_PLAN_LABEL = {
 
 export const ReportesView = () => {
     const { usuario, seleccion } = useAuth();
+    // COM-50 v2: solo el Admin de Sistemas puede ver el contador global de usuarios
+    const esAdminSistema = usuario?.rol === 'Administrador Sistema';
 
     const [cargando, setCargando] = useState(true);
     const [error, setError] = useState('');
@@ -49,7 +48,7 @@ export const ReportesView = () => {
     // KPIs agregados
     const [kpis, setKpis] = useState({
         comedores: 0,
-        usuarios: 0,
+        usuarios: null,   // COM-50 v2: null = sin permiso (se muestra "—")
         recetas: 0,
         planificaciones: 0,
         ventasHoy: null
@@ -72,15 +71,26 @@ export const ReportesView = () => {
             try {
                 const [comedores, usuarios, recetas, planificaciones, ventasHoy] = await Promise.all([
                     api.getComedores().catch(() => []),
-                    api.getUsuarios({ usuario_solicitante_id: 0 }).catch(() => []),
-                    api.getRecetas().catch(() => []),
+                    // COM-50 v2 (trazabilidad): llamada anterior sin gate, comentada:
+                    // api.getUsuarios({ usuario_solicitante_id: 0 }).catch(() => []),
+                    // COM-50 v2: solo Admin de Sistemas consulta el padrón de usuarios
+                    esAdminSistema
+                        ? api.getUsuarios({ usuario_solicitante_id: usuario.id }).catch(() => [])
+                        : Promise.resolve(null),
+                    api.getRecetas().catch(() => null),
                     api.getPlanificaciones().catch(() => []),
                     api.getVentasHoy().catch(() => null),
                 ]);
+                // COM-50 v2 (trazabilidad): conteo anterior de recetas por longitud de
+                // la primera página, comentado:
+                // recetas: Array.isArray(recetas) ? recetas.length : 0,
+                const totalRecetas = recetas
+                    ? (recetas.total ?? (Array.isArray(recetas.recetas) ? recetas.recetas.length : 0))
+                    : 0;
                 setKpis({
                     comedores: Array.isArray(comedores) ? comedores.length : 0,
-                    usuarios: Array.isArray(usuarios) ? usuarios.length : 0,
-                    recetas: Array.isArray(recetas) ? recetas.length : 0,
+                    usuarios: Array.isArray(usuarios) ? usuarios.length : null,
+                    recetas: totalRecetas,
                     planificaciones: Array.isArray(planificaciones) ? planificaciones.length : 0,
                     ventasHoy
                 });
@@ -91,7 +101,7 @@ export const ReportesView = () => {
             }
         };
         cargar();
-    }, []);
+    }, [esAdminSistema, usuario.id]);
 
     // COM-50: si la sesión no fija comedor (perfil SISTEMA), ofrecer selector
     useEffect(() => {
@@ -143,7 +153,8 @@ export const ReportesView = () => {
     const pct = (v) => totalVentas > 0 ? Math.round((v / totalVentas) * 100) : 0;
     const tarjetas = [
         { label: 'Comedores registrados', value: kpis.comedores, icon: Store, color: 'emerald' },
-        { label: 'Usuarios del sistema', value: kpis.usuarios, icon: Users, color: 'blue' },
+        // COM-50 v2: null => "—" (perfil sin permiso sobre el padrón de usuarios)
+        { label: 'Usuarios del sistema', value: kpis.usuarios === null ? '—' : kpis.usuarios, icon: Users, color: 'blue' },
         { label: 'Recetas del recetario', value: kpis.recetas, icon: ChefHat, color: 'amber' },
         { label: 'Planificaciones guardadas', value: kpis.planificaciones, icon: ClipboardList, color: 'purple' },
     ];
@@ -324,6 +335,13 @@ export const ReportesView = () => {
                                         <span className="px-2 py-0.5 bg-red-100 text-red-700 rounded-full font-bold">Fuera del presupuesto</span>
                                     )}
                                 </div>
+
+                                {/* COM-50 v2: nota de degradación de sugerencias si aplica */}
+                                {reporte.nota_sugerencias && (
+                                    <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-sm flex items-center gap-2">
+                                        <AlertCircle size={15} /> {reporte.nota_sugerencias}
+                                    </div>
+                                )}
 
                                 {/* Tarjetas de resumen ejecutivo */}
                                 <div className="grid grid-cols-2 md:grid-cols-5 gap-3">

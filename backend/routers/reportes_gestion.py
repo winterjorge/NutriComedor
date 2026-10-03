@@ -4,12 +4,19 @@ Objetivo: COM-50 (HU-10): endpoints del reporte "Resumen ejecutivo y recomendaci
           GET /reportes-gestion/resumen     -> reporte completo del plan vigente (o del
                                                plan indicado por candidata_id/presupuesto_id).
           GET /reportes-gestion/planes      -> selector de planes disponibles del comedor.
+Historial:
+ - COM-50 v1: versión original.
+ - COM-50 v2 (este archivo): el except del endpoint /resumen imprime el traceback
+   completo en los logs de la API (docker compose logs api) para diagnóstico inmediato
+   de errores 500, y el detalle del error incluye el tipo de excepción.
 Permisos: módulo 'reportes' de la matriz COM-25 (sembrado para Directivo
           Presidente/Tesorero/Secretario y Admin), o Admin de Sistemas, o Admin del
           comedor. La voluntaria administradora puede así rendir cuentas a su organización.
 Uso: Registrado en main.py con prefijo /api/v1.
 Referencia: tickets COM-50 / HU-10 (solo trazabilidad).
 """
+import traceback
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from psycopg2.extras import RealDictCursor
 
@@ -61,7 +68,10 @@ def resumen_ejecutivo(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al generar el reporte: {e}")
+        # COM-50 v2: traza completa en logs para diagnóstico de errores 500
+        traceback.print_exc()
+        raise HTTPException(status_code=500,
+                            detail=f"Error al generar el reporte ({type(e).__name__}): {e}")
     finally:
         cur.close()
 
@@ -82,6 +92,7 @@ def planes_disponibles(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al listar planes: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error al listar planes ({type(e).__name__}): {e}")
     finally:
         cur.close()
