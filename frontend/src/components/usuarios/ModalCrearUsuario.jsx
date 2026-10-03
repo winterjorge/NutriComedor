@@ -5,11 +5,22 @@
  *           Para el personal que NO es administrador de sistema se muestran los campos
  *           departamento -> provincia -> distrito -> municipalidad, que se van
  *           desbloqueando a medida que se selecciona el nivel superior.
+ * Historial:
+ *  - COM-26/COM-27: versión original (autocomplete de municipalidades y comedores).
+ *  - COM-56 (este archivo):
+ *      * ADMINISTRATIVO: se ELIMINA el bloque "Municipalidades de acceso" (autocomplete
+ *        multi-select, queda COMENTADO por trazabilidad). La municipalidad ÚNICA del
+ *        administrativo es la seleccionada en la cascada (obligatoria) y se envía como
+ *        municipalidad_ids: [municipalidad_id].
+ *      * DIRECTIVO/OPERATIVO: "Comedores de acceso" se filtra por la municipalidad
+ *        seleccionada en la cascada usando el municipalidad_id anotado por el backend
+ *        (COM-56 refuerzo) sobre el alcance del solicitante; al cambiar de municipalidad
+ *        se retiran los comedores seleccionados que quedan fuera de jurisdicción.
  * Uso: Abierto por las vistas de gestión de usuarios; `onExito` al guardar.
- * Referencia: tickets COM-26 (flujo por perfil) y COM-27 (ubicación en cascada).
+ * Referencia: tickets COM-26 / COM-27 / COM-56 (solo trazabilidad).
  */
 import React, { useState, useEffect } from 'react';
-import { X, UserPlus, Loader2, AlertCircle, MapPin } from 'lucide-react';
+import { X, UserPlus, Loader2, AlertCircle, MapPin, Building2, Store } from 'lucide-react';
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { AutocompleteBusqueda } from '../common/AutocompleteBusqueda';
@@ -46,11 +57,12 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
     const [perfilObjetivo, setPerfilObjetivo] = useState('');
     const [grupoId, setGrupoId] = useState('');
     const [rolId, setRolId] = useState('');
+    // COM-56 (trazabilidad): estado del autocomplete multi-municipalidad conservado
+    // pero SIN uso para Administrativos (la municipalidad única viene de la cascada):
     const [municipalidadesSel, setMunicipalidadesSel] = useState([]);
     const [comedoresSel, setComedoresSel] = useState([]);
     // COM-27: ubicación geográfica en cascada
     const [ubicacion, setUbicacion] = useState(UBICACION_INICIAL);
-
     const [contexto, setContexto] = useState(null);
     const [error, setError] = useState('');
     const [guardando, setGuardando] = useState(false);
@@ -68,9 +80,20 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
     }, [usuario.id]);
 
     const grupoPerfil = contexto?.grupos?.find(g => g.perfil === perfilObjetivo) || null;
-
     // COM-27: el personal que NO es administrador de sistema requiere ubicación geográfica
     const requiereUbicacion = !!perfilObjetivo && perfilObjetivo !== PERFIL_ADMIN_SISTEMA;
+    const esAdministrativo = perfilObjetivo === 'ADMINISTRATIVO';
+    const esComedor = perfilObjetivo === 'DIRECTIVO' || perfilObjetivo === 'OPERATIVO';
+
+    // COM-56: comedores permitidos = alcance del solicitante ∩ municipalidad de la cascada
+    const idsComedoresPermitidos = (() => {
+        const base = contexto?.comedores || [];
+        if (!esComedor) return base.map(c => c.id);
+        if (!ubicacion.municipalidad_id) return [];  // sin municipalidad aún: ninguno
+        return base
+            .filter(c => c.municipalidad_id === ubicacion.municipalidad_id)
+            .map(c => c.id);
+    })();
 
     const cambiarPerfil = (perfil) => {
         setPerfilObjetivo(perfil);
@@ -80,6 +103,20 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
         setComedoresSel([]);
         // COM-27: al cambiar el perfil se reinicia también la ubicación
         setUbicacion(UBICACION_INICIAL);
+    };
+
+    // COM-56: al cambiar la municipalidad en cascada, se retiran comedores fuera de jurisdicción
+    const handleUbicacionChange = (nueva) => {
+        setUbicacion(nueva);
+        if (nueva.municipalidad_id !== ubicacion.municipalidad_id && comedoresSel.length) {
+            const permitidos = new Set(
+                (contexto?.comedores || [])
+                    .filter(c => c.municipalidad_id === nueva.municipalidad_id)
+                    .map(c => c.id)
+            );
+            const filtrados = comedoresSel.filter(c => permitidos.has(c.id));
+            if (filtrados.length !== comedoresSel.length) setComedoresSel(filtrados);
+        }
     };
 
     const validar = () => {
@@ -95,6 +132,13 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
             if (!ubicacion.departamento_id || !ubicacion.provincia_id || !ubicacion.distrito_id) {
                 return 'Complete la ubicación geográfica (departamento, provincia y distrito).';
             }
+            // COM-56: el administrativo pertenece a UNA municipalidad: la de la cascada
+            if (esAdministrativo && !ubicacion.municipalidad_id) {
+                return 'Seleccione la municipalidad en la cascada: el personal administrativo pertenece a una única municipalidad.';
+            }
+        }
+        if (esComedor && comedoresSel.length === 0) {
+            return 'Debe seleccionar al menos un comedor de acceso (solo se listan los de la municipalidad elegida).';
         }
         return '';
     };
@@ -120,8 +164,11 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
                 perfil_objetivo: perfilObjetivo,
                 grupo_id: Number(grupoId),
                 rol_id: Number(rolId),
-                municipalidad_ids: municipalidadesSel.map(m => m.id),
-                comedor_ids: comedoresSel.map(c => c.id),
+                // COM-56 (trazabilidad): antes se enviaba el multi-select de municipalidades:
+                // municipalidad_ids: municipalidadesSel.map(m => m.id),
+                // COM-56: municipalidad ÚNICA tomada de la cascada geográfica
+                municipalidad_ids: esAdministrativo ? [ubicacion.municipalidad_id] : [],
+                comedor_ids: esComedor ? comedoresSel.map(c => c.id) : [],
                 usuario_solicitante_id: usuario.id,
                 // COM-27: ubicación geográfica del nuevo usuario (solo personal no-admin)
                 departamento_id: requiereUbicacion ? ubicacion.departamento_id : null,
@@ -150,14 +197,12 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
                         <X size={22} />
                     </button>
                 </div>
-
                 <form onSubmit={handleSubmit} className="p-6 space-y-4 overflow-y-auto">
                     {error && (
                         <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-center gap-2 text-sm">
                             <AlertCircle size={16} /> {error}
                         </div>
                     )}
-
                     {/* Datos personales */}
                     <div className="grid grid-cols-3 gap-3">
                         <div>
@@ -177,14 +222,12 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
                                 placeholder="Ej: 70000001" />
                         </div>
                     </div>
-
                     <div>
                         <label className="block text-xs font-semibold text-slate-600 mb-1">Nombres *</label>
                         <input type="text" value={form.nombres}
                             onChange={(e) => setForm({ ...form, nombres: e.target.value })}
                             className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
                     </div>
-
                     <div className="grid grid-cols-2 gap-3">
                         <div>
                             <label className="block text-xs font-semibold text-slate-600 mb-1">Apellido paterno</label>
@@ -199,14 +242,12 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
                                 className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
                         </div>
                     </div>
-
                     <div>
                         <label className="block text-xs font-semibold text-slate-600 mb-1">Fecha de nacimiento</label>
                         <input type="date" value={form.fecha_nacimiento}
                             onChange={(e) => setForm({ ...form, fecha_nacimiento: e.target.value })}
                             className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
                     </div>
-
                     {/* Perfil objetivo */}
                     <div>
                         <label className="block text-xs font-semibold text-slate-600 mb-1">Perfil del usuario *</label>
@@ -219,7 +260,6 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
                             ))}
                         </select>
                     </div>
-
                     {/* Grupo y rol */}
                     <div className="grid grid-cols-2 gap-3">
                         <div>
@@ -227,7 +267,7 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
                             <select value={grupoId}
                                 onChange={(e) => { setGrupoId(e.target.value); setRolId(''); }}
                                 disabled={!grupoPerfil}
-                                className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-50">
+                                className="w-full px-2 py-2 border border-slate-300 rounded-lg bg-white text-sm outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-50">
                                 <option value="">Seleccionar grupo...</option>
                                 {grupoPerfil && <option value={grupoPerfil.grupo_id}>{grupoPerfil.grupo}</option>}
                             </select>
@@ -237,7 +277,7 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
                             <select value={rolId}
                                 onChange={(e) => setRolId(e.target.value)}
                                 disabled={!grupoPerfil}
-                                className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-50">
+                                className="w-full px-2 py-2 border border-slate-300 rounded-lg bg-white text-sm outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-50">
                                 <option value="">Seleccionar rol...</option>
                                 {(grupoPerfil?.roles || []).map(r => (
                                     <option key={r.id} value={r.id}>{r.nombre}</option>
@@ -245,7 +285,6 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
                             </select>
                         </div>
                     </div>
-
                     {/* COM-27: Ubicación geográfica en cascada (solo personal no-admin) */}
                     {requiereUbicacion && (
                         <div>
@@ -254,14 +293,23 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
                             </label>
                             <SelectorUbicacionCascada
                                 valores={ubicacion}
-                                onCambiar={setUbicacion}
+                                onCambiar={handleUbicacionChange}
                                 mostrarMunicipalidad={true}
                             />
+                            {/* COM-56: nota explicativa de la municipalidad única */}
+                            {esAdministrativo && (
+                                <p className="mt-1 text-[11px] text-slate-500 flex items-center gap-1">
+                                    <Building2 size={11} /> El personal administrativo pertenece a una única
+                                    municipalidad: la seleccionada en la cascada.
+                                </p>
+                            )}
                         </div>
                     )}
 
-                    {/* Alcance por municipalidades (perfil Administrativo) */}
-                    {perfilObjetivo === 'ADMINISTRATIVO' && (
+                    {/* COM-56 (trazabilidad): bloque "Municipalidades de acceso" COMENTADO.
+                        La municipalidad única del Administrativo viene de la cascada y se
+                        envía como municipalidad_ids: [ubicacion.municipalidad_id].
+                    {esAdministrativo && (
                         <div>
                             <label className="block text-xs font-semibold text-slate-600 mb-1">Municipalidades de acceso</label>
                             <AutocompleteBusqueda
@@ -275,20 +323,37 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
                             />
                         </div>
                     )}
+                    */}
 
-                    {/* Alcance por comedores (perfiles Directivo / Operativo) */}
-                    {(perfilObjetivo === 'DIRECTIVO' || perfilObjetivo === 'OPERATIVO') && (
+                    {/* Alcance por comedores (perfiles Directivo / Operativo), COM-56: filtrado por municipalidad */}
+                    {esComedor && (
                         <div>
-                            <label className="block text-xs font-semibold text-slate-600 mb-1">Comedores de acceso</label>
-                            <AutocompleteBusqueda
-                                placeholder="Buscar comedor..."
-                                buscarFn={api.buscarComedores}
-                                seleccionados={comedoresSel}
-                                onSeleccionar={(item) => setComedoresSel([...comedoresSel, item])}
-                                onQuitar={(item) => setComedoresSel(comedoresSel.filter(c => c.id !== item.id))}
-                                getLabel={(c) => c.nombre}
-                                getSubLabel={(c) => c.distrito}
-                            />
+                            <label className="flex items-center gap-1 text-xs font-semibold text-slate-600 mb-1">
+                                <Store size={12} className="text-emerald-600" /> Comedores de acceso *
+                            </label>
+                            {!ubicacion.municipalidad_id ? (
+                                <p className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-xs">
+                                    Seleccione primero la municipalidad en la ubicación geográfica para
+                                    listar los comedores de esa jurisdicción.
+                                </p>
+                            ) : (
+                                <>
+                                    <AutocompleteBusqueda
+                                        placeholder="Buscar comedor..."
+                                        buscarFn={api.buscarComedores}
+                                        seleccionados={comedoresSel}
+                                        onSeleccionar={(item) => setComedoresSel([...comedoresSel, item])}
+                                        onQuitar={(item) => setComedoresSel(comedoresSel.filter(c => c.id !== item.id))}
+                                        getLabel={(c) => c.nombre}
+                                        getSubLabel={(c) => `${c.distrito || ''}${c.zona ? ' · ' + c.zona : ''}`}
+                                        permitidos={idsComedoresPermitidos}
+                                    />
+                                    <p className="mt-1 text-[11px] text-slate-500">
+                                        Solo se muestran comedores de la municipalidad seleccionada
+                                        {idsComedoresPermitidos.length === 0 && ' (sin resultados para esta jurisdicción)'} y dentro de su alcance.
+                                    </p>
+                                </>
+                            )}
                         </div>
                     )}
 
@@ -307,7 +372,6 @@ export const ModalCrearUsuario = ({ onClose, onExito }) => {
                                 className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
                         </div>
                     </div>
-
                     {/* Acciones */}
                     <div className="flex justify-end gap-3 pt-2">
                         <button type="button" onClick={onClose}
