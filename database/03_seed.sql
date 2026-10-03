@@ -2,21 +2,18 @@
 -- 03_seed.sql (antes seed.sql) - Poblado de Datos Maestros - NutriComedor OSB
 -- =========================================================================
 -- Historial:
---  - Sprint 1: categorías, unidades, ingredientes, insumos, precios, presupuesto,
---    usuario piloto, comensales y padrón inicial.
---  - COM-36 v2: se comentan los bloques de insumos e historial_precios (los trae el
---    scraper) y se corrige el INSERT de presupuesto_semanal (columnas eliminadas).
---  - COM-40: el usuario piloto se creaba con rol explícito de comedor.
---  - COM-40 v2 (este archivo): la carga inicial YA NO crea usuarios de comedor.
---    El INSERT de usuarios queda COMENTADO: los únicos usuarios de arranque son los
---    dos administradores de sistema canónicos (DNI 00000000 y 99999999), que crea el
---    db_bootstrap; todos los demás usuarios se crean manualmente desde la interfaz
---    (flujos COM-26 y COM-39). Los comensales y el padrón inicial se conservan
---    (son datos de negocio, no cuentas de acceso).
+--  - Sprint 1: categorías, unidades, ingredientes, presupuesto, comensales y padrón.
+--  - COM-36 v2: insumos/precios comentados (los trae el scraper); presupuesto corregido.
+--  - COM-40 v2: la carga inicial NO crea usuarios de comedor (solo bootstrap crea los
+--    admins canónicos 00000000/99999999); INSERT de usuarios comentado.
+--  - COM-48 (este archivo): seed del catálogo recetas_componentes (Ensalada, Plato de
+--    fondo, Refresco, Fruta) con orden de exhibición. DEBE ejecutarse antes de
+--    04_poblar_recetas.sql: la función fn_componente_default() (01_init) resuelve el
+--    id de 'Plato de fondo' en tiempo de INSERT de las líneas legacy de ingredientes.
 -- =========================================================================
 
 -- ------------------------------------------
--- 1) Categorías
+-- 1) Categorías de alimentos
 -- ------------------------------------------
 INSERT INTO categorias_alimentos (nombre) VALUES
 ('Vegetales y Hortalizas'),
@@ -48,7 +45,18 @@ INSERT INTO unidades_medida (nombre, abreviatura, tipo_magnitud, factor_a_base) 
 ON CONFLICT (nombre) DO NOTHING;
 
 -- ------------------------------------------
--- 3) Ingredientes CON PESOS ESTIMADOS (peso_estimado_g en gramos)
+-- 3) COM-48: componentes (categorías) dentro de una receta.
+--    El orden define la exhibición en UI y reportes. Extensible (ej. 'Sopa').
+-- ------------------------------------------
+INSERT INTO recetas_componentes (nombre, descripcion, orden) VALUES
+('Ensalada', 'Entrada fría de vegetales/frutas que acompaña al plato de fondo', 1),
+('Plato de fondo', 'Preparación principal que aporta la proteína de la ración', 2),
+('Refresco', 'Bebida de la ración (infusión, jugo o aguadito)', 3),
+('Fruta', 'Porción de fruta de cierre de la ración', 4)
+ON CONFLICT (nombre) DO NOTHING;
+
+-- ------------------------------------------
+-- 4) Ingredientes CON PESOS ESTIMADOS (peso_estimado_g en gramos)
 -- ------------------------------------------
 INSERT INTO ingredientes (nombre, categoria_id, unidad_medida_id, peso_estimado_g) VALUES
 -- Proteínas
@@ -123,44 +131,26 @@ INSERT INTO ingredientes (nombre, categoria_id, unidad_medida_id, peso_estimado_
 ON CONFLICT (nombre) DO NOTHING;
 
 -- ------------------------------------------
--- 4) INSUMOS: BLOQUE COMENTADO (COM-36 v2).
---    El catálogo de insumos lo crea/actualiza el scraper SISAP al correr.
---    (El bloque original con ~70 insumos quedó comentado en COM-36 v2 para no
---     sembrar datos que el scraper trae reales; se conserva en el historial git.)
+-- 5) INSUMOS: BLOQUE COMENTADO (COM-36 v2): los trae el scraper SISAP.
 -- ------------------------------------------
 
 -- ------------------------------------------
--- 5) HISTORIAL DE PRECIOS: BLOQUE COMENTADO (COM-36 v2).
---    NO se siembran precios ficticios: los precios reales los trae el scraper.
+-- 6) HISTORIAL DE PRECIOS: BLOQUE COMENTADO (COM-36 v2): precios reales del scraper.
 -- ------------------------------------------
 
 -- ------------------------------------------
--- 6) Presupuesto semanal inicial
--- COM-36 v2 (trazabilidad): versión ROTA comentada (columnas eliminadas por init.sql):
--- INSERT INTO presupuesto_semanal (fondo_total, dias_operativos, comensales_diarios, presupuesto_por_racion) VALUES
--- (500.00, 5, 100, 1.00);
+-- 7) Presupuesto semanal inicial
 -- ------------------------------------------
 INSERT INTO presupuesto_semanal (fondo_total, dias_operativos, fecha_referencia)
 VALUES (500.00, 5, CURRENT_DATE);
 
 -- ------------------------------------------
--- 7) USUARIOS: BLOQUE COMENTADO (COM-40 v2).
---    La carga inicial YA NO crea usuarios de comedor (antes: usuario piloto DNI
---    43604221 como 'Administrador'/'Administradora'). Los únicos usuarios de arranque
---    son los administradores de sistema canónicos DNI 00000000 y 99999999, creados por
---    db_bootstrap con clave provisoria Admin2026. Todos los demás usuarios se crean
---    manualmente desde la interfaz (COM-26 / COM-39).
--- COM-40 (trazabilidad): versión con rol explícito de comedor, comentada:
--- INSERT INTO usuarios (documento_identidad, nombres, apellido_paterno, apellido_materno, fecha_nacimiento, clave_hash, rol) VALUES
--- ('43604221', 'Jorge luis', 'Winter', 'Arboleda', '1986-04-23', 'hash_123456', 'Administrador')
--- ON CONFLICT (documento_identidad) DO NOTHING;
--- Sprint 1 (trazabilidad): versión original sin rol, comentada:
--- INSERT INTO usuarios (documento_identidad, nombres, apellido_paterno, apellido_materno, fecha_nacimiento, clave_hash) VALUES
--- ('43604221', 'Jorge luis', 'Winter', 'Arboleda', '1986-04-23', 'hash_123456');
+-- 8) USUARIOS: BLOQUE COMENTADO (COM-40 v2): la carga inicial NO crea usuarios de
+--    comedor; solo el bootstrap crea los admins canónicos 00000000 y 99999999.
 -- ------------------------------------------
 
 -- ------------------------------------------
--- 8) Comensales iniciales del padrón (datos de negocio, no cuentas de acceso)
+-- 9) Comensales iniciales del padrón (datos de negocio, no cuentas de acceso)
 -- ------------------------------------------
 INSERT INTO comensales (tipo_documento, documento_identidad, nombres, tipo_comensal) VALUES
 ('DNI', '10203040', 'Maria lopez', 'Afiliado'),
@@ -170,7 +160,7 @@ INSERT INTO comensales (tipo_documento, documento_identidad, nombres, tipo_comen
 ON CONFLICT (documento_identidad) DO NOTHING;
 
 -- ------------------------------------------
--- 9) Padrón diario inicial (subconsultas por documento, sin ids hardcodeados)
+-- 10) Padrón diario inicial (subconsultas por documento, sin ids hardcodeados)
 -- ------------------------------------------
 INSERT INTO padron_diario (comensal_id, fecha, tipo_comensal_venta, tipo_menu, raciones, monto_pagado, observacion) VALUES
 ((SELECT id FROM comensales WHERE documento_identidad = '10203040'), CURRENT_DATE, 'Afiliado', 'Almuerzo regular', 2, 6.00, 'Vino con sus hijos'),
