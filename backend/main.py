@@ -13,9 +13,11 @@ Historial:
    Administrador de Sistemas.
  - COM-39 fix: el include de `directivos` va ANTES que el de `comedores` (sombra de
    rutas /comedores/{comedor_id} que respondía 422 a /comedores/buscar-por-distrito).
- - COM-37 (este archivo): router de Gestión de Ingredientes (ingredientes_admin),
-   exclusivo del Administrador de Sistemas: CRUD sin borrado, precios manuales con
-   vigencia y re-emparejado de insumos huérfanos.
+ - COM-37: router de Gestión de Ingredientes (ingredientes_admin), exclusivo del
+   Administrador de Sistemas: CRUD sin borrado, precios manuales con vigencia y
+   re-emparejado de insumos huérfanos.
+ - COM-50 (este archivo): router del Reporte de Gestión "Resumen ejecutivo y
+   recomendaciones" (reportes_gestion), para rendición de cuentas de la administradora.
 """
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -43,6 +45,7 @@ from routers import (
     reset_clave,      # COM-38: reseteo/cambio de clave por Admin de Sistemas
     directivos,       # COM-39: gestión de directivos por comedor (solo Admin de Sistemas)
     ingredientes_admin,  # COM-37: gestión de ingredientes y precios manuales (solo Admin)
+    reportes_gestion,    # COM-50: resumen ejecutivo y recomendaciones (módulo 'reportes')
 )
 # Asegurado de esquema dinámico (parámetros, planificación, raciones, seguridad,
 # comedores, grupos, gestión de usuarios, permisos por vistas, ubicaciones,
@@ -59,7 +62,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="API - NutriComedor", version="2.15.0", lifespan=lifespan)
+app = FastAPI(title="API - NutriComedor", version="2.16.0", lifespan=lifespan)
 
 # Configuración de CORS (Mantiene compatibilidad con tu Frontend)
 app.add_middleware(
@@ -87,6 +90,7 @@ app.include_router(propuestas_menu.router, prefix="/api/v1")  # COM-8
 app.include_router(modelos_ml.router, prefix="/api/v1")       # COM-5 v4 / COM-8 v7
 app.include_router(reset_clave.router, prefix="/api/v1")      # COM-38
 app.include_router(ingredientes_admin.router, prefix="/api/v1")  # COM-37
+app.include_router(reportes_gestion.router, prefix="/api/v1")    # COM-50
 # COM-39 fix (trazabilidad): posición original del include de directivos, comentada.
 # app.include_router(directivos.router, prefix="/api/v1")     # COM-39 (antes, después de reset_clave)
 app.include_router(parametros.router, prefix="/api/v1")
