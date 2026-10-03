@@ -23,12 +23,18 @@
  *           insumos del ingrediente con precio de hoy y fuente, búsqueda y vinculación
  *           de insumos, insumos manuales, equivalencias uso->gramos, precios manuales
  *           por insumo, legacy por ingrediente, re-emparejado y duplicados/fusión).
- *   COM-44: (backend) comedores con FK de cascada; sin cambios de métodos aquí.
  *   COM-48: en RECETAS: getComponentesReceta, limpiarIngredientesReceta,
  *           getCategoriasAlimentos y createIngredienteDesdeReceta.
- *   COM-50 (este archivo): bloque REPORTES DE GESTIÓN: getReporteGestion (resumen
- *           ejecutivo + uso de presupuesto por día + sugerencias) y getPlanesGestion
- *           (selector de planes del comedor). Ningún método existente se modifica.
+ *   COM-50 v1/v2: getReporteGestion y getPlanesGestion.
+ *   COM-50 v3 (este archivo): bloque REPORTES DE GESTIÓN actualizado con la matriz
+ *           de alcances:
+ *             * getAlcanceReportes(usuarioId): GET /reportes-gestion/alcance
+ *               -> {tipo_alcance, niveles_permitidos, comedor_fijo, zonas, comedores}
+ *               (devuelve 403 si el perfil no tiene acceso: Admin Sistema u Operativo).
+ *             * getReporteGestion(params): parámetros extendidos con `nivel` y `zona`
+ *               para los perfiles municipales (macro/zona/comedor).
+ *           Ningún método existente se modifica; los ajustes de COM-50 v3 son solo
+ *           ampliaciones de los bloques de reportes.
  */
 
 const API_BASE = '/api/v1';
@@ -750,21 +756,41 @@ export const api = {
     },
 
     // ==========================================
-    // REPORTES DE GESTIÓN (COM-50 / HU-10)
+    // REPORTES DE GESTIÓN (COM-50 / HU-10) — COM-50 v3 (alcances por perfil)
     // ==========================================
-    // COM-50: resumen ejecutivo + uso de presupuesto por día + sugerencias de ahorro.
-    // params: { comedor_id, usuario_solicitante_id, candidata_id?, presupuesto_id? }
+    /**
+     * COM-50 v3: resuelve el alcance de reportería del usuario.
+     * Devuelve { tipo_alcance, niveles_permitidos, comedor_fijo, zonas, comedores }.
+     * Devuelve 403 (capturado por el caller) para Admin de Sistemas y Operativos.
+     */
+    getAlcanceReportes: async (usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/reportes-gestion/alcance?usuario_solicitante_id=${usuarioSolicitanteId}`);
+        if (!response.ok) {
+            const err = new Error(await leerErrorSeguro(response, 'Error al obtener el alcance de reportería'));
+            err.status = response.status;
+            throw err;
+        }
+        return response.json();
+    },
+    /**
+     * COM-50 v3: resumen ejecutivo + uso de presupuesto por día + sugerencias.
+     * params: { usuario_solicitante_id, nivel?, comedor_id?, zona?, candidata_id?, presupuesto_id? }
+     */
     getReporteGestion: async (params = {}) => {
         const qs = new URLSearchParams();
-        if (params.comedor_id) qs.append('comedor_id', params.comedor_id);
         if (params.usuario_solicitante_id) qs.append('usuario_solicitante_id', params.usuario_solicitante_id);
+        if (params.nivel) qs.append('nivel', params.nivel);
+        if (params.comedor_id) qs.append('comedor_id', params.comedor_id);
+        if (params.zona) qs.append('zona', params.zona);
         if (params.candidata_id) qs.append('candidata_id', params.candidata_id);
         if (params.presupuesto_id) qs.append('presupuesto_id', params.presupuesto_id);
         const response = await fetch(`${API_BASE}/reportes-gestion/resumen?${qs.toString()}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el reporte de gestión'));
         return response.json();
     },
-    // COM-50: selector de planes disponibles del comedor (propuestas + planificaciones)
+    /**
+     * COM-50 v3: selector de planes (propuestas + planificaciones) de un comedor del alcance.
+     */
     getPlanesGestion: async (comedorId, usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/reportes-gestion/planes?comedor_id=${comedorId}&usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener los planes disponibles'));
