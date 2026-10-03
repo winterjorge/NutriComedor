@@ -12,17 +12,17 @@ Historial:
    insumo (scraper día > manual insumo > legacy ingrediente > predicción RF).
  - COM-48: cada fila del detalle expone componente_nombre/componente_orden para el
    desglose agrupado del modal de Evaluar.
- - COM-49 (este archivo): FIX y AUDITORÍA del costeo por ración:
-     * La multiplicación gramos_por_unidad × cantidad_requerida es EXPLÍCITA y única
-       (gramos_totales); se elimina cualquier uso del factor por unidad como si fuera
-       el total de la línea (causa del síntoma "cobró 1 kg en vez de 500 g").
-     * Cada fila del detalle expone: cantidad, unidad_uso, gramos_por_unidad,
-       gramos_totales, ppg, precio_por_unidad_compra, unidad_compra, fuente y
-       equivalencia_usada, para validar el cálculo a simple vista en el modal.
-     * Se conserva el redondeo al alza de 0.10 como `costo_parcial_compra` (regla de
-       negocio de compra) pero el subtotal y el costo por ración se calculan con el
-       costo SIN piso (`costo_parcial`), evitando que condimentos de céntimos se
-       inflen a S/ 0.10 cada uno. Ambos valores se exponen en el detalle.
+ - COM-49: multiplicación explícita y auditable gramos_por_unidad × cantidad; detalle
+   con factores de auditoría (gramos_totales, ppg, precio/unidad de compra, fuente);
+   subtotal y costo por ración con costo SIN piso de 0.10 (el piso queda como
+   referencia de compra en costo_parcial_compra / costo_total_receta_compra).
+ - COM-49 v2 (este archivo): FIX del TypeError "unsupported operand type(s) for *:
+   'decimal.Decimal' and 'float'". psycopg2 devuelve las columnas NUMERIC como
+   decimal.Decimal; la equivalencia leída de ingredientes_equivalencias
+   (gramos_por_unidad_uso, NUMERIC(12,4)) se castea EXPLÍCITAMENTE a float antes de
+   multiplicar. Se blindan con float() todos los valores NUMERIC que entran al cálculo
+   por si alguna ruta los devuelve sin castear. K-means/Greedy no requerían cambio
+   (sus mapas ya casteaban al construirse).
 """
 import os
 import psycopg2
@@ -101,8 +101,10 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
     COM-49: costeo auditable por línea:
         gramos_totales = gramos_por_unidad_uso(equivalencia o estándar) × cantidad
         costo_linea    = gramos_totales × ppg (S/ por gramo del insumo elegido)
-    El subtotal y el costo por ración usan costo_linea SIN piso de 0.10; el valor con
-    piso se expone aparte como costo_parcial_compra (regla de compra histórica).
+    COM-49 v2: todos los valores NUMERIC leídos de la BD se castea a float antes de
+    operar (psycopg2 devuelve decimal.Decimal y Decimal*float lanza TypeError).
+    El subtotal y el costo por ración usan el costo SIN piso de 0.10; el valor con
+    piso se expone aparte como referencia de compra.
     """
     conn = None
     cur = None
@@ -156,11 +158,11 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
         for req in ingredientes_receta:
             unidad_abrev = (req['receta_unidad_abrev'] or '').lower()
             unidad_nombre = req['receta_unidad_nombre'] or ''
+            # COM-49 v2: cast explícito de NUMERIC a float
             cantidad_requerida = float(req['cantidad_requerida'])
             factor_receta = float(req['receta_factor_a_base'])
             peso_estimado_base = float(req['peso_estimado_g'])
 
-            # Display de la cantidad en la unidad de USO de la receta
             unidad_display = f"{cantidad_requerida} {unidad_nombre.lower()}"
 
             cur.execute("""
@@ -177,7 +179,7 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
                 opc = precios_insumo.get(ins['insumo_id'])
                 confianza = None
                 if opc:
-                    ppg = opc['ppg']
+                    ppg = float(opc['ppg'])
                     fuente = opc['fuente']
                     precio_unidad_compra = opc.get('precio_por_unidad')
                     unidad_compra = opc.get('unidad_compra_abrev')
@@ -186,7 +188,7 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
                     if not (ok and pred):
                         continue
                     g_compra = gramos_por_unidad_compra(
-                        ins['u_abrev'], ins['u_tipo'], ins['u_factor'], peso_estimado_base)
+                        ins['u_abrev'], ins['u_tipo'], float(ins['u_factor']), peso_estimado_base)
                     if g_compra <= 0:
                         continue
                     ppg = float(pred) / g_compra
@@ -195,14 +197,16 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
                     precio_unidad_compra = pred
                     unidad_compra = ins['u_abrev']
 
-                # COM-49: factor por unidad de USO (equivalencia o estándar) y
-                # multiplicación EXPLÍCITA por la cantidad de la línea
+                # COM-49 v2 (FIX): la equivalencia viene como decimal.Decimal desde
+                # psycopg2 (NUMERIC); se castea a float antes de cualquier operación.
+                # COM-49 v1 (trazabilidad): línea anterior sin cast, comentada:
+                # gramos_por_unidad = eq['gramos_por_unidad_uso'] if eq else gramos_por_unidad_uso(...)
                 eq = obtener_equivalencia(
                     cur, req['ingrediente_id'], ins['insumo_id'], req['receta_unidad_medida_id'])
-                gramos_por_unidad = eq['gramos_por_unidad_uso'] if eq else gramos_por_unidad_uso(
+                gramos_por_unidad = float(eq['gramos_por_unidad_uso']) if eq else gramos_por_unidad_uso(
                     cur, req['ingrediente_id'], ins['insumo_id'], req['receta_unidad_medida_id'],
                     unidad_abrev, req['receta_tipo_magnitud'], factor_receta, peso_estimado_base)
-                gramos_totales = gramos_por_unidad * cantidad_requerida
+                gramos_totales = float(gramos_por_unidad) * cantidad_requerida
                 costo_sin_redondear = gramos_totales * ppg
                 costo_linea_compra = redondear_hacia_arriba_010(costo_sin_redondear)
 
@@ -229,12 +233,12 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
                     gramos_por_unidad = gramos_por_unidad_uso(
                         cur, req['ingrediente_id'], None, req['receta_unidad_medida_id'],
                         unidad_abrev, req['receta_tipo_magnitud'], factor_receta, peso_estimado_base)
-                    gramos_totales = gramos_por_unidad * cantidad_requerida
-                    costo_sin_redondear = gramos_totales * legacy['ppg']
+                    gramos_totales = float(gramos_por_unidad) * cantidad_requerida
+                    costo_sin_redondear = gramos_totales * float(legacy['ppg'])
                     mejor = {
                         'insumo_id': None,
                         'insumo_nombre': legacy['insumo_nombre'],
-                        'ppg': legacy['ppg'],
+                        'ppg': float(legacy['ppg']),
                         'fuente': 'LEGACY_INGREDIENTE',
                         'confianza': None,
                         'precio_unidad_compra': legacy.get('precio_por_unidad'),
@@ -291,10 +295,11 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
                 # COM-49: factores de auditoría del costeo
                 "cantidad": cantidad_requerida,
                 "unidad_uso_abrev": req['receta_unidad_abrev'],
-                "gramos_por_unidad": round(mejor['gramos_por_unidad'], 4),
-                "gramos_totales": round(mejor['gramos_totales'], 2),
-                "ppg": round(mejor['ppg'], 6),
-                "precio_por_unidad_compra": mejor['precio_unidad_compra'],
+                "gramos_por_unidad": round(float(mejor['gramos_por_unidad']), 4),
+                "gramos_totales": round(float(mejor['gramos_totales']), 2),
+                "ppg": round(float(mejor['ppg']), 6),
+                "precio_por_unidad_compra": (round(float(mejor['precio_unidad_compra']), 2)
+                                             if mejor['precio_unidad_compra'] is not None else None),
                 "unidad_compra_abrev": mejor['unidad_compra'],
                 "equivalencia_usada": mejor['equivalencia_usada'],
                 "fuente_precio": mejor['fuente'],
