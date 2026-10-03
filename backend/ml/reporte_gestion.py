@@ -13,6 +13,16 @@ Objetivo: COM-50 (HU-10): motor del reporte "Resumen ejecutivo y recomendaciones
                - ALERTA: margen negativo (recolección no cubre costos) y semana que
                  supera el presupuesto declarado.
                - VARIEDAD: platos repetidos dentro de la misma semana.
+Historial:
+ - COM-50 v1: versión original.
+ - COM-50 v2 (este archivo): blindaje operativo tras reporte de error 500 en perfil
+   Presidente:
+     * Todo numérico leído de BD se castea a float (psycopg2 devuelve decimal.Decimal).
+     * El bucle de sugerencias por día va dentro de try/except: una receta problemática
+       se omite en lugar de tumbar el reporte completo.
+     * Si el bloque de sugerencias fallara en su totalidad, el reporte se entrega con
+       sugerencias=[] + nota de degradación (nunca 500).
+     * Trazas: traceback.print_exc() en los puntos degradados para diagnóstico en logs.
 Fuente del plan (precedencia): última propuesta SELECCIONADA del comedor -> última
           propuesta del comedor -> última planificación guardada
           (presupuesto_semanal + planificacion_dia). También admite ids explícitos.
@@ -20,6 +30,7 @@ Uso: Importado por routers/reportes_gestion.py. Recibe cursor psycopg2 (RealDict
 Referencia: tickets COM-50 / HU-10 (solo trazabilidad).
 """
 import json
+import traceback
 from datetime import date
 
 from precios_insumos import (
@@ -53,6 +64,7 @@ def _costo_receta_por_racion(cur, receta_id, ctx):
     COM-50: costo por ración de una receta con la misma jerarquía de fuentes que
     Evaluar/Greedy (scraper día/última corrida > manual insumo > legacy > predicción RF)
     y gramos de la unidad de USO vía equivalencias o conversión estándar.
+    COM-50 v2: todos los valores NUMERIC se casteen a float antes de operar.
     Retorna (costo_por_racion, precio_completo); None si la receta no existe.
     """
     if receta_id in ctx['cache_costo']:
@@ -78,18 +90,24 @@ def _costo_receta_por_racion(cur, receta_id, ctx):
     total = 0.0
     completo = True
     for fila in cur.fetchall():
-        opc = _opcion_con_prediccion(
-            cur, fila['ingrediente_id'], ctx['fecha'],
-            ctx['precios_insumo'], fila['peso_estimado_g'])
-        if opc is None:
+        try:
+            opc = _opcion_con_prediccion(
+                cur, fila['ingrediente_id'], ctx['fecha'],
+                ctx['precios_insumo'], float(fila['peso_estimado_g'] or 100.0))
+            if opc is None:
+                completo = False
+                continue
+            g = ctx['eq_map'].get((fila['ingrediente_id'], opc['insumo_id'], fila['unidad_medida_id']))
+            if g is None:
+                g = gramos_por_unidad_estandar(
+                    fila['unidad_abrev'], fila['tipo_magnitud'],
+                    float(fila['factor_a_base'] or 0), float(fila['peso_estimado_g'] or 100.0))
+            total += (float(g) * float(fila['cantidad_requerida'] or 0)) * float(opc['ppg'])
+        except Exception:
+            # COM-50 v2: una línea problemática marca la receta como incompleta pero no
+            # interrumpe el reporte; la traza queda en logs para diagnóstico.
+            traceback.print_exc()
             completo = False
-            continue
-        g = ctx['eq_map'].get((fila['ingrediente_id'], opc['insumo_id'], fila['unidad_medida_id']))
-        if g is None:
-            g = gramos_por_unidad_estandar(
-                fila['unidad_abrev'], fila['tipo_magnitud'],
-                fila['factor_a_base'], fila['peso_estimado_g'])
-        total += (g * float(fila['cantidad_requerida'])) * opc['ppg']
     resultado = (round(total / raciones, 2) if raciones else round(total, 2), completo)
     ctx['cache_costo'][receta_id] = resultado
     return resultado
@@ -115,9 +133,10 @@ def _cumple_reglas_vigentes(nombres_ingredientes, re_permitida, re_vetada):
 # ==========================================
 def _resolver_plan(cur, comedor_id, candidata_id=None, presupuesto_id=None):
     """
-    Devuelve (fuente, dias, resumen_base, presupuesto_total) del plan a reportar.
+    Devuelve (fuente, dias, resumen_base, presupuesto_total, plan_id) del plan a reportar.
     Precedencia: candidata_id explícita -> última seleccionada del comedor ->
     última candidata del comedor -> presupuesto_id explícito -> último presupuesto.
+    COM-50 v2: todos los importes se casteen a float al normalizar los días.
     """
     # 1) Propuesta candidata (seleccionada o última)
     if candidata_id:
@@ -144,19 +163,23 @@ def _resolver_plan(cur, comedor_id, candidata_id=None, presupuesto_id=None):
     if cand:
         menu = cand['menu'] if isinstance(cand['menu'], list) else json.loads(cand['menu'] or '[]')
         resumen_base = cand['resumen'] if isinstance(cand['resumen'], dict) else json.loads(cand['resumen'] or '{}')
-        dias = [{
-            'dia_semana': d.get('dia_semana'),
-            'dia_nombre': d.get('dia_nombre'),
-            'fecha': d.get('fecha'),
-            'receta_id': d.get('receta_id'),
-            'receta_nombre': d.get('receta_nombre'),
-            'costo_racion': float(d.get('costo_racion') or 0),
-            'costo_total_dia': float(d.get('costo_total_dia') or 0),
-            'recoleccion_proyectada': float(d.get('recoleccion_proyectada') or 0),
-            'total_comensales': None,
-            'cluster_codigo': d.get('cluster_codigo'),
-            'cluster_etiqueta': d.get('cluster_etiqueta'),
-        } for d in menu]
+        dias = []
+        for d in (menu if isinstance(menu, list) else []):
+            if not isinstance(d, dict):
+                continue
+            dias.append({
+                'dia_semana': d.get('dia_semana'),
+                'dia_nombre': d.get('dia_nombre'),
+                'fecha': d.get('fecha'),
+                'receta_id': d.get('receta_id'),
+                'receta_nombre': d.get('receta_nombre'),
+                'costo_racion': float(d.get('costo_racion') or 0),
+                'costo_total_dia': float(d.get('costo_total_dia') or 0),
+                'recoleccion_proyectada': float(d.get('recoleccion_proyectada') or 0),
+                'total_comensales': None,
+                'cluster_codigo': d.get('cluster_codigo'),
+                'cluster_etiqueta': d.get('cluster_etiqueta'),
+            })
         return fuente, dias, resumen_base, resumen_base.get('presupuesto_semanal'), cand['id']
 
     # 2) Planificación guardada (presupuesto_semanal + planificacion_dia)
@@ -206,6 +229,8 @@ def generar_reporte_gestion(cur, comedor_id, candidata_id=None, presupuesto_id=N
     """
     COM-50: construye el resumen ejecutivo + uso de presupuesto por día + sugerencias
     automáticas del plan semanal vigente del comedor.
+    COM-50 v2: el bloque de sugerencias está aislado; cualquier fallo interno degrada a
+    sugerencias=[] con nota (y traza en logs) en lugar de devolver error 500.
     """
     fuente, dias, resumen_base, presupuesto_total, plan_id = _resolver_plan(
         cur, comedor_id, candidata_id, presupuesto_id)
@@ -244,7 +269,7 @@ def generar_reporte_gestion(cur, comedor_id, candidata_id=None, presupuesto_id=N
     # ---- Uso de presupuesto por día (gráfico de barras) ----
     uso_por_dia = []
     for d in dias:
-        pct = round((d['costo_total_dia'] / presupuesto_total) * 100, 2) if presupuesto_total else None
+        pct = round((d['costo_total_dia'] / float(presupuesto_total)) * 100, 2) if presupuesto_total else None
         uso_por_dia.append({
             'dia_nombre': d['dia_nombre'],
             'fecha': d['fecha'],
@@ -254,86 +279,96 @@ def generar_reporte_gestion(cur, comedor_id, candidata_id=None, presupuesto_id=N
             'pct_del_presupuesto': pct,
         })
 
-    # ---- Sugerencias automáticas ----
+    # ---- Sugerencias automáticas (bloque aislado COM-50 v2) ----
     sugerencias = []
-    re_permitida, re_vetada, _, _ = cargar_reglas_proteinas(cur)
-    recetas_usadas = {d['receta_id'] for d in dias if d['receta_id']}
+    nota_degradacion = None
+    try:
+        re_permitida, re_vetada, _, _ = cargar_reglas_proteinas(cur)
+        recetas_usadas = {d['receta_id'] for d in dias if d['receta_id']}
 
-    # Nombres de ingredientes por receta candidata (validación R1/R2)
-    def _nombres_ingredientes(rec_id):
-        cur.execute("""
-            SELECT i.nombre
-            FROM receta_ingrediente ri JOIN ingredientes i ON i.id = ri.ingrediente_id
-            WHERE ri.receta_id = %s;
-        """, (rec_id,))
-        return [r['nombre'] for r in cur.fetchall()]
+        def _nombres_ingredientes(rec_id):
+            cur.execute("""
+                SELECT i.nombre
+                FROM receta_ingrediente ri JOIN ingredientes i ON i.id = ri.ingrediente_id
+                WHERE ri.receta_id = %s;
+            """, (rec_id,))
+            return [r['nombre'] for r in cur.fetchall()]
 
-    for d in dias:
-        if not d['receta_id'] or d['cluster_codigo'] is None:
-            continue
-        costo_actual = _costo_receta_por_racion(cur, d['receta_id'], ctx)
-        if not costo_actual or not costo_actual[1]:
-            continue  # sin precio completo: no se sugiere sobre base incierta
-        cur.execute("""
-            SELECT rc.receta_id, r.nombre
-            FROM recetas_clusters rc
-            JOIN recetas_almuerzo r ON r.id = rc.receta_id
-            WHERE rc.modelo_id = %s AND rc.cluster_codigo = %s
-              AND rc.receta_id <> %s;
-        """, (modelo['id'] if modelo else 0, d['cluster_codigo'], d['receta_id']))
-        mejor_alt = None
-        for cand in cur.fetchall():
-            if cand['receta_id'] in recetas_usadas:
-                continue  # variedad: no sugerir algo ya usado en la semana
-            if not _cumple_reglas_vigentes(_nombres_ingredientes(cand['receta_id']), re_permitida, re_vetada):
+        for d in dias:
+            # COM-50 v2: cada día se evalúa de forma independiente; un fallo se omite
+            try:
+                if not d['receta_id'] or d['cluster_codigo'] is None or modelo is None:
+                    continue
+                costo_actual = _costo_receta_por_racion(cur, d['receta_id'], ctx)
+                if not costo_actual or not costo_actual[1]:
+                    continue  # sin precio completo: no se sugiere sobre base incierta
+                cur.execute("""
+                    SELECT rc.receta_id, r.nombre
+                    FROM recetas_clusters rc
+                    JOIN recetas_almuerzo r ON r.id = rc.receta_id
+                    WHERE rc.modelo_id = %s AND rc.cluster_codigo = %s
+                      AND rc.receta_id <> %s;
+                """, (modelo['id'], d['cluster_codigo'], d['receta_id']))
+                mejor_alt = None
+                for cand in cur.fetchall():
+                    if cand['receta_id'] in recetas_usadas:
+                        continue  # variedad: no sugerir algo ya usado en la semana
+                    if not _cumple_reglas_vigentes(_nombres_ingredientes(cand['receta_id']), re_permitida, re_vetada):
+                        continue
+                    costo_alt = _costo_receta_por_racion(cur, cand['receta_id'], ctx)
+                    if not costo_alt or not costo_alt[1]:
+                        continue
+                    if costo_alt[0] < costo_actual[0] and (mejor_alt is None or costo_alt[0] < mejor_alt[0]):
+                        mejor_alt = (cand['nombre'], costo_alt[0])
+                if mejor_alt:
+                    ahorro_soles = round(costo_actual[0] - mejor_alt[1], 2)
+                    ahorro_pct = round((ahorro_soles / costo_actual[0]) * 100, 1) if costo_actual[0] else 0
+                    if ahorro_pct >= UMBRAL_SUGERENCIA_PCT:
+                        sugerencias.append({
+                            'tipo': 'ahorro',
+                            'dia_nombre': d['dia_nombre'],
+                            'receta_actual': d['receta_nombre'],
+                            'receta_sugerida': mejor_alt[0],
+                            'ahorro_pct': ahorro_pct,
+                            'ahorro_soles_por_racion': ahorro_soles,
+                            'texto': (f"Para ahorrar {ahorro_pct}% el {d['dia_nombre']}: reemplace "
+                                      f"'{d['receta_nombre']}' (S/ {costo_actual[0]:.2f}/ración) por "
+                                      f"'{mejor_alt[0]}' (S/ {mejor_alt[1]:.2f}/ración) del mismo cluster "
+                                      f"'{d['cluster_etiqueta'] or 'similar'}'."),
+                        })
+            except Exception:
+                traceback.print_exc()
                 continue
-            costo_alt = _costo_receta_por_racion(cur, cand['receta_id'], ctx)
-            if not costo_alt or not costo_alt[1]:
-                continue
-            if costo_alt[0] < costo_actual[0] and (mejor_alt is None or costo_alt[0] < mejor_alt[0]):
-                mejor_alt = (cand['nombre'], costo_alt[0])
-        if mejor_alt:
-            ahorro_soles = round(costo_actual[0] - mejor_alt[1], 2)
-            ahorro_pct = round((ahorro_soles / costo_actual[0]) * 100, 1) if costo_actual[0] else 0
-            if ahorro_pct >= UMBRAL_SUGERENCIA_PCT:
-                sugerencias.append({
-                    'tipo': 'ahorro',
-                    'dia_nombre': d['dia_nombre'],
-                    'receta_actual': d['receta_nombre'],
-                    'receta_sugerida': mejor_alt[0],
-                    'ahorro_pct': ahorro_pct,
-                    'ahorro_soles_por_racion': ahorro_soles,
-                    'texto': (f"Para ahorrar {ahorro_pct}% el {d['dia_nombre']}: reemplace "
-                              f"'{d['receta_nombre']}' (S/ {costo_actual[0]:.2f}/ración) por "
-                              f"'{mejor_alt[0]}' (S/ {mejor_alt[1]:.2f}/ración) del mismo cluster "
-                              f"'{d['cluster_etiqueta'] or 'similar'}'."),
-                })
 
-    # Alertas globales
-    if margen is not None and margen < 0:
-        sugerencias.append({
-            'tipo': 'alerta',
-            'texto': (f"La recolección proyectada (S/ {recoleccion:.2f}) NO cubre el costo semanal "
-                      f"(S/ {costo_total:.2f}): margen negativo de S/ {abs(margen):.2f}. Revise precios "
-                      f"de venta o aplique las sugerencias de ahorro."),
-        })
-    if presupuesto_total and costo_total > presupuesto_total:
-        sugerencias.append({
-            'tipo': 'alerta',
-            'texto': (f"El costo semanal (S/ {costo_total:.2f}) supera el presupuesto declarado "
-                      f"(S/ {presupuesto_total:.2f}) en S/ {round(costo_total - presupuesto_total, 2):.2f}."),
-        })
-    # Variedad: platos repetidos en la semana
-    conteo = {}
-    for d in dias:
-        if d['receta_nombre']:
-            conteo[d['receta_nombre']] = conteo.get(d['receta_nombre'], 0) + 1
-    for nombre, n in conteo.items():
-        if n > 1:
+        # Alertas globales
+        if margen is not None and float(margen) < 0:
             sugerencias.append({
-                'tipo': 'variedad',
-                'texto': f"El plato '{nombre}' se repite {n} veces en la semana; considere alternarlo para mejorar la variedad.",
+                'tipo': 'alerta',
+                'texto': (f"La recolección proyectada (S/ {float(recoleccion):.2f}) NO cubre el costo semanal "
+                          f"(S/ {float(costo_total):.2f}): margen negativo de S/ {abs(float(margen)):.2f}. Revise precios "
+                          f"de venta o aplique las sugerencias de ahorro."),
             })
+        if presupuesto_total and float(costo_total) > float(presupuesto_total):
+            sugerencias.append({
+                'tipo': 'alerta',
+                'texto': (f"El costo semanal (S/ {float(costo_total):.2f}) supera el presupuesto declarado "
+                          f"(S/ {float(presupuesto_total):.2f}) en S/ {round(float(costo_total) - float(presupuesto_total), 2):.2f}."),
+            })
+        # Variedad: platos repetidos en la semana
+        conteo = {}
+        for d in dias:
+            if d['receta_nombre']:
+                conteo[d['receta_nombre']] = conteo.get(d['receta_nombre'], 0) + 1
+        for nombre, n in conteo.items():
+            if n > 1:
+                sugerencias.append({
+                    'tipo': 'variedad',
+                    'texto': f"El plato '{nombre}' se repite {n} veces en la semana; considere alternarlo para mejorar la variedad.",
+                })
+    except Exception:
+        # COM-50 v2: degradación controlada: el reporte se entrega sin sugerencias
+        traceback.print_exc()
+        nota_degradacion = 'No fue posible calcular las sugerencias de ahorro en esta ejecución; el resto del reporte es válido.'
 
     return {
         'comedor_id': comedor_id,
@@ -341,18 +376,19 @@ def generar_reporte_gestion(cur, comedor_id, candidata_id=None, presupuesto_id=N
         'plan_id': plan_id,
         'generado_el': fecha_hoy.isoformat(),
         'resumen': {
-            'costo_total_semana': round(costo_total, 2),
+            'costo_total_semana': round(float(costo_total), 2),
             'costo_racion_promedio': costo_racion_prom,
-            'recoleccion_total_semana': round(recoleccion, 2),
-            'margen_proyectado': round(margen, 2),
+            'recoleccion_total_semana': round(float(recoleccion), 2),
+            'margen_proyectado': round(float(margen), 2),
             'presupuesto_semanal': presupuesto_total,
-            'dentro_de_presupuesto': bool(presupuesto_total and costo_total <= presupuesto_total),
+            'dentro_de_presupuesto': bool(presupuesto_total and float(costo_total) <= float(presupuesto_total)),
             'n_dias': len(dias),
             'total_comensales_dia': comensales_dia,
         },
         'uso_presupuesto_por_dia': uso_por_dia,
         'menu': dias,
         'sugerencias': sugerencias,
+        'nota_sugerencias': nota_degradacion,
         'umbral_sugerencia_pct': UMBRAL_SUGERENCIA_PCT,
     }
 
