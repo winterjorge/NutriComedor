@@ -1,35 +1,73 @@
 """
 routers/recetas.py
-Objetivo: Endpoints del CRUD de recetas, sus ingredientes (ahora por componente, COM-48)
-          y evaluación de costos.
+Objetivo: Contener la lógica de los endpoints para el CRUD de recetas, sus ingredientes
+          (ahora por componente, COM-48) y evaluación de costos.
 Uso: Registrado en main.py con prefijo /api/v1.
 Historial:
  - Sprint 1/2: versión original.
  - COM-45: CREATE/UPDATE persisten raciones; orden por raciones; artefactos corregidos.
- - COM-48 (este archivo): esquema multi-componente:
-     * GET /recetas/componentes: catálogo activo de componentes (orden de exhibición).
-     * POST /recetas/{id}/ingredientes exige componente_id y el ON CONFLICT usa la
-       nueva unicidad (receta, ingrediente, componente, unidad).
-     * GET /recetas/{id} devuelve cada línea con componente_id y componente_nombre.
-     * DELETE /recetas/{id}/ingredientes (nuevo): limpia TODAS las líneas de la receta
-       para la sincronización de edición del modal (con componentes, un ingrediente
-       puede tener varias filas y borrarlo por id las perdería todas).
-     * El DELETE por ingrediente_id se conserva COMENTADO su alcance anterior: ahora
-       elimina las filas del ingrediente en TODOS los componentes de la receta.
-   Los motores (optimizador/K-means/Greedy) no cambian: suman filas independientes.
+ - COM-48: esquema multi-componente: GET /componentes, detalle con componente_id/nombre,
+   POST ingredientes exige componente_id, DELETE de todas las líneas para sincronizar
+   edición; unicidad (receta, ingrediente, componente, unidad).
+ - COM-48 v2 (este archivo): alta de ingredientes DE CATÁLOGO desde el propio modal de
+   creación/edición de recetas:
+     * GET  /recetas/categorias         -> catálogo de categorías de alimentos.
+     * POST /recetas/ingredientes-nuevos-> crea el ingrediente y devuelve su id para
+       seleccionarlo al instante en la fila de la receta.
+   Gate: Administrador de Sistemas O cualquier perfil con el módulo 'recetario'
+   (quien puede armar recetas puede completar el catálogo sin salir del flujo).
+   Las rutas literales se declaran ANTES de /{receta_id} para no chocar con el path
+   param. Ningún endpoint existente se elimina.
 """
 from datetime import date
 
 import psycopg2
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from psycopg2.extras import RealDictCursor
 
 from database import get_db
+from permisos import es_admin_sistema
 from schemas.receta import RecetaInput, IngredienteRecetaInput, RecetaUpdate, RecetaListResponse, RecetaResponse
 from optimizador import calcular_costo_receta
 from typing import Optional
 
 router = APIRouter(prefix="/recetas", tags=["Recetas"])
+
+
+# ==========================================
+# COM-48 v2: MODELO Y GATE DEL ALTA DE INGREDIENTES DESDE RECETAS
+# ==========================================
+class CrearIngredienteRecetaInput(BaseModel):
+    """Payload mínimo para crear un ingrediente de catálogo desde el modal de receta."""
+    usuario_solicitante_id: int
+    nombre: str
+    categoria_id: Optional[int] = None
+    unidad_medida_id: int          # unidad de USO por defecto del ingrediente
+    peso_estimado_g: float = Field(100.0, gt=0)
+
+
+def _puede_gestionar_recetas(cur, usuario_id: int) -> bool:
+    """
+    COM-48 v2: True si es Administrador de Sistemas o si posee membresía activa en un
+    rol con el módulo 'recetario' (Directivo/Operativo/Admin según matriz COM-25).
+    """
+    if not usuario_id:
+        return False
+    try:
+        if es_admin_sistema(cur, usuario_id):
+            return True
+    except Exception:
+        pass
+    cur.execute("""
+        SELECT 1
+        FROM usuario_grupo ug
+        JOIN roles_modulos rm ON rm.rol_id = ug.rol_id
+        JOIN modulos_sistema m ON m.id = rm.modulo_id
+        WHERE ug.usuario_id = %s AND ug.estado_activo = TRUE AND m.clave = 'recetario'
+        LIMIT 1;
+    """, (usuario_id,))
+    return cur.fetchone() is not None
 
 
 @router.get("/con-costo")
@@ -56,7 +94,7 @@ def get_recetas_con_costo(fecha: str = None, db=Depends(get_db)):
 @router.get("/componentes")
 def get_componentes_receta(db=Depends(get_db)):
     """COM-48: componentes activos de una receta (Ensalada, Plato de fondo, Refresco,
-    Fruta y futuros como Sopa), ordenados para exhibición."""
+    Fruta y futuros), ordenados para exhibición."""
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("""
@@ -66,6 +104,67 @@ def get_componentes_receta(db=Depends(get_db)):
             ORDER BY orden, id;
         """)
         return cur.fetchall()
+    finally:
+        cur.close()
+
+
+# COM-48 v2: catálogo de categorías de alimentos (para el alta de ingredientes en línea)
+@router.get("/categorias")
+def get_categorias_alimentos(db=Depends(get_db)):
+    """COM-48 v2: categorías del catálogo de alimentos, para el sub-formulario de
+    nuevo ingrediente dentro del modal de receta."""
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("SELECT id, nombre FROM categorias_alimentos ORDER BY nombre;")
+        return cur.fetchall()
+    finally:
+        cur.close()
+
+
+# COM-48 v2: alta de ingrediente de catálogo desde el modal de receta
+@router.post("/ingredientes-nuevos", status_code=201)
+def crear_ingrediente_desde_receta(data: CrearIngredienteRecetaInput, db=Depends(get_db)):
+    """
+    COM-48 v2: crea un ingrediente nuevo (nombre único, categoría opcional, unidad de
+    USO y peso estimado) y devuelve su id para que el modal lo deje seleccionado en la
+    fila correspondiente. Gate: Admin de Sistemas o perfil con módulo 'recetario'.
+    """
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        if not _puede_gestionar_recetas(cur, data.usuario_solicitante_id):
+            raise HTTPException(
+                status_code=403,
+                detail="Sin permiso: solo el Admin de Sistemas o perfiles con módulo 'recetario' pueden crear ingredientes.")
+        nombre = (data.nombre or '').strip()
+        if len(nombre) < 2:
+            raise HTTPException(status_code=400, detail="El nombre del ingrediente es obligatorio.")
+        cur.execute("SELECT id FROM unidades_medida WHERE id = %s;", (data.unidad_medida_id,))
+        if not cur.fetchone():
+            raise HTTPException(status_code=400, detail="Unidad de medida inexistente.")
+        cur.execute("SELECT id FROM ingredientes WHERE LOWER(nombre) = LOWER(%s);", (nombre,))
+        if cur.fetchone():
+            raise HTTPException(status_code=400, detail=f"Ya existe un ingrediente llamado '{nombre}'.")
+        cur.execute("""
+            INSERT INTO ingredientes (nombre, categoria_id, unidad_medida_id, peso_estimado_g)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id, nombre;
+        """, (nombre, data.categoria_id, data.unidad_medida_id, data.peso_estimado_g))
+        nuevo = cur.fetchone()
+        db.commit()
+        return {
+            'id': nuevo['id'],
+            'nombre': nuevo['nombre'],
+            'message': f"Ingrediente '{nuevo['nombre']}' creado. Ya puede seleccionarlo en la receta; "
+                       f"vincúlele un insumo o precio manual desde Gestión de Ingredientes o Evaluar.",
+        }
+    except HTTPException:
+        raise
+    except psycopg2.IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Ya existe un ingrediente con ese nombre.")
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         cur.close()
 
@@ -124,14 +223,6 @@ def get_receta_detalle(receta_id: int, db=Depends(get_db)):
         receta = cur.fetchone()
         if not receta:
             raise HTTPException(status_code=404, detail="Receta no encontrada")
-        # COM-48 (trazabilidad): consulta anterior sin componente, comentada:
-        # cur.execute("""
-        #     SELECT ri.*, i.nombre as ingrediente_nombre, um.nombre as unidad_nombre, um.abreviatura as unidad_abrev
-        #     FROM receta_ingrediente ri
-        #     JOIN ingredientes i ON ri.ingrediente_id = i.id
-        #     JOIN unidades_medida um ON ri.unidad_medida_id = um.id
-        #     WHERE ri.receta_id = %s;
-        # """, (receta_id,))
         # COM-48: cada línea con su componente (nombre y orden) para el modal de edición
         cur.execute("""
             SELECT ri.*, i.nombre as ingrediente_nombre,
@@ -223,8 +314,7 @@ def delete_receta(receta_id: int, db=Depends(get_db)):
 def add_ingrediente_a_receta(receta_id: int, data: IngredienteRecetaInput, db=Depends(get_db)):
     """
     COM-48: agrega (o actualiza) una línea ingrediente-componente-cantidad. El mismo
-    ingrediente puede registrarse en componentes distintos con cantidades independientes;
-    el ON CONFLICT aplica a la unicidad (receta, ingrediente, componente, unidad).
+    ingrediente puede registrarse en componentes distintos con cantidades independientes.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -238,14 +328,6 @@ def add_ingrediente_a_receta(receta_id: int, data: IngredienteRecetaInput, db=De
             cur.execute(q, p)
             if not cur.fetchone():
                 raise HTTPException(status_code=404, detail="Entidad relacionada no encontrada")
-        # COM-48 (trazabilidad): INSERT anterior sin componente_id, comentado:
-        # cur.execute("""
-        #     INSERT INTO receta_ingrediente (receta_id, ingrediente_id, unidad_medida_id, cantidad_requerida)
-        #     VALUES (%s, %s, %s, %s)
-        #     ON CONFLICT (receta_id, ingrediente_id, unidad_medida_id)
-        #     DO UPDATE SET cantidad_requerida = EXCLUDED.cantidad_requerida
-        #     RETURNING *;
-        # """, (receta_id, data.ingrediente_id, data.unidad_medida_id, data.cantidad_requerida))
         cur.execute("""
             INSERT INTO receta_ingrediente (receta_id, ingrediente_id, componente_id, unidad_medida_id, cantidad_requerida)
             VALUES (%s, %s, %s, %s, %s)
@@ -264,8 +346,7 @@ def add_ingrediente_a_receta(receta_id: int, data: IngredienteRecetaInput, db=De
         cur.close()
 
 
-# COM-48: limpieza total de líneas de una receta (sincronización de edición del modal).
-# Con componentes, un ingrediente puede tener varias filas; editar = limpiar y regrabar.
+# COM-48: limpieza total de líneas de una receta (sincronización de edición del modal)
 @router.delete("/{receta_id}/ingredientes")
 def delete_ingredientes_de_receta(receta_id: int, db=Depends(get_db)):
     """COM-48: elimina TODAS las líneas de ingredientes de la receta (usada al editar)."""
@@ -284,9 +365,9 @@ def delete_ingredientes_de_receta(receta_id: int, db=Depends(get_db)):
 @router.delete("/{receta_id}/ingredientes/{ingrediente_id}")
 def delete_ingrediente_de_receta(receta_id: int, ingrediente_id: int, db=Depends(get_db)):
     """
-    COM-48 (trazabilidad): se conserva el endpoint, pero su alcance cambia: elimina las
-    filas del ingrediente en TODOS los componentes de la receta. Para borrar una sola
-    fila use la sincronización de edición (DELETE /{receta_id}/ingredientes + re-grabado).
+    COM-48 (trazabilidad): se conserva el endpoint, pero elimina las filas del
+    ingrediente en TODOS los componentes de la receta. Para borrar una sola fila use la
+    sincronización de edición (DELETE /{receta_id}/ingredientes + re-grabado).
     """
     cur = db.cursor()
     try:
