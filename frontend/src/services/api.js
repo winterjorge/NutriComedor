@@ -23,12 +23,12 @@
  *           insumos del ingrediente con precio de hoy y fuente, búsqueda y vinculación
  *           de insumos, insumos manuales, equivalencias uso->gramos, precios manuales
  *           por insumo, legacy por ingrediente, re-emparejado y duplicados/fusión).
- *   COM-48: en RECETAS: getComponentesReceta (catálogo Ensalada/Plato de fondo/
- *           Refresco/Fruta) y limpiarIngredientesReceta (DELETE de todas las líneas).
- *   COM-48 v2 (este archivo): en RECETAS se agregan getCategoriasAlimentos y
- *           createIngredienteDesdeReceta (alta de ingrediente de catálogo desde el
- *           modal de receta, gate por módulo 'recetario' o Admin). Ningún método
- *           existente se modifica.
+ *   COM-44: (backend) comedores con FK de cascada; sin cambios de métodos aquí.
+ *   COM-48: en RECETAS: getComponentesReceta, limpiarIngredientesReceta,
+ *           getCategoriasAlimentos y createIngredienteDesdeReceta.
+ *   COM-50 (este archivo): bloque REPORTES DE GESTIÓN: getReporteGestion (resumen
+ *           ejecutivo + uso de presupuesto por día + sugerencias) y getPlanesGestion
+ *           (selector de planes del comedor). Ningún método existente se modifica.
  */
 
 const API_BASE = '/api/v1';
@@ -750,8 +750,29 @@ export const api = {
     },
 
     // ==========================================
-    // RECETAS (+ COM-48: componentes y limpieza de líneas; + COM-48 v2: categorías y
-    // alta de ingredientes desde el modal)
+    // REPORTES DE GESTIÓN (COM-50 / HU-10)
+    // ==========================================
+    // COM-50: resumen ejecutivo + uso de presupuesto por día + sugerencias de ahorro.
+    // params: { comedor_id, usuario_solicitante_id, candidata_id?, presupuesto_id? }
+    getReporteGestion: async (params = {}) => {
+        const qs = new URLSearchParams();
+        if (params.comedor_id) qs.append('comedor_id', params.comedor_id);
+        if (params.usuario_solicitante_id) qs.append('usuario_solicitante_id', params.usuario_solicitante_id);
+        if (params.candidata_id) qs.append('candidata_id', params.candidata_id);
+        if (params.presupuesto_id) qs.append('presupuesto_id', params.presupuesto_id);
+        const response = await fetch(`${API_BASE}/reportes-gestion/resumen?${qs.toString()}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el reporte de gestión'));
+        return response.json();
+    },
+    // COM-50: selector de planes disponibles del comedor (propuestas + planificaciones)
+    getPlanesGestion: async (comedorId, usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/reportes-gestion/planes?comedor_id=${comedorId}&usuario_solicitante_id=${usuarioSolicitanteId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener los planes disponibles'));
+        return response.json();
+    },
+
+    // ==========================================
+    // RECETAS (+ COM-48: componentes, categorías y alta de ingredientes; limpieza)
     // ==========================================
     getRecetas: async (params = {}) => {
         const queryString = new URLSearchParams(params).toString();
@@ -811,15 +832,13 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al eliminar ingrediente'));
         return response.json();
     },
-    // COM-48: catálogo activo de componentes de receta (Ensalada, Plato de fondo,
-    // Refresco, Fruta y futuros), ordenado para exhibición.
+    // COM-48: catálogo activo de componentes de receta (Ensalada, Plato de fondo, ...)
     getComponentesReceta: async () => {
         const response = await fetch(`${API_BASE}/recetas/componentes`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener componentes'));
         return response.json();
     },
-    // COM-48: elimina TODAS las líneas de ingredientes de una receta (sincronización de
-    // edición del modal con componentes).
+    // COM-48: elimina TODAS las líneas de ingredientes de una receta (edición)
     limpiarIngredientesReceta: async (recetaId) => {
         const response = await fetch(`${API_BASE}/recetas/${recetaId}/ingredientes`, { method: 'DELETE' });
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al limpiar los ingredientes de la receta'));
@@ -831,8 +850,7 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener categorías'));
         return response.json();
     },
-    // COM-48 v2: crea un ingrediente de catálogo desde el modal de receta y devuelve su
-    // id para dejarlo seleccionado en la fila (gate: módulo 'recetario' o Admin).
+    // COM-48 v2: crea un ingrediente de catálogo desde el modal de receta
     createIngredienteDesdeReceta: async (data) => {
         const response = await fetch(`${API_BASE}/recetas/ingredientes-nuevos`, {
             method: 'POST',
