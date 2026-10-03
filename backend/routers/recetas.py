@@ -1,20 +1,26 @@
 """
 routers/recetas.py
-Objetivo: Contener la lógica de los endpoints para el CRUD de recetas, sus ingredientes
+Objetivo: Endpoints del CRUD de recetas, sus ingredientes (ahora por componente, COM-48)
           y evaluación de costos.
-Uso: Registrado en main.py con prefijo /api/v1. Expone rutas como /recetas, /recetas/{id}/costo.
+Uso: Registrado en main.py con prefijo /api/v1.
 Historial:
- - Sprint 1/2: versión original (CRUD + ingredientes + costo vía optimizador).
- - COM-45 (este archivo): CREATE y UPDATE persisten `raciones` (la columna ya existía
-   con DEFAULT 4 y CHECK de positividad, pero nunca se escribía desde la API). El UPDATE
-   usa COALESCE para no pisar el valor en actualizaciones parciales. Se permite ordenar
-   el listado por 'raciones'. Se corrigen dos artefactos de transcripción (la fecha por
-   defecto de /con-costo y la captura de IntegrityError en create); las líneas originales
-   quedan COMENTADAS por trazabilidad. Ningún endpoint se elimina.
+ - Sprint 1/2: versión original.
+ - COM-45: CREATE/UPDATE persisten raciones; orden por raciones; artefactos corregidos.
+ - COM-48 (este archivo): esquema multi-componente:
+     * GET /recetas/componentes: catálogo activo de componentes (orden de exhibición).
+     * POST /recetas/{id}/ingredientes exige componente_id y el ON CONFLICT usa la
+       nueva unicidad (receta, ingrediente, componente, unidad).
+     * GET /recetas/{id} devuelve cada línea con componente_id y componente_nombre.
+     * DELETE /recetas/{id}/ingredientes (nuevo): limpia TODAS las líneas de la receta
+       para la sincronización de edición del modal (con componentes, un ingrediente
+       puede tener varias filas y borrarlo por id las perdería todas).
+     * El DELETE por ingrediente_id se conserva COMENTADO su alcance anterior: ahora
+       elimina las filas del ingrediente en TODOS los componentes de la receta.
+   Los motores (optimizador/K-means/Greedy) no cambian: suman filas independientes.
 """
-from datetime import date  # COM-45: fecha por defecto de /recetas/con-costo
+from datetime import date
 
-import psycopg2  # COM-45: captura explícita de violaciones de integridad (nombre duplicado)
+import psycopg2
 from fastapi import APIRouter, Depends, HTTPException, Query
 from psycopg2.extras import RealDictCursor
 
@@ -32,8 +38,6 @@ def get_recetas_con_costo(fecha: str = None, db=Depends(get_db)):
     try:
         cur.execute("SELECT id, nombre, descripcion, raciones, energia_kcal, proteina_g, hierro_mg FROM recetas_almuerzo ORDER BY nombre;")
         recetas = cur.fetchall()
-        # COM-45 (trazabilidad): artefacto de transcripción comentado:
-        # fecha_calc = fecha or import('datetime').date.today().isoformat()
         fecha_calc = fecha or date.today().isoformat()
         recetas_con_costo = []
         for receta in recetas:
@@ -43,6 +47,25 @@ def get_recetas_con_costo(fecha: str = None, db=Depends(get_db)):
             except Exception:
                 recetas_con_costo.append({**receta, 'costo_racion': 0.0})
         return recetas_con_costo
+    finally:
+        cur.close()
+
+
+# COM-48: catálogo de componentes. Declarado ANTES de /{receta_id} para que la ruta
+# literal gane el match (mismo patrón que /con-costo).
+@router.get("/componentes")
+def get_componentes_receta(db=Depends(get_db)):
+    """COM-48: componentes activos de una receta (Ensalada, Plato de fondo, Refresco,
+    Fruta y futuros como Sopa), ordenados para exhibición."""
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT id, nombre, descripcion, orden
+            FROM recetas_componentes
+            WHERE estado_activo = TRUE
+            ORDER BY orden, id;
+        """)
+        return cur.fetchall()
     finally:
         cur.close()
 
@@ -59,22 +82,18 @@ def get_recetas(
     """Obtiene recetas con paginación y ordenamiento"""
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
-        # Validar columnas de ordenamiento permitidas
-        # COM-45: se agrega 'raciones' a las columnas ordenables
+        # COM-45: 'raciones' ordenable
         allowed_sorts = ['nombre', 'energia_kcal', 'proteina_g', 'hierro_mg', 'vitamina_a_ug', 'zinc_mg', 'carbohidratos_g', 'fecha_creacion', 'raciones']
         if sort_by not in allowed_sorts:
             sort_by = 'nombre'
         order_dir = "ASC" if sort_order.lower() == "asc" else "DESC"
-        # Construir WHERE clause
         where_clause = "WHERE 1=1"
         params = []
         if search:
             where_clause += " AND nombre ILIKE %s"
             params.append(f"%{search}%")
-        # Contar total
         cur.execute(f"SELECT COUNT(*) as total FROM recetas_almuerzo {where_clause}", params)
         total = cur.fetchone()['total']
-        # Obtener datos paginados
         offset = (page - 1) * per_page
         query = f"""
             SELECT * FROM recetas_almuerzo 
@@ -105,12 +124,25 @@ def get_receta_detalle(receta_id: int, db=Depends(get_db)):
         receta = cur.fetchone()
         if not receta:
             raise HTTPException(status_code=404, detail="Receta no encontrada")
+        # COM-48 (trazabilidad): consulta anterior sin componente, comentada:
+        # cur.execute("""
+        #     SELECT ri.*, i.nombre as ingrediente_nombre, um.nombre as unidad_nombre, um.abreviatura as unidad_abrev
+        #     FROM receta_ingrediente ri
+        #     JOIN ingredientes i ON ri.ingrediente_id = i.id
+        #     JOIN unidades_medida um ON ri.unidad_medida_id = um.id
+        #     WHERE ri.receta_id = %s;
+        # """, (receta_id,))
+        # COM-48: cada línea con su componente (nombre y orden) para el modal de edición
         cur.execute("""
-            SELECT ri.*, i.nombre as ingrediente_nombre, um.nombre as unidad_nombre, um.abreviatura as unidad_abrev
+            SELECT ri.*, i.nombre as ingrediente_nombre,
+                   um.nombre as unidad_nombre, um.abreviatura as unidad_abrev,
+                   rc.nombre as componente_nombre, rc.orden as componente_orden
             FROM receta_ingrediente ri
-            JOIN ingredientes i ON ri.ingrediente_id = i.id 
+            JOIN ingredientes i ON ri.ingrediente_id = i.id
             JOIN unidades_medida um ON ri.unidad_medida_id = um.id
-            WHERE ri.receta_id = %s;
+            JOIN recetas_componentes rc ON ri.componente_id = rc.id
+            WHERE ri.receta_id = %s
+            ORDER BY rc.orden, rc.id, i.nombre;
         """, (receta_id,))
         return {"receta": receta, "ingredientes": cur.fetchall()}
     finally:
@@ -121,14 +153,7 @@ def get_receta_detalle(receta_id: int, db=Depends(get_db)):
 def create_receta(data: RecetaInput, db=Depends(get_db)):
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
-        # COM-45 (trazabilidad): INSERT anterior sin raciones, comentado:
-        # cur.execute("""
-        #     INSERT INTO recetas_almuerzo
-        #     (nombre, descripcion, hierro_mg, proteina_g, energia_kcal, vitamina_a_ug, zinc_mg, carbohidratos_g)
-        #     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        #     RETURNING id;
-        # """, (...))
-        # COM-45: se persiste raciones (validado >0 por Pydantic y por el CHECK de la BD)
+        # COM-45: se persiste raciones (validado >0 por Pydantic)
         cur.execute("""
             INSERT INTO recetas_almuerzo
             (nombre, descripcion, raciones, hierro_mg, proteina_g, energia_kcal, vitamina_a_ug, zinc_mg, carbohidratos_g)
@@ -142,8 +167,6 @@ def create_receta(data: RecetaInput, db=Depends(get_db)):
         db.commit()
         return {"id": receta_id, "message": "Receta creada exitosamente"}
     except psycopg2.IntegrityError:
-        # COM-45 (trazabilidad): artefacto de transcripción comentado:
-        # except import ('psycopg2').IntegrityError:
         db.rollback()
         raise HTTPException(status_code=400, detail="Ya existe una receta con ese nombre.")
     except Exception as e:
@@ -155,16 +178,9 @@ def create_receta(data: RecetaInput, db=Depends(get_db)):
 
 @router.put("/{receta_id}")
 def update_receta(receta_id: int, data: RecetaUpdate, db=Depends(get_db)):
-    """Actualiza una receta existente"""
+    """Actualiza una receta existente (COM-45: raciones con COALESCE)"""
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
-        # COM-45 (trazabilidad): UPDATE anterior sin raciones, comentado:
-        # cur.execute("""
-        #     UPDATE recetas_almuerzo
-        #     SET nombre = %s, descripcion = %s, hierro_mg = %s, ...
-        #     WHERE id = %s RETURNING id;
-        # """, (...))
-        # COM-45: raciones con COALESCE para no pisar el valor en updates parciales
         cur.execute("""
             UPDATE recetas_almuerzo
             SET nombre = %s, descripcion = %s, raciones = COALESCE(%s, raciones),
@@ -205,23 +221,38 @@ def delete_receta(receta_id: int, db=Depends(get_db)):
 
 @router.post("/{receta_id}/ingredientes")
 def add_ingrediente_a_receta(receta_id: int, data: IngredienteRecetaInput, db=Depends(get_db)):
+    """
+    COM-48: agrega (o actualiza) una línea ingrediente-componente-cantidad. El mismo
+    ingrediente puede registrarse en componentes distintos con cantidades independientes;
+    el ON CONFLICT aplica a la unicidad (receta, ingrediente, componente, unidad).
+    """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         for q, p in [
             ("SELECT id FROM recetas_almuerzo WHERE id = %s;", (receta_id,)),
             ("SELECT id FROM ingredientes WHERE id = %s;", (data.ingrediente_id,)),
-            ("SELECT id FROM unidades_medida WHERE id = %s;", (data.unidad_medida_id,))
+            ("SELECT id FROM unidades_medida WHERE id = %s;", (data.unidad_medida_id,)),
+            # COM-48: el componente debe existir y estar activo
+            ("SELECT id FROM recetas_componentes WHERE id = %s AND estado_activo = TRUE;", (data.componente_id,))
         ]:
             cur.execute(q, p)
             if not cur.fetchone():
                 raise HTTPException(status_code=404, detail="Entidad relacionada no encontrada")
+        # COM-48 (trazabilidad): INSERT anterior sin componente_id, comentado:
+        # cur.execute("""
+        #     INSERT INTO receta_ingrediente (receta_id, ingrediente_id, unidad_medida_id, cantidad_requerida)
+        #     VALUES (%s, %s, %s, %s)
+        #     ON CONFLICT (receta_id, ingrediente_id, unidad_medida_id)
+        #     DO UPDATE SET cantidad_requerida = EXCLUDED.cantidad_requerida
+        #     RETURNING *;
+        # """, (receta_id, data.ingrediente_id, data.unidad_medida_id, data.cantidad_requerida))
         cur.execute("""
-            INSERT INTO receta_ingrediente (receta_id, ingrediente_id, unidad_medida_id, cantidad_requerida)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (receta_id, ingrediente_id, unidad_medida_id) 
+            INSERT INTO receta_ingrediente (receta_id, ingrediente_id, componente_id, unidad_medida_id, cantidad_requerida)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (receta_id, ingrediente_id, componente_id, unidad_medida_id)
             DO UPDATE SET cantidad_requerida = EXCLUDED.cantidad_requerida
             RETURNING *;
-        """, (receta_id, data.ingrediente_id, data.unidad_medida_id, data.cantidad_requerida))
+        """, (receta_id, data.ingrediente_id, data.componente_id, data.unidad_medida_id, data.cantidad_requerida))
         db.commit()
         return cur.fetchone()
     except HTTPException:
@@ -233,8 +264,30 @@ def add_ingrediente_a_receta(receta_id: int, data: IngredienteRecetaInput, db=De
         cur.close()
 
 
+# COM-48: limpieza total de líneas de una receta (sincronización de edición del modal).
+# Con componentes, un ingrediente puede tener varias filas; editar = limpiar y regrabar.
+@router.delete("/{receta_id}/ingredientes")
+def delete_ingredientes_de_receta(receta_id: int, db=Depends(get_db)):
+    """COM-48: elimina TODAS las líneas de ingredientes de la receta (usada al editar)."""
+    cur = db.cursor()
+    try:
+        cur.execute("DELETE FROM receta_ingrediente WHERE receta_id = %s;", (receta_id,))
+        db.commit()
+        return {"message": "Ingredientes de la receta eliminados exitosamente"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cur.close()
+
+
 @router.delete("/{receta_id}/ingredientes/{ingrediente_id}")
 def delete_ingrediente_de_receta(receta_id: int, ingrediente_id: int, db=Depends(get_db)):
+    """
+    COM-48 (trazabilidad): se conserva el endpoint, pero su alcance cambia: elimina las
+    filas del ingrediente en TODOS los componentes de la receta. Para borrar una sola
+    fila use la sincronización de edición (DELETE /{receta_id}/ingredientes + re-grabado).
+    """
     cur = db.cursor()
     try:
         cur.execute("DELETE FROM receta_ingrediente WHERE receta_id = %s AND ingrediente_id = %s;", (receta_id, ingrediente_id))

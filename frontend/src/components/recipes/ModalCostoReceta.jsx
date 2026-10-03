@@ -8,19 +8,19 @@
  *  - COM-37 (roto): variante que esperaba `costoData` por props; comentada.
  *  - COM-37 v2: auto-fetch + filas manuales ("Obtenido de la Base de Datos") + badge de
  *    costo completo + formulario inline de precio manual (solo Admin).
- *  - COM-37 v5/v6: botón "Asignar insumo/precio" por fila sin precio (solo Admin) que
- *    abre el modal simplificado de un solo ingrediente (vincular insumo del scraper o
- *    registrar insumo manual con unidad+precio+vigencia+equivalencia) y re-evalúa.
- *  - COM-37 v8 (este archivo): FIX del reporte "vinculé y solo una receta quedó completa":
- *    al vincular un insumo que PERTENECE A OTRO INGREDIENTE, el modal muestra la
- *    confirmación "Vincular y fusionar", que envía fusionar_ingrediente_origen=true para
- *    que el ingrediente sinónimo se fusione en el actual y TODAS sus recetas hereden el
- *    precio (el sinónimo queda como [OBSOLETO]). Sin ese aviso, la reasignación dejaba
- *    huérfano al ingrediente origen.
+ *  - COM-37 v5/v6: botón "Asignar insumo/precio" por fila sin precio (solo Admin) con
+ *    modal simplificado de un solo ingrediente (vincular scraper o crear manual).
+ *  - COM-37 v8: confirmación "Vincular y fusionar" cuando el insumo pertenece a otro
+ *    ingrediente (fusión de sinónimos, COM-37 v8).
+ *  - COM-48 (este archivo): el detalle se AGRUPA POR COMPONENTE (Ensalada, Plato de
+ *    fondo, Refresco, Fruta...) con encabezado de sección y SUBTOTAL por componente,
+ *    usando componente_nombre/componente_orden que expone el optimizador. Las filas
+ *    conservan su estilo por fuente (real / PREDICHO / manual / sin precio) y todas las
+ *    funciones anteriores (asignar insumo/precio, fusión, badges, avisos) se conservan.
  * Uso: Montado por RecipesView.jsx con props { isOpen, onClose, receta, fecha, onChangeFecha }.
- * Referencia: tickets COM-37 v2/v5/v6/v8 (solo trazabilidad).
+ * Referencia: tickets COM-37 / COM-48 (solo trazabilidad).
  */
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
     X, Loader2, AlertCircle, Database, TrendingUp, CheckCircle2,
     Search, Package, Scale, Save, GitMerge
@@ -125,6 +125,21 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
         if (onChangeFecha) onChangeFecha(nuevaFecha);
         cargarCosto(nuevaFecha);
     };
+
+    // ---------- COM-48: agrupación del detalle por componente ----------
+    const detalle = datos?.detalle_insumos || [];
+    const gruposComponente = useMemo(() => {
+        const map = new Map();
+        detalle.forEach(d => {
+            const nombre = d.componente_nombre || 'Plato de fondo';
+            const orden = d.componente_orden != null ? d.componente_orden : 99;
+            if (!map.has(nombre)) map.set(nombre, { nombre, orden, rows: [], subtotal: 0 });
+            const g = map.get(nombre);
+            g.rows.push(d);
+            g.subtotal += (d.costo_parcial || 0);
+        });
+        return [...map.values()].sort((a, b) => a.orden - b.orden);
+    }, [detalle]);
 
     // ---------- COM-37 v5/v6/v8: modal simplificado ----------
     const abrirAsignar = (fila) => {
@@ -233,18 +248,51 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
         }
     };
 
-    // COM-37 v2 (trazabilidad): guardado del formulario inline legacy de precio manual
-    // por ingrediente, COMENTADO. Reemplazado por el modal simplificado v5/v8:
-    // const guardarPrecioManual = async (fila) => { ... api.createPrecioManual(...) ... };
+    // COM-37 v2 (trazabilidad): formulario inline legacy de precio manual por
+    // ingrediente, COMENTADO (reemplazado por el modal simplificado v5/v8).
 
     if (!isOpen || !receta) return null;
 
-    const detalle = datos?.detalle_insumos || [];
     const sinPrecio = datos?.ingredientes_sin_precio || 0;
     const manuales = datos?.ingredientes_manuales || 0;
     const completo = datos ? datos.precio_completo : false;
     const inputCls = "w-full px-2 py-1.5 border border-slate-300 rounded-lg text-xs outline-none focus:ring-2 focus:ring-emerald-500";
     const labelCls = "text-[10px] font-bold text-slate-600 block mb-0.5";
+
+    // ---------- Render de una fila de ingrediente (COM-48: reutilizado por grupo) ----------
+    const renderFila = (d, key) => (
+        <tr key={key} className={d.error || d.es_manual ? 'bg-red-50' : 'hover:bg-slate-50'}>
+            <td className="p-2 font-medium">{d.ingrediente}</td>
+            <td className="p-2">
+                {d.error ? (
+                    <span className="text-red-600 text-xs flex items-center gap-1 flex-wrap">
+                        <AlertCircle size={12} /> {d.error}
+                        {esAdminSistema && d.ingrediente_id && (
+                            <button
+                                onClick={() => abrirAsignar(d)}
+                                className="ml-2 inline-flex items-center gap-1 px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-bold transition-colors"
+                            >
+                                <Package size={11} /> Asignar insumo/precio
+                            </button>
+                        )}
+                    </span>
+                ) : d.es_manual ? (
+                    <span className="text-red-600 text-xs flex items-center gap-1 font-semibold">
+                        <Database size={12} /> {d.insumo_comprado}
+                    </span>
+                ) : d.es_prediccion ? (
+                    <span className="text-amber-600 text-xs flex items-center gap-1 font-semibold">
+                        <TrendingUp size={12} /> {d.insumo_comprado}
+                    </span>
+                ) : (
+                    <span className="text-slate-700">{d.insumo_comprado}</span>
+                )}
+            </td>
+            <td className={`p-2 text-right font-bold ${d.error ? 'text-red-600' : 'text-emerald-700'}`}>
+                {d.error ? <span>S/ 0.00</span> : `S/${d.costo_parcial?.toFixed(2) || '0.00'}`}
+            </td>
+        </tr>
+    );
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm">
@@ -297,49 +345,23 @@ export const ModalCostoReceta = ({ isOpen, onClose, receta, fecha, onChangeFecha
                                         <th className="p-2 text-right">Costo</th>
                                     </tr>
                                 </thead>
+                                {/* COM-48: cuerpo agrupado por componente con subtotales */}
                                 <tbody>
-                                    {detalle.map((d, i) => (
-                                        <tr key={i} className={d.error || d.es_manual ? 'bg-red-50' : 'hover:bg-slate-50'}>
-                                            <td className="p-2 font-medium">{d.ingrediente}</td>
-                                            <td className="p-2">
-                                                {d.error ? (
-                                                    <span className="text-red-600 text-xs flex items-center gap-1 flex-wrap">
-                                                        <AlertCircle size={12} /> {d.error}
-                                                        {esAdminSistema && d.ingrediente_id && (
-                                                            <button
-                                                                onClick={() => abrirAsignar(d)}
-                                                                className="ml-2 inline-flex items-center gap-1 px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-bold transition-colors"
-                                                            >
-                                                                <Package size={11} /> Asignar insumo/precio
-                                                            </button>
-                                                        )}
-                                                    </span>
-                                                ) : d.es_manual ? (
-                                                    <span className="text-red-600 text-xs flex items-center gap-1 font-semibold">
-                                                        <Database size={12} /> {d.insumo_comprado}
-                                                    </span>
-                                                ) : d.es_prediccion ? (
-                                                    <span className="text-amber-600 text-xs flex items-center gap-1 font-semibold">
-                                                        <TrendingUp size={12} /> {d.insumo_comprado}
-                                                    </span>
-                                                ) : (
-                                                    <span className="text-slate-700">{d.insumo_comprado}</span>
-                                                )}
-                                            </td>
-                                            <td className={`p-2 text-right font-bold ${d.error ? 'text-red-600' : 'text-emerald-700'}`}>
-                                                {d.error ? <span>S/ 0.00</span> : `S/${d.costo_parcial?.toFixed(2) || '0.00'}`}
-                                            </td>
-                                        </tr>
+                                    {gruposComponente.map(g => (
+                                        <React.Fragment key={g.nombre}>
+                                            <tr className="bg-emerald-50/70 border-y border-emerald-100">
+                                                <td className="p-2 font-bold text-emerald-800 text-xs uppercase tracking-wide" colSpan={2}>
+                                                    {g.nombre}
+                                                </td>
+                                                <td className="p-2 text-right font-bold text-emerald-800 text-xs">
+                                                    Subtotal S/ {g.subtotal.toFixed(2)}
+                                                </td>
+                                            </tr>
+                                            {g.rows.map((d, i) => renderFila(d, `${g.nombre}-${i}`))}
+                                        </React.Fragment>
                                     ))}
                                 </tbody>
                             </table>
-
-                            {/* COM-37 v2 (trazabilidad): formulario inline legacy COMENTADO
-                                (reemplazado por el modal simplificado v5/v8):
-                            {esAdminSistema && formPrecio && formPrecio.ingrediente_id === d.ingrediente_id && (
-                                <tr className="bg-emerald-50/60"> ... inputs precio/rango ... </tr>
-                            )}
-                            */}
 
                             {/* Avisos inferiores */}
                             {sinPrecio > 0 && !esAdminSistema && (

@@ -1,34 +1,21 @@
 """
 optimizador.py
-Objetivo: Motor de cálculo de costos de recetas ("Evaluar" del Recetario) con
-          predicción de precios basada en histórico (Random Forest) y, desde COM-37,
-          fallback de precios manuales.
+Objetivo: Motor de cálculo de costos de recetas con predicción de precios basada en histórico.
+Uso: Importar desde routers de FastAPI para calcular costos dinámicos de recetas en cualquier fecha.
+Nota: Utiliza Random Forest para predicción de precios (consistente con ai_engine.py)
 Historial:
- - Sprint 2: versión original (mejor insumo del día por precio, predicción RF con R²,
-   filas de error rojas, costo por ración).
- - COM-37 v1/v2: fallback de precio manual por INGREDIENTE (precios_manuales.py),
-   filas es_manual con texto "Obtenido de la Base de Datos", ingrediente_id y
-   precio_completo en la respuesta.
- - COM-37 v5 (este archivo): REESCRITO sobre precios_insumos.py con el modelo de DOS
-   CONCEPTOS:
-     * INGREDIENTE (unidad de USO: pizca, cucharadita, taza, und...) e
-       INSUMO (unidad de COMPRA: Kg, L, atado, und...; origen SCRAPER o MANUAL).
-     * Los gramos de cada línea de receta se calculan con la equivalencia registrada
-       (ingredientes_equivalencias) para el par (ingrediente, insumo elegido); si no
-       existe, con la conversión estándar de la unidad de uso.
-     * El precio por gramo de cada insumo candidato sale de
-       precios_insumos.precios_por_gramo_por_insumo (scraper del día > período manual
-       del insumo) y, si el insumo no tuvo precio ese día, de la predicción RF.
-     * Selección por MENOR COSTO entre candidatos (criterio de compra económica); la
-       fila expone la fuente: scraper / PREDICHO / manual ("Obtenido de la Base de
-       Datos", es_manual=True, colores actuales del caso sin insumos).
-     * Último fallback: precio manual legacy por ingrediente (COM-37 v1).
-     * Se conservan precio_completo y contadores para la regla del flujo del comedor
-       (solo recetas con precios completos entran a propuestas/planificación).
-   Los bloques reemplazados (evaluar_mejor_insumo sobre historial del día y el LEFT
-   JOIN de opciones) quedan COMENTADOS por trazabilidad.
-Uso: Importado por routers/recetas.py (GET /recetas/{id}/costo?fecha=...).
-Referencia: tickets COM-37 v1/v2/v5 (solo trazabilidad).
+ - Sprint 2: versión original (mejor insumo del día, predicción RF con R², filas de error).
+ - COM-37 v1/v2: fallback de precio manual ("Obtenido de la Base de Datos"), ingrediente_id
+   por fila y precio_completo para la regla del flujo del comedor.
+ - COM-37 v5: costeo con el modelo de DOS CONCEPTOS: gramos de la unidad de USO vía
+   ingredientes_equivalencias (o conversión estándar) × precio por gramo del MEJOR
+   insumo (scraper día > manual insumo > legacy ingrediente > predicción RF).
+ - COM-48 (este archivo): esquema multi-componente. La consulta de líneas de receta se
+   une a recetas_componentes y CADA fila del detalle expone componente_nombre y
+   componente_orden (Ensalada / Plato de fondo / Refresco / Fruta), ordenadas por
+   componente, para el desglose agrupado del modal de Evaluar. Un ingrediente usado en
+   dos componentes genera dos filas independientes (cantidades y costos separados).
+   La nutrición sigue POR RACIÓN (tabla) y el costo total se divide entre raciones.
 """
 import os
 import psycopg2
@@ -36,14 +23,13 @@ import psycopg2.extras
 from datetime import datetime, timedelta
 import math
 
-# COM-37 v5: resolución unificada de precios por insumo y equivalencias uso->gramos
+# COM-37 v5: resolución unificada de precios, equivalencias y conversión de unidades
 from precios_insumos import (
     precios_por_gramo_por_insumo,
+    mejor_opcion_ingrediente,
     gramos_por_unidad_uso,
     gramos_por_unidad_compra,
 )
-# COM-37 v1: fallback legacy de precio manual POR INGREDIENTE (última fuente)
-from precios_manuales import obtener_precio_manual_por_gramo
 
 DB_URL = os.getenv("DATABASE_URL", "postgresql://nutri_admin:Nutri2026Secure!@db:5432/nutricomedor")
 
@@ -53,27 +39,6 @@ def redondear_hacia_arriba_010(valor):
     if valor <= 0:
         return 0.0
     return math.ceil(valor * 10) / 10
-
-
-# =========================================================================
-# COM-37 v5 (trazabilidad): función original COMENTADA. Evaluaba opciones del día
-# (historial_precios con LEFT JOIN por fecha) y elegía por precio redondeado.
-# Reemplazada por el bucle de candidatos sobre precios_insumos + equivalencias.
-# =========================================================================
-# def evaluar_mejor_insumo(opciones_insumos, peso_estimado_g):
-#     mejor_opcion = None
-#     menor_costo_real = float('inf')
-#     for insumo in opciones_insumos:
-#         precio_kg = float(insumo['precio_prom'])
-#         precio_por_gramo = precio_kg / 1000.0
-#         costo_sin_redondear = precio_por_gramo * peso_estimado_g
-#         costo_redondeado = redondear_hacia_arriba_010(costo_sin_redondear)
-#         insumo['costo_calculado'] = costo_redondeado
-#         insumo['costo_sin_redondear'] = costo_sin_redondear
-#         if costo_redondeado < menor_costo_real:
-#             menor_costo_real = costo_redondeado
-#             mejor_opcion = insumo
-#     return mejor_opcion
 
 
 def predecir_precio_con_confianza(insumo_id, fecha_objetivo, conn, cur):
@@ -127,21 +92,21 @@ def predecir_precio_con_confianza(insumo_id, fecha_objetivo, conn, cur):
 def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
     """
     Calcula el costo real de una receta considerando:
-    1. La unidad de medida de USO de cada línea de receta (receta_ingrediente).
-    2. La equivalencia uso->gramos del insumo elegido (o conversión estándar).
-    3. El número de raciones que produce la receta (costo final POR RACIÓN).
-    COM-37 v5: fuentes de precio por insumo candidato: scraper del día > período
-    manual del insumo > predicción RF; selección por menor costo; fallback final de
-    precio manual legacy por ingrediente. Filas manuales => "Obtenido de la Base de
-    Datos" con es_manual=True. Respuesta incluye precio_completo y contadores.
+    1. La unidad de medida de USO de cada línea (receta_ingrediente) y su componente (COM-48)
+    2. El número de raciones que produce la receta (costo total / raciones)
+    COM-37 v5: gramos por línea vía equivalencias uso->gramos (o conversión estándar) y
+    precio por gramo del MEJOR insumo con la jerarquía de fuentes acordada.
+    COM-48: cada fila del detalle lleva componente_nombre/componente_orden para el
+    desglose agrupado en el modal de Evaluar; líneas del mismo ingrediente en distintos
+    componentes se costean de forma independiente.
+    Retorna el costo POR RACIÓN
     """
     conn = None
     cur = None
     try:
         conn = psycopg2.connect(DB_URL)
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-
-        # Número de raciones de la receta
+        # Obtener número de raciones de la receta
         cur.execute("""
             SELECT raciones FROM recetas_almuerzo WHERE id = %s
         """, (receta_id,))
@@ -150,11 +115,23 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
             return {"error": "La receta no existe"}
         raciones_receta = receta_info['raciones'] if receta_info['raciones'] and receta_info['raciones'] > 0 else 1
 
-        # Ingredientes de la receta con su UNIDAD DE USO (incluye tipo de magnitud)
+        # COM-48 (trazabilidad): consulta anterior sin componentes, comentada:
+        # cur.execute("""
+        #     SELECT ri.id as receta_ingrediente_id, ri.ingrediente_id, i.nombre as ingrediente_nombre,
+        #            COALESCE(i.peso_estimado_g, 100.0) as peso_estimado_g, ri.cantidad_requerida,
+        #            ri.unidad_medida_id as receta_unidad_medida_id, um_receta.nombre as receta_unidad_nombre,
+        #            um_receta.abreviatura as receta_unidad_abrev, um_receta.factor_a_base as receta_factor_a_base,
+        #            cat.nombre as categoria_nombre
+        #     FROM receta_ingrediente ri ... ORDER BY ri.id;
+        # """, (receta_id,))
+        # COM-48: líneas de receta con su componente (nombre y orden) y la unidad de USO
         cur.execute("""
             SELECT 
                 ri.id as receta_ingrediente_id,
                 ri.ingrediente_id,
+                ri.componente_id,
+                rc.nombre as componente_nombre,
+                rc.orden as componente_orden,
                 i.nombre as ingrediente_nombre,
                 COALESCE(i.peso_estimado_g, 100.0) as peso_estimado_g,
                 ri.cantidad_requerida,
@@ -168,167 +145,156 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
             JOIN ingredientes i ON ri.ingrediente_id = i.id
             JOIN unidades_medida um_receta ON ri.unidad_medida_id = um_receta.id
             LEFT JOIN categorias_alimentos cat ON i.categoria_id = cat.id
+            LEFT JOIN recetas_componentes rc ON ri.componente_id = rc.id
             WHERE ri.receta_id = %s
-            ORDER BY ri.id;
+            ORDER BY rc.orden, rc.id, ri.id;
         """, (receta_id,))
         ingredientes_receta = cur.fetchall()
         if not ingredientes_receta:
             return {"error": "La receta no tiene ingredientes asignados"}
 
-        # COM-37 v5: mapa de precios por gramo por insumo para la fecha evaluada
-        # (scraper del día + períodos manuales vigentes de insumos)
+        # COM-37 v5: mapa de precios por insumo para la fecha evaluada
         precios_insumo = precios_por_gramo_por_insumo(cur, fecha_evaluacion)
-        fecha_objetivo = datetime.strptime(fecha_evaluacion, "%Y-%m-%d").date()
 
         costo_total_receta = 0.0
         detalle_costos = []
+        fecha_objetivo = datetime.strptime(fecha_evaluacion, "%Y-%m-%d").date()
 
         for req in ingredientes_receta:
+            categoria = req['categoria_nombre'] or ''
             unidad_abrev = (req['receta_unidad_abrev'] or '').lower()
             unidad_nombre = req['receta_unidad_nombre'] or ''
             cantidad_requerida = float(req['cantidad_requerida'])
+            factor_receta = float(req['receta_factor_a_base'])
+            peso_estimado_base = float(req['peso_estimado_g'])
 
-            # Insumos candidatos del ingrediente (con su unidad de COMPRA)
+            # Display de la cantidad en la unidad de USO de la receta (reglas históricas)
+            if unidad_abrev in ['und', 'unidad', 'u']:
+                peso_display_g = cantidad_requerida * peso_estimado_base
+                unidad_display = f"{cantidad_requerida} {unidad_nombre.lower()} ({peso_display_g}g)"
+            elif unidad_abrev in ['kg', 'kilogramo', 'l', 'litro']:
+                unidad_display = f"{cantidad_requerida} {unidad_nombre.lower()}"
+            elif unidad_abrev in ['g', 'gramo', 'ml', 'mililitro', 'tz', 'taza', 'cda', 'cucharada',
+                                  'cdta', 'cucharadita', 'pz', 'pizca']:
+                unidad_display = f"{cantidad_requerida} {unidad_nombre.lower()}"
+            elif unidad_abrev in ['dte', 'diente', 'rma', 'rama']:
+                peso_display_g = cantidad_requerida * peso_estimado_base
+                unidad_display = f"{cantidad_requerida} {unidad_nombre.lower()} ({peso_display_g}g)"
+            elif unidad_abrev in ['atd', 'atado']:
+                unidad_display = f"{cantidad_requerida} {unidad_nombre.lower()} ({cantidad_requerida * 100}g)"
+            elif unidad_abrev in ['rdj', 'rodaja']:
+                unidad_display = f"{cantidad_requerida} {unidad_nombre.lower()} ({cantidad_requerida * 20}g)"
+            else:
+                unidad_display = f"{cantidad_requerida} {unidad_nombre.lower()}"
+
+            # COM-37 v5 / COM-48: candidatos = insumos del ingrediente; cada uno con su
+            # fuente de precio (scraper día, manual período) o predicción RF; gramos de
+            # la unidad de USO vía equivalencia del insumo elegido o conversión estándar.
             cur.execute("""
                 SELECT ins.id AS insumo_id, ins.nombre AS insumo_nombre, ins.origen,
-                       um.abreviatura AS compra_abrev, um.tipo_magnitud AS compra_tipo,
-                       um.factor_a_base AS compra_factor
+                       um.abreviatura AS u_abrev, um.tipo_magnitud AS u_tipo, um.factor_a_base AS u_factor
                 FROM insumos ins
                 JOIN unidades_medida um ON um.id = ins.unidad_medida_id
                 WHERE ins.ingrediente_id = %s;
             """, (req['ingrediente_id'],))
-            candidatos_ins = cur.fetchall()
+            insumos_rows = cur.fetchall()
 
-            mejor = None  # {costo, costo_crudo, gramos, insumo_*, fuente, confianza, ppg}
-            for ins in candidatos_ins:
+            mejor = None
+            for ins in insumos_rows:
                 opc = precios_insumo.get(ins['insumo_id'])
-                fuente = opc['fuente'] if opc else None
-                ppg = opc['ppg'] if opc else None
                 confianza = None
-
-                # COM-37 v5: si el insumo no tuvo precio ese día, intentar predicción RF
-                if opc is None:
-                    precio_predicho, conf, ok = predecir_precio_con_confianza(
-                        ins['insumo_id'], fecha_objetivo, conn, cur)
-                    if ok and precio_predicho:
-                        g_compra = gramos_por_unidad_compra(
-                            ins['compra_abrev'], ins['compra_tipo'],
-                            ins['compra_factor'], req['peso_estimado_g'])
-                        if g_compra > 0:
-                            ppg = precio_predicho / g_compra
-                            fuente = 'PREDICHO'
-                            confianza = conf
-                if ppg is None or ppg <= 0:
-                    continue
-
-                # COM-37 v5: gramos de la cantidad de USO según equivalencia del insumo
+                if opc:
+                    ppg = opc['ppg']
+                    fuente = opc['fuente']
+                else:
+                    pred, conf, ok = predecir_precio_con_confianza(ins['insumo_id'], fecha_objetivo, conn, cur)
+                    if not (ok and pred):
+                        continue
+                    g_compra = gramos_por_unidad_compra(
+                        ins['u_abrev'], ins['u_tipo'], ins['u_factor'], peso_estimado_base)
+                    if g_compra <= 0:
+                        continue
+                    ppg = float(pred) / g_compra
+                    fuente = 'PREDICHO'
+                    confianza = conf
                 gramos = gramos_por_unidad_uso(
-                    cur, req['ingrediente_id'], ins['insumo_id'],
-                    req['receta_unidad_medida_id'], unidad_abrev,
-                    req['receta_tipo_magnitud'], req['receta_factor_a_base'],
-                    req['peso_estimado_g']
-                ) * cantidad_requerida
-                if gramos <= 0:
-                    continue
-
-                costo_crudo = gramos * ppg
-                costo_cand = redondear_hacia_arriba_010(costo_crudo)
-                if mejor is None or costo_cand < mejor['costo'] or \
-                   (costo_cand == mejor['costo'] and costo_crudo < mejor['costo_crudo']):
+                    cur, req['ingrediente_id'], ins['insumo_id'], req['receta_unidad_medida_id'],
+                    unidad_abrev, req['receta_tipo_magnitud'], factor_receta, peso_estimado_base)
+                costo_sin_redondear = gramos * ppg
+                costo_linea = redondear_hacia_arriba_010(costo_sin_redondear)
+                if mejor is None or costo_linea < mejor['costo']:
                     mejor = {
-                        'costo': costo_cand,
-                        'costo_crudo': costo_crudo,
-                        'gramos': gramos,
                         'insumo_id': ins['insumo_id'],
                         'insumo_nombre': ins['insumo_nombre'],
-                        'origen': ins['origen'],
+                        'ppg': ppg,
                         'fuente': fuente,
                         'confianza': confianza,
-                        'ppg': ppg,
+                        'gramos': gramos,
+                        'costo': costo_linea,
                     }
 
-            # Texto de unidad de uso para exhibición (con gramos reales del elegido)
-            if mejor:
-                unidad_display = f"{cantidad_requerida} {unidad_nombre.lower()} ({round(mejor['gramos'], 1)}g)"
-            else:
-                unidad_display = f"{cantidad_requerida} {unidad_nombre.lower()}"
+            # COM-37 v5: si ningún insumo candidato tuvo precio/predicción, fallback
+            # legacy de precio manual por ingrediente (mejor_opcion_ingrediente lo incluye)
+            if mejor is None:
+                legacy = mejor_opcion_ingrediente(cur, req['ingrediente_id'], fecha_objetivo, precios_insumo)
+                if legacy and legacy['fuente'] == 'LEGACY_INGREDIENTE':
+                    gramos = gramos_por_unidad_uso(
+                        cur, req['ingrediente_id'], None, req['receta_unidad_medida_id'],
+                        unidad_abrev, req['receta_tipo_magnitud'], factor_receta, peso_estimado_base)
+                    costo_linea = redondear_hacia_arriba_010(gramos * legacy['ppg'])
+                    mejor = {
+                        'insumo_id': None,
+                        'insumo_nombre': legacy['insumo_nombre'],
+                        'ppg': legacy['ppg'],
+                        'fuente': 'LEGACY_INGREDIENTE',
+                        'confianza': None,
+                        'gramos': gramos,
+                        'costo': costo_linea,
+                    }
 
-            if mejor is not None:
-                costo_total_receta += mejor['costo']
-                if mejor['fuente'] == 'PREDICHO':
-                    texto_insumo = f"{mejor['insumo_nombre']} (PREDICHO {mejor['confianza']}%)"
-                    es_manual = False
-                    es_pred = True
-                elif mejor['fuente'] == 'MANUAL_PERIODO':
-                    # COM-37: texto exigido para precios cargados manualmente
-                    texto_insumo = "Obtenido de la Base de Datos"
-                    es_manual = True
-                    es_pred = False
-                else:  # SCRAPER_DIA
-                    texto_insumo = mejor['insumo_nombre']
-                    es_manual = False
-                    es_pred = False
+            componente_nombre = req['componente_nombre'] or 'Plato de fondo'
+            componente_orden = req['componente_orden'] if req['componente_orden'] is not None else 99
+
+            if mejor is None:
+                # Sin insumos o sin precios: comportamiento original (fila roja)
                 detalle_costos.append({
                     "ingrediente": req['ingrediente_nombre'],
                     "ingrediente_id": req['ingrediente_id'],
-                    "insumo_id": mejor['insumo_id'],
-                    "insumo_comprado": texto_insumo,
+                    "componente_nombre": componente_nombre,
+                    "componente_orden": componente_orden,
+                    "insumo_comprado": "Sin insumo disponible" if not insumos_rows else "Sin precios disponibles",
                     "cantidad_usada": unidad_display,
-                    "costo_parcial": round(mejor['costo'], 2),
-                    "peso_usado_g": round(mejor['gramos'], 2),
-                    "es_prediccion": es_pred,
-                    "es_manual": es_manual,
-                    "fuente": mejor['fuente'],
-                    "confianza_prediccion": f"{mejor['confianza']}%" if mejor['confianza'] else None,
-                    "detalle_manual": (f"{mejor['insumo_nombre']} (precio manual)"
-                                       if es_manual else None),
-                })
-                continue
-
-            # COM-37 v5: fallback legacy de precio manual POR INGREDIENTE (v1)
-            legacy = obtener_precio_manual_por_gramo(cur, req['ingrediente_id'], fecha_objetivo)
-            if legacy:
-                gramos = gramos_por_unidad_uso(
-                    cur, req['ingrediente_id'], None,
-                    req['receta_unidad_medida_id'], unidad_abrev,
-                    req['receta_tipo_magnitud'], req['receta_factor_a_base'],
-                    req['peso_estimado_g']
-                ) * cantidad_requerida
-                costo_ing = redondear_hacia_arriba_010(gramos * legacy['precio_por_gramo'])
-                costo_total_receta += costo_ing
-                detalle_costos.append({
-                    "ingrediente": req['ingrediente_nombre'],
-                    "ingrediente_id": req['ingrediente_id'],
-                    "insumo_id": None,
-                    "insumo_comprado": "Obtenido de la Base de Datos",
-                    "cantidad_usada": f"{cantidad_requerida} {unidad_nombre.lower()} ({round(gramos, 1)}g)",
-                    "costo_parcial": round(costo_ing, 2),
-                    "peso_usado_g": round(gramos, 2),
+                    "costo_parcial": 0.0,
+                    "peso_usado_g": 0.0,
+                    "error": "Sin insumos disponibles" if not insumos_rows else "Sin precios para esta fecha",
                     "es_prediccion": False,
-                    "es_manual": True,
-                    "fuente": "LEGACY_INGREDIENTE",
-                    "confianza_prediccion": None,
-                    "detalle_manual": legacy['detalle'],
+                    "es_manual": False,
                 })
                 continue
 
-            # Sin ninguna fuente de precio (comportamiento original de error)
-            error_txt = ("Sin insumos disponibles" if not candidatos_ins
-                         else "Sin precios para esta fecha")
+            costo_total_receta += mejor['costo']
+            es_manual = mejor['fuente'] in ('MANUAL_PERIODO', 'LEGACY_INGREDIENTE')
+            es_prediccion = mejor['fuente'] == 'PREDICHO'
+            if es_manual:
+                insumo_display = "Obtenido de la Base de Datos"
+            elif es_prediccion:
+                insumo_display = f"{mejor['insumo_nombre']} (PREDICHO {mejor['confianza']}%)"
+            else:
+                insumo_display = mejor['insumo_nombre']
             detalle_costos.append({
                 "ingrediente": req['ingrediente_nombre'],
                 "ingrediente_id": req['ingrediente_id'],
-                "insumo_id": None,
-                "insumo_comprado": ("Sin insumo disponible" if not candidatos_ins
-                                    else "Sin precios disponibles"),
+                # COM-48: componente de la línea para el desglose agrupado del modal
+                "componente_nombre": componente_nombre,
+                "componente_orden": componente_orden,
+                "insumo_comprado": insumo_display,
                 "cantidad_usada": unidad_display,
-                "costo_parcial": 0.0,
-                "peso_usado_g": 0.0,
-                "error": error_txt,
-                "es_prediccion": False,
-                "es_manual": False,
-                "fuente": None,
-                "confianza_prediccion": None,
+                "costo_parcial": round(mejor['costo'], 2),
+                "peso_usado_g": round(mejor['gramos'], 2),
+                "es_prediccion": es_prediccion,
+                "es_manual": es_manual,
+                "fuente_precio": mejor['fuente'],
+                "confianza_prediccion": f"{mejor['confianza']}%" if es_prediccion else None,
             })
 
         # CALCULAR COSTO POR RACIÓN (dividir costo total entre número de raciones)
@@ -344,11 +310,16 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
             "ingredientes_con_precio": sum(1 for d in detalle_costos if d['costo_parcial'] > 0),
             "ingredientes_sin_precio": sum(1 for d in detalle_costos if d['costo_parcial'] == 0),
             "ingredientes_predichos": sum(1 for d in detalle_costos if d.get('es_prediccion', False)),
-            # COM-37: cuántos ingredientes se costearon con precio manual (insumo o legacy)
+            # COM-37: cuántos ingredientes se costearon con precio manual de la BD
             "ingredientes_manuales": sum(1 for d in detalle_costos if d.get('es_manual', False)),
-            # COM-37 v2/v5: regla de negocio: solo recetas con precios completos entran
+            # COM-37 v2: regla de negocio: solo recetas con precios completos entran
             # al flujo del comedor (propuestas/planificación).
-            "precio_completo": sum(1 for d in detalle_costos if d['costo_parcial'] == 0) == 0
+            "precio_completo": sum(1 for d in detalle_costos if d['costo_parcial'] == 0) == 0,
+            # COM-48: componentes presentes en la receta (para encabezados del modal)
+            "componentes": sorted(
+                {(d['componente_nombre'], d['componente_orden']) for d in detalle_costos},
+                key=lambda t: t[1]
+            ),
         }
     except Exception as e:
         print(f"Error en el motor de optimización: {e}")
