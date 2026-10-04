@@ -12,12 +12,13 @@
  *    independientes; edición sincronizada vía limpiarIngredientesReceta + re-grabado.
  *  - COM-48 v2: alta de ingredientes de catálogo sin salir del modal (sub-modal con
  *    nombre/categoría/unidad/peso; al crear, recarga catálogo y selecciona en la fila).
- *  - COM-48 v3 (este archivo): mejora de usabilidad solicitada: el combo de ingrediente
- *    se reemplaza por una CAJA DE TEXTO CON BÚSQUEDA DINÁMICA (typeahead normalizado,
- *    hasta 8 coincidencias). Si el texto no coincide con ningún ingrediente, el
- *    desplegable muestra la entrada "+ Agregar ingrediente '<texto>'" que abre el
- *    sub-modal de alta con el nombre precargado (clic o tap). El select anterior queda
- *    COMENTADO por trazabilidad. Al editar, la fila muestra el nombre vinculado.
+ *  - COM-48 v3: typeahead de ingredientes (búsqueda dinámica normalizada) con entrada
+ *    "+ Agregar ingrediente '<texto>'" cuando no existe en el catálogo.
+ *  - COM-57 (este archivo): el typeahead y el refresco post-alta FILTRAN los
+ *    ingredientes marcados '[OBSOLETO]' (sinónimos fusionados, COM-37 v8): ya no pueden
+ *    seleccionarse para nuevas líneas, evitando recetas apuntando a ingredientes muertos
+ *    (causa del reporte "[OBSOLETO] Habas" en Evaluar). La migración de líneas antiguas
+ *    se hace desde Gestión de Ingredientes (POST /{destino}/fusionar).
  * Uso: Importado por RecipesView.jsx. Props: isOpen, onClose, onSuccess, recetaEditar.
  */
 import React, { useState, useEffect, useRef } from 'react';
@@ -41,6 +42,9 @@ const normalizarTexto = (t) => (t || '')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .trim();
+
+// COM-57: los ingredientes fusionados (sinónimos muertos) no son seleccionables
+const esObsoleto = (nombre) => (nombre || '').startsWith('[OBSOLETO]');
 
 export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) => {
     const { usuario } = useAuth();
@@ -117,7 +121,8 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
                 api.getCategoriasAlimentos()  // COM-48 v2
             ]);
             setUnidadesMedida(unidades);
-            setIngredientesDisponibles(ingredientesDisp);
+            // COM-57: se excluyen los ingredientes [OBSOLETO] del selector/typeahead
+            setIngredientesDisponibles((ingredientesDisp || []).filter(i => !esObsoleto(i.nombre)));
             setComponentes(comps || []);
             setCategorias(cats || []);
             if (esEdicion && recetaEditar) {
@@ -222,11 +227,12 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
     };
 
     // Resultados normalizados para el texto de una fila (máx. 8 coincidencias)
+    // COM-57: nunca incluye ingredientes [OBSOLETO]
     const resultadosPara = (texto) => {
         const q = normalizarTexto(texto);
         if (!q) return [];
         return ingredientesDisponibles
-            .filter(i => normalizarTexto(i.nombre).includes(q))
+            .filter(i => !esObsoleto(i.nombre) && normalizarTexto(i.nombre).includes(q))
             .slice(0, 8);
     };
 
@@ -234,7 +240,7 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
     const hayCoincidenciaExacta = (texto) => {
         const q = normalizarTexto(texto);
         if (!q) return false;
-        return ingredientesDisponibles.some(i => normalizarTexto(i.nombre) === q);
+        return ingredientesDisponibles.some(i => !esObsoleto(i.nombre) && normalizarTexto(i.nombre) === q);
     };
 
     // Seleccionar un resultado del desplegable en la fila
@@ -296,10 +302,10 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
                 unidad_medida_id: Number(formNuevoIng.unidad_medida_id),
                 peso_estimado_g: peso,
             });
-            // Recarga el catálogo y deja el nuevo ingrediente seleccionado Y escrito
-            // en la fila solicitante (COM-48 v2 + v3)
+            // Recarga el catálogo (COM-57: filtrando obsoletos) y deja el nuevo
+            // ingrediente seleccionado Y escrito en la fila solicitante
             const disp = await api.getIngredientesDisponibles();
-            setIngredientesDisponibles(disp);
+            setIngredientesDisponibles((disp || []).filter(i => !esObsoleto(i.nombre)));
             if (modalNuevoIng && modalNuevoIng.uid != null) {
                 setIngredientes(prev => prev.map(row => (
                     row.uid === modalNuevoIng.uid
@@ -729,7 +735,7 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
                                                                     key={ing.uid}
                                                                     className="grid grid-cols-12 gap-2 items-center border border-slate-200 rounded-lg px-2 py-2 bg-white"
                                                                 >
-                                                                    {/* COM-48 v3: typeahead de ingrediente (reemplaza al select) */}
+                                                                    {/* COM-48 v3: typeahead de ingrediente (COM-57: sin obsoletos) */}
                                                                     <div className="col-span-6 relative">
                                                                         <div className="relative">
                                                                             <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
@@ -747,15 +753,7 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
                                                                                 aria-label={`Buscar ingrediente en ${comp.nombre}`}
                                                                             />
                                                                         </div>
-                                                                        {/* COM-48 v3 (trazabilidad): select anterior COMENTADO:
-                                                                        <select value={ing.ingrediente_id} onChange={...} required>
-                                                                            <option value="">Seleccionar...</option>
-                                                                            {ingredientesDisponibles.map(item => (
-                                                                                <option key={item.id} value={item.id}>{item.nombre}</option>
-                                                                            ))}
-                                                                        </select>
-                                                                        */}
-                                                                        {/* Desplegable de resultados */}
+                                                                        {/* Desplegable de resultados (COM-57: nunca muestra [OBSOLETO]) */}
                                                                         {abierto && (
                                                                             <div className="absolute z-30 mt-1 w-full bg-white border border-slate-200 rounded-lg shadow-lg max-h-48 overflow-y-auto">
                                                                                 {(ing.texto || '').trim() === '' ? (
@@ -849,7 +847,7 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
                             <button
                                 type="button"
                                 onClick={solicitarCancelacion}
-                                className="px-6 py-2 border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-100 transition-colors"
+                                className="px-6 py-2 border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-100 transition-colors text-sm"
                             >
                                 Cancelar
                             </button>
@@ -857,8 +855,7 @@ export const ModalNuevaReceta = ({ isOpen, onClose, onSuccess, recetaEditar }) =
                             <button
                                 type="submit"
                                 disabled={loading}
-                                className="px-6 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                            >
+                                className="px-6 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors text-sm font-medium disabled:opacity-50 flex items-center gap-2">
                                 {loading ? 'Guardando...' : (esEdicion ? 'Actualizar Receta' : 'Guardar Receta')}
                             </button>
                         </div>
