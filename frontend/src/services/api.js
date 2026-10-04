@@ -25,16 +25,11 @@
  *           por insumo, legacy por ingrediente, re-emparejado y duplicados/fusión).
  *   COM-48: en RECETAS: getComponentesReceta, limpiarIngredientesReceta,
  *           getCategoriasAlimentos y createIngredienteDesdeReceta.
- *   COM-50 v1/v2: getReporteGestion y getPlanesGestion.
- *   COM-50 v3 (este archivo): bloque REPORTES DE GESTIÓN actualizado con la matriz
- *           de alcances:
- *             * getAlcanceReportes(usuarioId): GET /reportes-gestion/alcance
- *               -> {tipo_alcance, niveles_permitidos, comedor_fijo, zonas, comedores}
- *               (devuelve 403 si el perfil no tiene acceso: Admin Sistema u Operativo).
- *             * getReporteGestion(params): parámetros extendidos con `nivel` y `zona`
- *               para los perfiles municipales (macro/zona/comedor).
- *           Ningún método existente se modifica; los ajustes de COM-50 v3 son solo
- *           ampliaciones de los bloques de reportes.
+ *   COM-50 v1/v2/v3: bloque REPORTES DE GESTIÓN: getAlcanceReportes, getReporteGestion
+ *           (nivel/zona) y getPlanesGestion.
+ *   COM-57 (este archivo): en GESTION_INGREDIENTES se agrega getObsoletosIngredientes
+ *           (GET /ingredientes-admin/obsoletos) para la sección de migración de
+ *           sinónimos fusionados con referencias atrapadas. Ningún método se modifica.
  */
 
 const API_BASE = '/api/v1';
@@ -206,7 +201,7 @@ export const api = {
     },
 
     // ==========================================
-    // GESTIÓN DE INGREDIENTES (COM-37 v1/v5/v6/v8) — exclusivo Admin de Sistemas
+    // GESTIÓN DE INGREDIENTES (COM-37 v1/v5/v6/v8 + COM-57) — exclusivo Admin de Sistemas
     // ==========================================
     getIngredientesAdmin: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/ingredientes-admin?usuario_solicitante_id=${usuarioSolicitanteId}`);
@@ -352,6 +347,13 @@ export const api = {
     getDuplicadosIngredientes: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/ingredientes-admin/duplicados?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al detectar duplicados'));
+        return response.json();
+    },
+    // COM-57: sinónimos fusionados marcados [OBSOLETO] que aún conservan líneas de
+    // receta o insumos atrapados; alimenta la sección de migración de la vista.
+    getObsoletosIngredientes: async (usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/obsoletos?usuario_solicitante_id=${usuarioSolicitanteId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al listar sinónimos obsoletos'));
         return response.json();
     },
     fusionarIngrediente: async (destinoId, data) => {
@@ -500,7 +502,7 @@ export const api = {
     },
 
     // ==========================================
-    // USUARIOS: FLUJO CRUD POR PERFIL (COM-23 / COM-26 / COM-38)
+    // USUARIOS: FLUJO CRUD POR PERFIL (COM-23 / COM-26 / COM-38 / COM-56)
     // ==========================================
     getUsuarios: async (params = {}) => {
         const qs = new URLSearchParams(params).toString();
@@ -756,13 +758,8 @@ export const api = {
     },
 
     // ==========================================
-    // REPORTES DE GESTIÓN (COM-50 / HU-10) — COM-50 v3 (alcances por perfil)
+    // REPORTES DE GESTIÓN (COM-50 / HU-10) — alcances por perfil (v3)
     // ==========================================
-    /**
-     * COM-50 v3: resuelve el alcance de reportería del usuario.
-     * Devuelve { tipo_alcance, niveles_permitidos, comedor_fijo, zonas, comedores }.
-     * Devuelve 403 (capturado por el caller) para Admin de Sistemas y Operativos.
-     */
     getAlcanceReportes: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/reportes-gestion/alcance?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) {
@@ -772,10 +769,6 @@ export const api = {
         }
         return response.json();
     },
-    /**
-     * COM-50 v3: resumen ejecutivo + uso de presupuesto por día + sugerencias.
-     * params: { usuario_solicitante_id, nivel?, comedor_id?, zona?, candidata_id?, presupuesto_id? }
-     */
     getReporteGestion: async (params = {}) => {
         const qs = new URLSearchParams();
         if (params.usuario_solicitante_id) qs.append('usuario_solicitante_id', params.usuario_solicitante_id);
@@ -788,9 +781,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el reporte de gestión'));
         return response.json();
     },
-    /**
-     * COM-50 v3: selector de planes (propuestas + planificaciones) de un comedor del alcance.
-     */
     getPlanesGestion: async (comedorId, usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/reportes-gestion/planes?comedor_id=${comedorId}&usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener los planes disponibles'));
