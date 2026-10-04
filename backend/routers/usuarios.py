@@ -10,18 +10,20 @@ Permisos (COM-26): la matriz de creación por perfil y el alcance del solicitant
           (municipalidades o comedores permitidos) se validan con permisos.py.
 Historial:
  - COM-26: flujo por perfil con alcance validado y cargos permanentes no repetibles.
- - COM-56 (este archivo): REFUERZO BACKEND (punto 3 confirmado):
-     * `_anotar_comedores_con_municipalidad`: cada comedor del alcance (contexto de
-       creación y detalle de flujo) lleva `municipalidad_id` (municipalidad de su
-       distrito, JOIN por FK con fallback por nombres) y los ids de la cascada
-       (departamento_id/provincia_id/distrito_id) para que el frontend filtre los
-       "comedores de acceso" por jurisdicción SIN comparar textos y pueda precargar
-       la cascada al editar.
-     * `_anotar_municipalidades_con_geo`: las municipalidades del detalle llevan sus
-       ids de cascada para precargar la ubicación en edición de administrativos.
-     * Ninguna validación existente se endurece ni se relaja; solo se enriquece el
-       payload de lectura. Lo anterior queda comentado donde se reemplaza.
+ - COM-56: refuerzo backend: comedores del alcance anotados con municipalidad_id y
+   geografía de cascada; municipalidades del detalle anotadas con geo (para filtrar
+   "comedores de acceso" por jurisdicción y precargar la cascada en edición).
+ - COM-56 v2 (este archivo): FIX del 500 en /contexto-creacion y /detalle-flujo:
+     * El anotado geográfico usaba `distritos.departamento_id`, columna inexistente
+       en la cascada COM-27 (el departamento vive en `provincias`). Ahora el JOIN
+       recorre comedores.distrito_id -> distritos.provincia_id -> provincias.departamento_id.
+     * Detección defensiva de columnas (information_schema) antes de cada consulta.
+     * Todo el anotado va en try/except con traceback en logs: si fallara, degrada a
+       valores null SIN tumbar el endpoint (antes propagaba UndefinedColumn como 500).
+     * Sin cambios en validaciones de alcance ni en los contratos de payload.
 """
+import traceback
+
 from fastapi import APIRouter, Depends, HTTPException
 from psycopg2.extras import RealDictCursor
 
@@ -99,100 +101,122 @@ def _columnas_tabla(cur, tabla: str):
 
 def _anotar_comedores_con_municipalidad(cur, comedores):
     """
-    COM-56 (refuerzo): enriquece cada comedor del alcance con:
-      * municipalidad_id: municipalidad del distrito del comedor (FK
-        municipalidades.distrito_id = comedores.distrito_id; fallback por nombres
-        distrito+provincia si la FK no existiera).
+    COM-56 / COM-56 v2: enriquece cada comedor del alcance con:
+      * municipalidad_id: municipalidad de su distrito (FK municipalidades.distrito_id =
+        comedores.distrito_id; fallback por nombres distrito+provincia).
       * departamento_id / provincia_id / distrito_id: ids de la cascada COM-27 para
-        precargar la ubicación geográfica en el modal de edición.
-    El frontend usa municipalidad_id para filtrar "comedores de acceso" por
-    jurisdicción sin comparar textos.
+        precargar la ubicación en el modal de edición.
+    COM-56 v2: JOIN geográfico correcto (distritos.provincia_id -> provincias.departamento_id),
+    detección de columnas previa y try/except total: ante cualquier fallo se devuelven
+    los comedores con anotaciones en null (degradación) en lugar de propagar el error.
     """
     if not comedores:
         return comedores
-    ids = [c["id"] for c in comedores]
-    cols_m = _columnas_tabla(cur, "municipalidades")
-    cols_c = _columnas_tabla(cur, "comedores")
-
-    # Ids geográficos de la cascada (comedores.distrito_id -> distritos)
-    geo = {}
-    if "distrito_id" in cols_c:
-        cur.execute("""
-            SELECT c.id AS comedor_id, d.id AS distrito_id,
-                   d.provincia_id, d.departamento_id
-            FROM comedores c
-            JOIN distritos d ON d.id = c.distrito_id
-            WHERE c.id = ANY(%s);
-        """, (ids,))
-        for r in cur.fetchall():
-            geo[r["comedor_id"]] = {
-                "distrito_id": r["distrito_id"],
-                "provincia_id": r["provincia_id"],
-                "departamento_id": r["departamento_id"],
-            }
-
-    # municipalidad_id por FK de distrito
-    mapa_muni = {}
-    if "distrito_id" in cols_m and "distrito_id" in cols_c:
-        cur.execute("""
-            SELECT DISTINCT ON (c.id) c.id AS comedor_id, m.id AS municipalidad_id
-            FROM comedores c
-            JOIN municipalidades m ON m.distrito_id = c.distrito_id
-            WHERE c.id = ANY(%s)
-            ORDER BY c.id, m.id;
-        """, (ids,))
-        for r in cur.fetchall():
-            mapa_muni[r["comedor_id"]] = r["municipalidad_id"]
-
-    # Fallback por nombres (distrito + provincia) si la FK no resolviera nada
-    if not mapa_muni:
-        cur.execute("SELECT id, departamento, provincia, distrito FROM municipalidades;")
-        munis = cur.fetchall()
-        for c in comedores:
-            for m in munis:
-                if (m["distrito"] or "").strip().lower() == (c["distrito"] or "").strip().lower() and \
-                   (m["provincia"] or "").strip().lower() == (c["ciudad"] or "").strip().lower():
-                    mapa_muni[c["id"]] = m["id"]
-                    break
-
     for c in comedores:
-        c["municipalidad_id"] = mapa_muni.get(c["id"])
-        g = geo.get(c["id"], {})
-        c["distrito_id"] = g.get("distrito_id")
-        c["provincia_id"] = g.get("provincia_id")
-        c["departamento_id"] = g.get("departamento_id")
+        c["municipalidad_id"] = None
+        c["distrito_id"] = None
+        c["provincia_id"] = None
+        c["departamento_id"] = None
+    try:
+        ids = [c["id"] for c in comedores]
+        cols_m = _columnas_tabla(cur, "municipalidades")
+        cols_c = _columnas_tabla(cur, "comedores")
+        cols_d = _columnas_tabla(cur, "distritos")
+        cols_p = _columnas_tabla(cur, "provincias")
+
+        # 1) Geografía de cascada: comedor -> distrito -> provincia -> departamento
+        if ("distrito_id" in cols_c and "provincia_id" in cols_d
+                and "departamento_id" in cols_p):
+            cur.execute("""
+                SELECT c.id AS comedor_id,
+                       c.distrito_id AS distrito_id,
+                       d.provincia_id AS provincia_id,
+                       p.departamento_id AS departamento_id
+                FROM comedores c
+                JOIN distritos d ON d.id = c.distrito_id
+                JOIN provincias p ON p.id = d.provincia_id
+                WHERE c.id = ANY(%s);
+            """, (ids,))
+            for r in cur.fetchall():
+                for c in comedores:
+                    if c["id"] == r["comedor_id"]:
+                        c["distrito_id"] = r["distrito_id"]
+                        c["provincia_id"] = r["provincia_id"]
+                        c["departamento_id"] = r["departamento_id"]
+                        break
+
+        # 2) municipalidad_id por FK de distrito
+        mapa_muni = {}
+        if "distrito_id" in cols_m and "distrito_id" in cols_c:
+            cur.execute("""
+                SELECT DISTINCT ON (c.id) c.id AS comedor_id, m.id AS municipalidad_id
+                FROM comedores c
+                JOIN municipalidades m ON m.distrito_id = c.distrito_id
+                WHERE c.id = ANY(%s)
+                ORDER BY c.id, m.id;
+            """, (ids,))
+            for r in cur.fetchall():
+                mapa_muni[r["comedor_id"]] = r["municipalidad_id"]
+
+        # 3) Fallback por nombres (distrito + provincia) si la FK no resolviera nada
+        if not mapa_muni and {"departamento", "provincia", "distrito"} <= cols_m:
+            cur.execute("SELECT id, departamento, provincia, distrito FROM municipalidades;")
+            munis = cur.fetchall()
+            for c in comedores:
+                for m in munis:
+                    if ((m["distrito"] or "").strip().lower() == (c["distrito"] or "").strip().lower()
+                            and (m["provincia"] or "").strip().lower() == (c["ciudad"] or "").strip().lower()):
+                        mapa_muni[c["id"]] = m["id"]
+                        break
+
+        for c in comedores:
+            c["municipalidad_id"] = mapa_muni.get(c["id"])
+    except Exception:
+        # COM-56 v2: degradación controlada; la traza queda en logs para diagnóstico
+        traceback.print_exc()
     return comedores
 
 
 def _anotar_municipalidades_con_geo(cur, municipalidades):
     """
-    COM-56 (refuerzo): agrega departamento_id/provincia_id/distrito_id a cada
-    municipalidad (vía municipalidades.distrito_id -> distritos) para que el modal de
-    edición precargue la cascada de ubicación del administrativo.
+    COM-56 / COM-56 v2: agrega departamento_id/provincia_id/distrito_id a cada
+    municipalidad (municipalidades.distrito_id -> distritos.provincia_id ->
+    provincias.departamento_id) para precargar la cascada al editar administrativos.
+    COM-56 v2: detección de columnas + try/except total (degrada a null sin tumbar).
     """
     if not municipalidades:
         return municipalidades
-    cols_m = _columnas_tabla(cur, "municipalidades")
-    if "distrito_id" not in cols_m:
-        for m in municipalidades:
-            m["distrito_id"] = None
-            m["provincia_id"] = None
-            m["departamento_id"] = None
-        return municipalidades
-    ids = [m["id"] for m in municipalidades]
-    cur.execute("""
-        SELECT m.id AS municipalidad_id, d.id AS distrito_id,
-               d.provincia_id, d.departamento_id
-        FROM municipalidades m
-        JOIN distritos d ON d.id = m.distrito_id
-        WHERE m.id = ANY(%s);
-    """, (ids,))
-    geo = {r["municipalidad_id"]: r for r in cur.fetchall()}
     for m in municipalidades:
-        g = geo.get(m["id"])
-        m["distrito_id"] = g["distrito_id"] if g else None
-        m["provincia_id"] = g["provincia_id"] if g else None
-        m["departamento_id"] = g["departamento_id"] if g else None
+        m["distrito_id"] = None
+        m["provincia_id"] = None
+        m["departamento_id"] = None
+    try:
+        cols_m = _columnas_tabla(cur, "municipalidades")
+        cols_d = _columnas_tabla(cur, "distritos")
+        cols_p = _columnas_tabla(cur, "provincias")
+        if not ("distrito_id" in cols_m and "provincia_id" in cols_d
+                and "departamento_id" in cols_p):
+            return municipalidades
+        ids = [m["id"] for m in municipalidades]
+        cur.execute("""
+            SELECT m.id AS municipalidad_id,
+                   m.distrito_id AS distrito_id,
+                   d.provincia_id AS provincia_id,
+                   p.departamento_id AS departamento_id
+            FROM municipalidades m
+            JOIN distritos d ON d.id = m.distrito_id
+            JOIN provincias p ON p.id = d.provincia_id
+            WHERE m.id = ANY(%s);
+        """, (ids,))
+        geo = {r["municipalidad_id"]: r for r in cur.fetchall()}
+        for m in municipalidades:
+            g = geo.get(m["id"])
+            if g:
+                m["distrito_id"] = g["distrito_id"]
+                m["provincia_id"] = g["provincia_id"]
+                m["departamento_id"] = g["departamento_id"]
+    except Exception:
+        traceback.print_exc()
     return municipalidades
 
 
@@ -302,6 +326,7 @@ def contexto_creacion(usuario_solicitante_id: int, db=Depends(get_db)):
     y alcance del solicitante (municipalidades y/o comedores permitidos).
     COM-56: los comedores del alcance salen ANOTADOS con municipalidad_id e ids de
     cascada (refuerzo backend) para el filtrado por jurisdicción en la UI.
+    COM-56 v2: el anotado es defensivo y nunca interrumpe este endpoint.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -388,7 +413,7 @@ def actualizar_politica_clave(data: PoliticaClaveUpdate, db=Depends(get_db)):
         cambios = [
             (PARAM_LONG_MIN, longitud_min, 'Longitud mínima de contraseña (política de seguridad)'),
             (PARAM_LONG_MAX, longitud_max, 'Longitud máxima de contraseña (política de seguridad)'),
-            (PARAM_MESES_EXPIRACION, meses, 'Meses de vigencia de la contraseña (política de seguridad)'),
+            (PARAM_MESES_EXPIRACION, meses, 'Meses de vigencia de contraseña (política de seguridad)'),
             (PARAM_MAX_INTENTOS, intentos, 'Intentos fallidos antes de bloqueo (política de seguridad)'),
         ]
         for clave, valor, descripcion in cambios:
@@ -541,7 +566,7 @@ def editar_usuario(usuario_id: int, data: UsuarioUpdate, db=Depends(get_db)):
       validan excluyendo al propio usuario editado.
     - Comedores/municipalidades retirados de la lista quedan desactivados (auditable).
     COM-56: para Administrativos el frontend envía UNA municipalidad (la de la cascada);
-    las municipales legacy adicionales quedan desactivadas por el flujo existente.
+    las municipalidades legacy adicionales quedan desactivadas por el flujo existente.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -629,6 +654,7 @@ def detalle_flujo_usuario(usuario_id: int, usuario_solicitante_id: int, db=Depen
     COM-56 (refuerzo): municipalidades y comedores salen anotados con los ids de la
     cascada (y los comedores con municipalidad_id) para precargar la ubicación y
     filtrar comedores por jurisdicción en el modal de edición.
+    COM-56 v2: el anotado es defensivo y nunca interrumpe este endpoint.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
