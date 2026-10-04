@@ -1,39 +1,29 @@
 """
 routers/ingredientes_admin.py
-Objetivo: COM-37 v5/v6/v8: módulo "Gestión de Ingredientes" exclusivo del Administrador
-          de Sistemas, sobre el modelo de DOS CONCEPTOS:
+Objetivo: COM-37 v5/v6/v8 + COM-57: módulo "Gestión de Ingredientes" exclusivo del
+          Administrador de Sistemas, sobre el modelo de DOS CONCEPTOS:
             - INGREDIENTE: lo que se cocina; unidad de USO.
             - INSUMO: lo que se compra; unidad de COMPRA; origen SCRAPER|MANUAL.
           Secciones:
             A) Ingredientes: listado con indicadores, crear y editar/renombrar SIN borrado.
-            B) Emparejamiento ingrediente<->insumo: insumos vinculados con precio vigente
-               hoy en unidad de compra y fuente, búsqueda y vinculación de insumos del
-               scraper, creación de insumo MANUAL (unidad+precio+vigencia+equivalencias),
-               edición y desvinculación de manuales.
+            B) Emparejamiento ingrediente<->insumo (vinculación, insumos manuales, fusión).
             C) Equivalencias unidad de USO -> gramos (CRUD + desactivación lógica).
             D) Precios manuales POR INSUMO (períodos con vigencia opcional, solapes).
             E) Re-emparejado de insumos huérfanos (heuristics + nombre normalizado).
             LEGACY (COM-37 v1): precios manuales POR INGREDIENTE como último fallback.
 Historial:
- - COM-37 v8 (este archivo): FIX del reporte "vinculé un insumo y solo una receta quedó
-   con precio completo": el vínculo es por ingrediente (insumos.ingrediente_id), pero
-   existen IDs duplicados/sinónimos (Pimenton vs Pimiento) y reasignaciones que huérfanan
-   al ingrediente origen. Se agregan:
-     * POST /{ingrediente_id}/fusionar: fusiona un ingrediente duplicado (origen) en el
-       canónico (destino): re-apunta receta_ingrediente (sumando cantidades en líneas
-       duplicadas receta+unidad), insumos, equivalencias y precios legacy; renombra el
-       origen como '[OBSOLETO] ...' (SIN borrado físico del catálogo; el DELETE de líneas
-       puente duplicadas es parte inherente de la fusión, documentado).
-     * GET /duplicados: detecta ingredientes SIN insumos cuyo nombre normalizado coincide
-       o contiene al de otro ingrediente CON insumos (candidatos a fusión).
-     * VincularInsumoInput.fusionar_ingrediente_origen: al reasignar un insumo desde otro
-       ingrediente, fusiona también ese origen en el destino (usado por el modal de
-       Evaluar con la confirmación "Vincular y fusionar").
- - COM-37 v6: precio vigente hoy en unidad de compra + detalle de fuente en el listado B.
- - COM-37 v5: secciones B/C/D/E sobre insumos_precios_manuales e ingredientes_equivalencias.
+ - COM-37 v8: fusión de sinónimos (POST /{id}/fusionar, GET /duplicados) y flag
+   fusionar_ingrediente_origen en vincular-insumo.
+ - COM-57 (este archivo): FIX del reporte "[OBSOLETO] en recetas":
+     * _fusionar_ingredientes ACEPTA orígenes ya marcados [OBSOLETO] (caso de
+       migración/reparación) y no duplica el prefijo al renombrar.
+     * Nuevo GET /obsoletos: lista ingredientes [OBSOLETO] con n_lineas_recetas,
+       n_recetas_afectadas y n_insumos atrapados, para dirigir la migración.
+     * El resto del router queda idéntico; el filtro de [OBSOLETO] del selector de
+       recetas se aplica en el frontend (ModalNuevaReceta) y en /ingredientes-disponibles.
 Permisos: todos los endpoints exigen es_admin_sistema (403 en caso contrario).
 Uso: Registrado en main.py con prefijo /api/v1 (include existente de COM-37).
-Referencia: tickets COM-37 v5/v6/v8 (solo trazabilidad).
+Referencia: tickets COM-37 / COM-57 (solo trazabilidad).
 """
 import unicodedata
 from datetime import date
@@ -56,7 +46,7 @@ except Exception:  # pragma: no cover - degradación controlada
     clasificar_heuristica_mejorada = None
     HEURISTICA_DISPONIBLE = False
 
-router = APIRouter(prefix="/ingredientes-admin", tags=["Gestión de Ingredientes (COM-37 v8)"])
+router = APIRouter(prefix="/ingredientes-admin", tags=["Gestión de Ingredientes (COM-57)"])
 
 
 # ==========================================
@@ -91,14 +81,14 @@ class VincularInsumoInput(BaseModel):
     insumo_id: int
     reasignar: bool = False
     # COM-37 v8: si el insumo pertenecía a otro ingrediente y este flag es True, se
-    # fusiona ese ingrediente origen en el destino (sinónimos), de modo que TODAS las
-    # recetas del sinónimo hereden el precio del insumo reasignado.
+    # fusiona ese ingrediente origen en el destino (sinónimos).
     fusionar_ingrediente_origen: bool = False
     equivalencias: List[EquivalenciaItem] = []
 
 
 class FusionarIngredienteInput(BaseModel):
-    """COM-37 v8: fusiona `origen_id` (duplicado/sinónimo) en el ingrediente de la ruta."""
+    """COM-37 v8 / COM-57: fusiona `origen_id` (duplicado, sinónimo u OBSOLETO pendiente
+    de migrar) en el ingrediente de la ruta."""
     usuario_solicitante_id: int
     origen_id: int
 
@@ -273,18 +263,19 @@ def _precio_por_unidad_hoy(cur, insumo_id, fuente, fecha_obj):
 
 
 # ==========================================
-# COM-37 v8: FUSIÓN DE INGREDIENTES SINÓNIMOS
+# COM-37 v8 / COM-57: FUSIÓN DE INGREDIENTES SINÓNIMOS
 # ==========================================
 def _fusionar_ingredientes(cur, origen_id: int, destino_id: int) -> dict:
     """
     COM-37 v8: fusiona el ingrediente `origen_id` (duplicado/sinónimo) en `destino_id`.
+    COM-57: TAMBIÉN acepta orígenes ya marcados '[OBSOLETO]' (caso de migración/
+    reparación de líneas huérfanas) y NO duplica el prefijo al renombrar.
     Re-apunta todas las referencias y conserva trazabilidad:
-      1) receta_ingrediente: si la receta ya tiene línea del destino con la misma unidad
-         de uso, SUMA las cantidades y elimina la línea duplicada del origen (el DELETE
-         es parte inherente de la fusión de líneas puente; el catálogo NO se borra).
+      1) receta_ingrediente: si la receta ya tiene línea del destino con la misma
+         unidad de uso y componente, SUMA cantidades y elimina la duplicada del origen.
       2) receta_ingrediente restante, insumos, equivalencias y precios legacy: se mueven
          al destino (las equivalencias en conflicto se desactivan, no se borran).
-      3) El ingrediente origen se renombra '[OBSOLETO] <nombre>' (sin borrado físico).
+      3) El origen queda como '[OBSOLETO] <nombre>' (sin borrado físico).
     Retorna contadores para el mensaje de confirmación. El caller hace commit.
     """
     if origen_id == destino_id:
@@ -294,22 +285,24 @@ def _fusionar_ingredientes(cur, origen_id: int, destino_id: int) -> dict:
     if len(filas) != 2:
         raise HTTPException(status_code=404, detail="Ingrediente origen o destino no encontrado.")
     nombres = {f['id']: f['nombre'] for f in filas}
-    if nombres[origen_id].startswith('[OBSOLETO]'):
-        raise HTTPException(status_code=400, detail="El ingrediente origen ya está obsoleto.")
 
-    # 1) Líneas puente duplicadas (misma receta + misma unidad de uso): sumar y quitar duplicado
+    # 1) Líneas puente duplicadas (misma receta + componente + unidad): sumar y quitar duplicado
     cur.execute("""
         UPDATE receta_ingrediente d
         SET cantidad_requerida = d.cantidad_requerida + o.cantidad_requerida
         FROM receta_ingrediente o
         WHERE o.ingrediente_id = %s AND d.ingrediente_id = %s
-          AND d.receta_id = o.receta_id AND d.unidad_medida_id = o.unidad_medida_id;
+          AND d.receta_id = o.receta_id
+          AND d.componente_id = o.componente_id
+          AND d.unidad_medida_id = o.unidad_medida_id;
     """, (origen_id, destino_id))
     cur.execute("""
         DELETE FROM receta_ingrediente o
         USING receta_ingrediente d
         WHERE o.ingrediente_id = %s AND d.ingrediente_id = %s
-          AND d.receta_id = o.receta_id AND d.unidad_medida_id = o.unidad_medida_id;
+          AND d.receta_id = o.receta_id
+          AND d.componente_id = o.componente_id
+          AND d.unidad_medida_id = o.unidad_medida_id;
     """, (origen_id, destino_id))
     n_lineas_duplicadas = cur.rowcount
 
@@ -331,8 +324,12 @@ def _fusionar_ingredientes(cur, origen_id: int, destino_id: int) -> dict:
     cur.execute("UPDATE ingredientes_precios_manuales SET ingrediente_id = %s WHERE ingrediente_id = %s;",
                 (destino_id, origen_id))
 
-    # 3) Marcar el origen como obsoleto (sin borrado físico)
-    cur.execute("UPDATE ingredientes SET nombre = '[OBSOLETO] ' || nombre WHERE id = %s;", (origen_id,))
+    # 3) Marcar el origen como obsoleto (COM-57: sin duplicar el prefijo si ya lo tenía)
+    cur.execute("""
+        UPDATE ingredientes
+        SET nombre = '[OBSOLETO] ' || nombre
+        WHERE id = %s AND nombre NOT LIKE '[OBSOLETO]%%';
+    """, (origen_id,))
     return {
         'origen_id': origen_id,
         'origen_nombre': nombres[origen_id],
@@ -349,7 +346,7 @@ def _fusionar_ingredientes(cur, origen_id: int, destino_id: int) -> dict:
 # ==========================================
 @router.get("")
 def listar_ingredientes(usuario_solicitante_id: int, db=Depends(get_db)):
-    """COM-37 v5: ingredientes + indicadores de emparejamiento y precios."""
+    """COM-37 v5: ingredientes activos + indicadores de emparejamiento y precios."""
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         _validar_admin(cur, usuario_solicitante_id)
@@ -383,12 +380,42 @@ def listar_ingredientes(usuario_solicitante_id: int, db=Depends(get_db)):
         cur.close()
 
 
+@router.get("/obsoletos")
+def listar_obsoletos(usuario_solicitante_id: int, db=Depends(get_db)):
+    """
+    COM-57: ingredientes marcados '[OBSOLETO]' (sinónimos fusionados) con el daño
+    pendiente: cuántas líneas de receta y cuántos insumos siguen atrapados en ellos.
+    Sirve para dirigir la migración con POST /{destino}/fusionar.
+    """
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        _validar_admin(cur, usuario_solicitante_id)
+        cur.execute("""
+            SELECT i.id, i.nombre,
+                   (SELECT COUNT(*) FROM receta_ingrediente ri
+                     WHERE ri.ingrediente_id = i.id) AS n_lineas_recetas,
+                   (SELECT COUNT(DISTINCT ri.receta_id) FROM receta_ingrediente ri
+                     WHERE ri.ingrediente_id = i.id) AS n_recetas_afectadas,
+                   (SELECT COUNT(*) FROM insumos ins
+                     WHERE ins.ingrediente_id = i.id) AS n_insumos
+            FROM ingredientes i
+            WHERE i.nombre LIKE '[OBSOLETO]%%'
+            ORDER BY n_lineas_recetas DESC, i.nombre;
+        """)
+        return cur.fetchall()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al listar obsoletos: {e}")
+    finally:
+        cur.close()
+
+
 @router.get("/duplicados")
 def listar_duplicados(usuario_solicitante_id: int, db=Depends(get_db)):
     """
     COM-37 v8: candidatos a fusión: ingredientes SIN insumos cuyo nombre normalizado
-    coincide o contiene (>=4 caracteres) al de otro ingrediente CON insumos. Explica
-    por qué una receta quedaba sin precio completo aunque su sinónimo sí tuviera insumo.
+    coincide o contiene (>=4 caracteres) al de otro ingrediente CON insumos.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -426,9 +453,11 @@ def listar_duplicados(usuario_solicitante_id: int, db=Depends(get_db)):
 @router.post("/{ingrediente_id}/fusionar")
 def fusionar_ingrediente(ingrediente_id: int, data: FusionarIngredienteInput, db=Depends(get_db)):
     """
-    COM-37 v8: fusiona el ingrediente duplicado `origen_id` en el ingrediente de la ruta
-    (destino). Tras la fusión, TODAS las recetas que usaban el sinónimo pasan a usar el
-    canónico y heredan sus insumos/precios. El origen queda como '[OBSOLETO] ...'.
+    COM-37 v8 / COM-57: fusiona el ingrediente duplicado `origen_id` en el ingrediente
+    de la ruta (destino). COM-57: si el origen ya es '[OBSOLETO]', opera como MIGRACIÓN
+    de reparación (mueve sus líneas/insumos/equivalencias restantes al destino).
+    Tras la fusión, TODAS las recetas del sinónimo pasan al canónico y heredan sus
+    insumos/precios. El origen queda como '[OBSOLETO] ...'.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -616,8 +645,7 @@ def vincular_insumo(ingrediente_id: int, data: VincularInsumoInput, db=Depends(g
     """
     COM-37 v5/v8: vincula un insumo existente al ingrediente y registra equivalencias.
     COM-37 v8: si el insumo pertenecía a otro ingrediente y
-    `fusionar_ingrediente_origen=True`, ese origen se fusiona en el destino (sinónimos),
-    de modo que TODAS las recetas del sinónimo hereden el precio (fix del reporte).
+    `fusionar_ingrediente_origen=True`, ese origen se fusiona en el destino (sinónimos).
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -1047,7 +1075,7 @@ def reemparejar_insumos(usuario_solicitante_id: int, db=Depends(get_db)):
             return {'emparejados': 0, 'detalle': [], 'message': 'No hay insumos huérfanos por emparejar.'}
 
         mapa_cat = _mapa_categorias(cur)
-        cur.execute("SELECT id, nombre FROM ingredientes;")
+        cur.execute("SELECT id, nombre FROM ingredientes WHERE nombre NOT LIKE '[OBSOLETO]%%';")
         norm_ing = [(r['id'], _normalizar(r['nombre'])) for r in cur.fetchall()]
 
         actualizados = []

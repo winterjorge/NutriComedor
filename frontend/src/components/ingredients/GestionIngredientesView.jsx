@@ -1,32 +1,31 @@
 /**
  * components/ingredients/GestionIngredientesView.jsx
- * Objetivo: COM-37 v5/v6: pestaña "Gestión de Ingredientes" (exclusiva Admin de Sistemas)
- *           sobre el modelo de DOS CONCEPTOS (ingrediente=uso / insumo=compra).
+ * Objetivo: COM-37 v5/v6 + COM-57: pestaña "Gestión de Ingredientes" (exclusiva Admin de
+ *           Sistemas) sobre el modelo de DOS CONCEPTOS (ingrediente=uso / insumo=compra).
  *           Secciones:
  *             A) Catálogo de ingredientes (crear/editar sin borrado, con advertencia).
- *             B) Emparejamiento ingrediente<->insumo: insumos vinculados con precio
- *                vigente HOY en unidad de COMPRA y fuente (COM-37 v6), búsqueda y
- *                vinculación de insumos del scraper, creación de insumo MANUAL con
- *                precio+vigencia+equivalencias, edición/desvinculación.
+ *             A2) COM-57: "Sinónimos obsoletos": ingredientes [OBSOLETO] (fusionados en
+ *                 COM-37 v8) que aún conservan líneas de receta o insumos atrapados;
+ *                 selector de ingrediente activo de destino + botón "Migrar" con
+ *                 confirmación (reutiliza POST /{destino}/fusionar, que desde COM-57
+ *                 acepta orígenes obsoletos). Al migrar, las recetas heredan precios y
+ *                 el prefijo [OBSOLETO] deja de aparecer en el recetario.
+ *             B) Emparejamiento ingrediente<->insumo con precio vigente hoy y fuente.
  *             C) Equivalencias unidad de USO -> gramos (CRUD + desactivar).
  *             D) Precios manuales POR INSUMO (períodos con vigencia opcional).
- *           COM-37 v6 (este archivo): FIX de usabilidad reportado por el usuario:
- *             1) Al seleccionar un ingrediente (fila o botón "Gestionar"), la vista hace
- *                SCROLL AUTOMÁTICO al panel (antes quedaba debajo de la tabla completa y
- *                parecía que el botón "no hacía nada").
- *             2) La Sección D precarga el insumo con períodos manuales (o el primero),
- *                mostrando de inmediato los precios ingresados desde el modal de Evaluar.
- *             3) La Sección B muestra el precio vigente en UNIDAD DE COMPRA
- *                (S/ por Kg/L/und) y su fuente (SCRAPER_DIA / MANUAL_PERIODO), haciendo
- *                visible en esta vista todo precio cargado desde el recetario.
- *           Nada existente se elimina; los ajustes quedan comentados con trazabilidad.
+ * Historial:
+ *  - COM-37 v5: vista original de dos secciones (emparejamiento + precios manuales).
+ *  - COM-37 v6: scroll automático al panel, precio por unidad de compra hoy, precarga
+ *    de períodos en Sección D.
+ *  - COM-57 (este archivo): sección A2 de sinónimos obsoletos con migración asistida.
+ *    Nada existente se elimina; lo ajustado queda comentado por trazabilidad.
  * Uso: Montada por App.jsx en la pestaña "Gestión de Ingredientes".
- * Referencia: tickets COM-37 v5/v6 (solo trazabilidad).
+ * Referencia: tickets COM-37 / COM-57 (solo trazabilidad).
  */
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
     Plus, Edit3, Database, RefreshCw, Loader2, AlertCircle, Coins, Power,
-    Sprout, Search, Link2, Package, Scale
+    Sprout, Search, Link2, Package, Scale, Archive
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
@@ -54,6 +53,13 @@ export const GestionIngredientesView = () => {
     const [error, setError] = useState('');
     const [exito, setExito] = useState('');
     const [reemparejando, setReemparejando] = useState(false);
+
+    // ===== COM-57: sinónimos obsoletos y migración =====
+    const [obsoletos, setObsoletos] = useState([]);
+    const [cargandoObs, setCargandoObs] = useState(false);
+    const [destinoObs, setDestinoObs] = useState({});      // { origen_id: destino_id (string) }
+    const [confMigracion, setConfMigracion] = useState(null); // { origen, destinoId }
+    const [migrandoObs, setMigrandoObs] = useState(false);
 
     // Modal crear/editar ingrediente
     const [modalIng, setModalIng] = useState(null);
@@ -112,7 +118,20 @@ export const GestionIngredientesView = () => {
         }
     }, [usuario.id]);
 
+    // COM-57: lista de sinónimos obsoletos con referencias atrapadas
+    const cargarObsoletos = useCallback(async () => {
+        setCargandoObs(true);
+        try {
+            setObsoletos(await api.getObsoletosIngredientes(usuario.id));
+        } catch (e) {
+            setObsoletos([]);
+        } finally {
+            setCargandoObs(false);
+        }
+    }, [usuario.id]);
+
     useEffect(() => { cargar(); }, [cargar]);
+    useEffect(() => { cargarObsoletos(); }, [cargarObsoletos]);
 
     // COM-37 v6: scroll automático al panel al seleccionar un ingrediente
     useEffect(() => {
@@ -141,8 +160,7 @@ export const GestionIngredientesView = () => {
         }
     }, [usuario.id]);
 
-    // COM-37 v6: precarga en Sección D del insumo con períodos manuales (o el primero),
-    // para mostrar de inmediato los precios ingresados desde el modal de Evaluar.
+    // COM-37 v6: precarga en Sección D del insumo con períodos manuales (o el primero)
     const cargarInsumos = useCallback(async (ing) => {
         setCargandoInsumos(true);
         setErrorSeccion('');
@@ -185,6 +203,39 @@ export const GestionIngredientesView = () => {
         setPerEditId(null);
         cargarInsumos(ing);
         cargarEquivalencias(ing);
+    };
+
+    // ---------- COM-57: migración de sinónimos obsoletos ----------
+    const solicitarMigracion = (obs) => {
+        const destinoId = destinoObs[obs.id];
+        if (!destinoId) {
+            setError(`Seleccione el ingrediente activo de destino para migrar "${obs.nombre}".`);
+            return;
+        }
+        setError('');
+        setConfMigracion({ origen: obs, destinoId: Number(destinoId) });
+    };
+
+    const confirmarMigracion = async () => {
+        const { origen, destinoId } = confMigracion;
+        setConfMigracion(null);
+        setMigrandoObs(true);
+        setError('');
+        try {
+            const res = await api.fusionarIngrediente(destinoId, {
+                usuario_solicitante_id: usuario.id,
+                origen_id: origen.id,
+            });
+            setExito(res.message || `Migración de "${origen.nombre}" completada.`);
+            setDestinoObs(prev => { const n = { ...prev }; delete n[origen.id]; return n; });
+            cargarObsoletos();
+            cargar();
+            if (ingSel) { cargarInsumos(ingSel); cargarEquivalencias(ingSel); }
+        } catch (e) {
+            setError(e.message);
+        } finally {
+            setMigrandoObs(false);
+        }
     };
 
     // ---------- Sección A: crear/editar ingrediente ----------
@@ -490,8 +541,7 @@ export const GestionIngredientesView = () => {
                         ) : ingredientes.length === 0 ? (
                             <tr><td colSpan="8" className="p-8 text-center text-slate-500">No hay ingredientes registrados.</td></tr>
                         ) : ingredientes.map(i => (
-                            <tr key={i.id}
-                                className={`hover:bg-slate-50 cursor-pointer ${ingSel?.id === i.id ? 'bg-emerald-50' : ''} ${i.n_insumos_con_precio_scraper === 0 && i.n_insumos_manuales === 0 ? 'bg-amber-50/60' : ''}`}
+                            <tr key={i.id} className={`hover:bg-slate-50 cursor-pointer ${ingSel?.id === i.id ? 'bg-emerald-50' : ''} ${i.n_insumos_con_precio_scraper === 0 && i.n_insumos_manuales === 0 ? 'bg-amber-50/60' : ''}`}
                                 onClick={() => seleccionarIngrediente(i)}>
                                 <td className="p-3 font-medium text-slate-800">{i.nombre}</td>
                                 <td className="p-3 text-slate-600">{i.categoria_nombre || '—'}</td>
@@ -508,13 +558,11 @@ export const GestionIngredientesView = () => {
                                 <td className="p-3 text-center text-slate-600">{i.n_equivalencias}</td>
                                 <td className="p-3" onClick={(e) => e.stopPropagation()}>
                                     <div className="flex justify-end gap-2">
-                                        <button onClick={() => seleccionarIngrediente(i)}
-                                            title="Gestionar insumos, equivalencias y precios"
+                                        <button onClick={() => seleccionarIngrediente(i)} title="Gestionar insumos, equivalencias y precios"
                                             className="p-1.5 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded-lg transition-colors">
                                             <Package size={15} />
                                         </button>
-                                        <button onClick={() => abrirEditar(i)}
-                                            title="Editar / renombrar (advertencia de inconsistencias)"
+                                        <button onClick={() => abrirEditar(i)} title="Editar / renombrar (advertencia de inconsistencias)"
                                             className="p-1.5 bg-slate-100 text-slate-700 hover:bg-slate-200 rounded-lg transition-colors">
                                             <Edit3 size={15} />
                                         </button>
@@ -526,8 +574,76 @@ export const GestionIngredientesView = () => {
                 </table>
             </div>
 
+            {/* ===== COM-57: Sección A2 — Sinónimos obsoletos pendientes de migración ===== */}
+            <div className="bg-white border border-slate-200 rounded-xl p-5">
+                <div className="flex items-center justify-between mb-2">
+                    <h3 className="font-bold text-slate-800 text-sm flex items-center gap-2">
+                        <Archive size={16} className="text-amber-600" /> Sinónimos obsoletos ([OBSOLETO])
+                    </h3>
+                    <button onClick={cargarObsoletos} disabled={cargandoObs}
+                        className="p-1.5 bg-slate-100 hover:bg-slate-200 rounded-lg text-slate-600 transition-colors" title="Recargar lista">
+                        <RefreshCw size={14} className={cargandoObs ? 'animate-spin' : ''} />
+                    </button>
+                </div>
+                <p className="text-[11px] text-slate-500 mb-3">
+                    Ingredientes fusionados (COM-37 v8) que aún conservan líneas de receta o insumos
+                    atrapados. Migre cada uno a su ingrediente activo para que las recetas hereden
+                    sus precios y el prefijo [OBSOLETO] desaparezca del recetario y de Evaluar.
+                </p>
+                {cargandoObs ? (
+                    <div className="p-6 text-center text-emerald-600"><Loader2 className="animate-spin mx-auto" size={20} /></div>
+                ) : obsoletos.length === 0 ? (
+                    <p className="text-xs text-slate-400">No hay sinónimos obsoletos con referencias pendientes. ✔</p>
+                ) : (
+                    <div className="overflow-x-auto rounded-lg border border-slate-200">
+                        <table className="w-full text-left border-collapse whitespace-nowrap text-xs">
+                            <thead>
+                                <tr className="bg-slate-100 text-slate-600">
+                                    <th className="p-2 font-semibold">Ingrediente obsoleto</th>
+                                    <th className="p-2 text-center font-semibold">Líneas de receta</th>
+                                    <th className="p-2 text-center font-semibold">Recetas afectadas</th>
+                                    <th className="p-2 text-center font-semibold">Insumos atrapados</th>
+                                    <th className="p-2 font-semibold">Migrar líneas e insumos a…</th>
+                                    <th className="p-2 text-right font-semibold">Acción</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-200">
+                                {obsoletos.map(obs => (
+                                    <tr key={obs.id} className="hover:bg-slate-50">
+                                        <td className="p-2 font-medium text-slate-800">{obs.nombre}</td>
+                                        <td className="p-2 text-center text-slate-600">{obs.n_lineas_recetas}</td>
+                                        <td className="p-2 text-center text-slate-600">{obs.n_recetas_afectadas}</td>
+                                        <td className="p-2 text-center text-slate-600">{obs.n_insumos}</td>
+                                        <td className="p-2 min-w-[220px]">
+                                            <select
+                                                value={destinoObs[obs.id] || ''}
+                                                onChange={(e) => setDestinoObs({ ...destinoObs, [obs.id]: e.target.value })}
+                                                className="w-full px-2 py-1.5 border border-slate-300 rounded-lg text-xs bg-white outline-none focus:ring-2 focus:ring-emerald-500"
+                                            >
+                                                <option value="">Seleccionar destino…</option>
+                                                {ingredientes.filter(i => i.id !== obs.id).map(i => (
+                                                    <option key={i.id} value={i.id}>{i.nombre}</option>
+                                                ))}
+                                            </select>
+                                        </td>
+                                        <td className="p-2 text-right">
+                                            <button
+                                                onClick={() => solicitarMigracion(obs)}
+                                                disabled={migrandoObs || !destinoObs[obs.id]}
+                                                className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-[11px] font-bold transition-colors disabled:opacity-50"
+                                            >
+                                                {migrandoObs ? 'Migrando…' : 'Migrar'}
+                                            </button>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
+            </div>
+
             {/* ===== Panel del ingrediente seleccionado: secciones B, C y D ===== */}
-            {/* COM-37 v6: ref para scroll automático (el panel quedaba fuera de pantalla) */}
             {ingSel && (
                 <div ref={panelRef} className="bg-white border border-emerald-300 rounded-xl p-5 space-y-6 shadow-sm">
                     <div className="flex flex-wrap items-center justify-between gap-3">
@@ -574,7 +690,6 @@ export const GestionIngredientesView = () => {
                                             <th className="p-2 font-semibold">Insumo</th>
                                             <th className="p-2 font-semibold">Origen</th>
                                             <th className="p-2 font-semibold">Unidad compra</th>
-                                            {/* COM-37 v6: precio legible en unidad de compra + fuente */}
                                             <th className="p-2 font-semibold">Precio hoy (unidad compra)</th>
                                             <th className="p-2 font-semibold">Fuente</th>
                                             <th className="p-2 font-semibold">Último precio scraper</th>
@@ -805,7 +920,7 @@ export const GestionIngredientesView = () => {
                                         {perEditId && (
                                             <button type="button" onClick={() => { setPerEditId(null); setFormPer(FORM_PER_VACIO); }}
                                                 className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-medium transition-colors">
-                                                Cancelar
+                                            Cancelar
                                             </button>
                                         )}
                                         <button type="submit" disabled={guardandoPer}
@@ -1046,6 +1161,16 @@ export const GestionIngredientesView = () => {
                 onClose={() => setConfEdicion(null)}
                 onConfirm={confirmarEdicion}
                 mensaje="ATENCIÓN: editar un ingrediente (nombre, categoría, unidad de uso o peso) puede generar inconsistencias en costos históricos, emparejamientos con insumos, equivalencias y modelos ya entrenados. ¿Confirma que desea continuar?"
+                tipo="warning"
+            />
+            {/* COM-57: confirmación de migración de sinónimo obsoleto */}
+            <ModalConfirmacion
+                isOpen={!!confMigracion}
+                onClose={() => setConfMigracion(null)}
+                onConfirm={confirmarMigracion}
+                mensaje={confMigracion
+                    ? `¿Migrar todas las líneas de receta, insumos y equivalencias de "${confMigracion.origen.nombre}" (${confMigracion.origen.n_lineas_recetas} línea(s), ${confMigracion.origen.n_insumos} insumo(s)) hacia el ingrediente activo seleccionado? Las cantidades duplicadas en el destino se sumarán. Esta acción no se puede deshacer.`
+                    : ''}
                 tipo="warning"
             />
             <ModalExito isOpen={!!exito} onClose={() => setExito('')} mensaje={exito} />
