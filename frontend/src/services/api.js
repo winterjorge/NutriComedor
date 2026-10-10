@@ -995,9 +995,27 @@ export const api = {
     },
 
     // ==========================================
-    // COMENSALES Y VENTAS (POS)
+    // COMENSALES Y VENTAS (POS) — COM-62 v2: identidad por nombre + DNI opcional
     // ==========================================
+    // COM-62 v2: autocompletado por nombre (excluye al Cliente Genérico).
+    buscarComensalesPorNombre: async (q = '', limite = 8) => {
+        const response = await fetch(`${API_BASE}/comensales/buscar-por-nombre?q=${encodeURIComponent(q)}&limite=${limite}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al buscar comensales por nombre'));
+        return response.json();
+    },
+    // COM-62 v2: edición de ficha (incluye completar/corregir DNI después).
+    editarComensal: async (comensalId, data) => {
+        const response = await fetch(`${API_BASE}/comensales/${comensalId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al editar el comensal'));
+        return response.json();
+    },
+    // Legacy: búsqueda exacta por documento (usada por TablaVentasHoy y flujos antiguos).
     buscarComensal: async (doc) => fetch(`${API_BASE}/comensales/${doc}`),
+    // COM-62 v2: alta con documento OPCIONAL (sin DNI => '00000000', reutiliza ficha por nombre).
     registrarComensal: async (data) => fetch(`${API_BASE}/comensales/registrar`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
