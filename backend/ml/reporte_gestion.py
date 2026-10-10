@@ -1,29 +1,17 @@
 """
 ml/reporte_gestion.py
-Objetivo: COM-50 (HU-10): motor del reporte "Resumen ejecutivo y recomendaciones",
-          con tres niveles de alcance (COM-50 v3):
-            * 'comedor': indicadores de un solo comedor (menú, costos, sugerencias).
-            * 'zona':    agregado de los comedores de una zona (ej. "Motupe").
-            * 'macro':   agregado de todos los comedores del alcance del solicitante.
-          Produce: resumen ejecutivo, uso de presupuesto por día (gráfico de barras),
-          menú del plan y sugerencias automáticas (ahorro dentro del mismo cluster
-          K-means, alertas de margen/presupuesto y variedad).
-Historial:
- - COM-50 v1/v2: versión por comedor con blindaje parcial.
- - COM-50 v3 (este archivo): FIX definitivo del IndexError "tuple index out of range" y
-   soporte multi-comedor:
-     * Se ELIMINA la dependencia del fallback legacy de precios
-       (mejor_opcion_ingrediente / obtener_precio_manual_por_gramo): el reporte costea
-       solo con fuentes modernas (scraper día/última corrida, manual de insumo,
-       predicción RF). Un ingrediente sin esas fuentes marca la receta como
-       "precio incompleto" y se omite de sugerencias (no interrumpe el reporte).
-     * CERO indexado posicional de tuplas/filas: todo acceso por nombre con guardas.
-     * Cada comedor y cada día se procesan aislados (try/except + traceback en logs):
-       un dato malo degrada ese elemento, no tumba el reporte completo.
-     * Agregación macro/zona: totales, uso por día sumado y sugerencias con el nombre
-       del comedor al que pertenecen.
+Objetivo: COM-50 (HU-10) + COM-59A: motor del reporte "Resumen ejecutivo y
+          recomendaciones" con tres niveles de alcance (comedor / zona / macro):
+            1) Resumen ejecutivo: costo total, costo por ración, recolección, margen.
+            2) Uso de presupuesto por día (gráfico de barras).
+            3) Sugerencias automáticas (ahorro dentro del mismo cluster K-means,
+               alertas de margen/presupuesto y variedad).
+          COM-59A: bloque "SUBVENCIONADO VS COMPRADO": re-costea la semana del plan
+          con y sin el subsidio mensual de víveres del comedor (stock del mes vs
+          consumo proyectado por día y comensal), y valida el MARGEN SEMANAL OBJETIVO
+          contra la recolección proyectada.
 Uso: Importado por routers/reportes_gestion.py. Recibe cursor psycopg2 (RealDictCursor).
-Referencia: tickets COM-50 / HU-10 (solo trazabilidad).
+Referencia: tickets COM-50 / COM-59 / HU-10 (solo trazabilidad).
 """
 import json
 import traceback
@@ -36,6 +24,12 @@ from precios_insumos import (
 )
 from optimizador import predecir_precio_con_confianza
 from ml.kmeans_recetas import cargar_reglas_proteinas, _normalizar, obtener_modelo_activo
+# COM-59A: subsidio del mes, margen semanal objetivo y precios de venta vigentes
+from subsidio_motor import (
+    subsidio_gramos_del_mes,
+    margen_semanal_objetivo,
+    precio_venta_vigente,
+)
 
 # Ahorro mínimo (%) para que un reemplazo se reporte como sugerencia (HU-10: ej. 5%)
 UMBRAL_SUGERENCIA_PCT = 5.0
@@ -79,9 +73,8 @@ def _nuevo_contexto(cur, fecha):
 # ==========================================
 def _mejor_opcion_sin_legacy(cur, ing_id, fecha, precios_insumo, peso_estimado_g):
     """
-    Mejor (menor costo por gramo) opción de precio para un ingrediente usando SOLO
-    fuentes modernas: scraper (día o última corrida), manual de insumo o predicción RF.
-    COM-50 v3: no se consulta el legacy por ingrediente (fuente del IndexError histórico).
+    Mejor (menor costo por gramo) opción de precio con SOLO fuentes modernas:
+    scraper (día o última corrida), manual de insumo o predicción RF.
     """
     cur.execute("""
         SELECT ins.id AS insumo_id, ins.nombre AS insumo_nombre, ins.origen,
@@ -98,8 +91,6 @@ def _mejor_opcion_sin_legacy(cur, ing_id, fecha, precios_insumo, peso_estimado_g
             if opc:
                 ppg = _f(opc.get('ppg'))
                 fuente = opc.get('fuente')
-                precio_unidad = opc.get('precio_por_unidad')
-                unidad_compra = opc.get('unidad_compra_abrev')
             else:
                 pred, conf, ok = predecir_precio_con_confianza(ins['insumo_id'], fecha, cur.connection, cur)
                 if not (ok and pred):
@@ -111,39 +102,25 @@ def _mejor_opcion_sin_legacy(cur, ing_id, fecha, precios_insumo, peso_estimado_g
                 ppg = _f(pred) / g_compra
                 fuente = 'PREDICHO'
                 confianza = conf
-                precio_unidad = pred
-                unidad_compra = ins['u_abrev']
             if ppg <= 0:
                 continue
             if mejor is None or ppg < mejor['ppg']:
-                mejor = {
-                    'insumo_id': ins['insumo_id'],
-                    'insumo_nombre': ins['insumo_nombre'],
-                    'ppg': ppg,
-                    'fuente': fuente,
-                    'confianza': confianza,
-                    'precio_unidad_compra': precio_unidad,
-                    'unidad_compra': unidad_compra,
-                }
+                mejor = {'insumo_id': ins['insumo_id'], 'insumo_nombre': ins['insumo_nombre'],
+                         'ppg': ppg, 'fuente': fuente, 'confianza': confianza}
         except Exception:
             traceback.print_exc()
             continue
     return mejor
 
 
-def _costo_receta_por_racion(cur, receta_id, ctx):
+def _detalle_lineas_receta(cur, receta_id, ctx):
     """
-    COM-50 v3: costo por ración con multiplicación explícita
-    (gramos_por_unidad × cantidad) y sin fallback legacy.
-    Retorna (costo_por_racion, precio_completo) o None si la receta no existe.
+    COM-59A: líneas de costeo del lote de la receta (gramos y costo por línea) +
+    flag de precio completo. Con cache en ctx. Base del costeo y del bloque subsidio.
     """
-    if receta_id in ctx['cache_costo']:
-        return ctx['cache_costo'][receta_id]
-    cur.execute("SELECT raciones FROM recetas_almuerzo WHERE id = %s;", (receta_id,))
-    fila_rec = cur.fetchone()
-    if not fila_rec:
-        return None
-    raciones = _f(fila_rec.get('raciones'), 0.0) or 4.0
+    clave = ('detalle', receta_id)
+    if clave in ctx['cache_costo']:
+        return ctx['cache_costo'][clave]
     cur.execute("""
         SELECT ri.ingrediente_id, ri.cantidad_requerida, ri.unidad_medida_id,
                um.abreviatura AS unidad_abrev, um.tipo_magnitud, um.factor_a_base,
@@ -153,9 +130,10 @@ def _costo_receta_por_racion(cur, receta_id, ctx):
         JOIN ingredientes ing ON ing.id = ri.ingrediente_id
         WHERE ri.receta_id = %s;
     """, (receta_id,))
-    total = 0.0
-    completo = True
-    for fila in cur.fetchall():
+    filas = cur.fetchall()
+    lineas = []
+    completo = bool(filas)
+    for fila in filas:
         try:
             peso = _f(fila.get('peso_estimado_g'), 100.0)
             opc = _mejor_opcion_sin_legacy(cur, fila['ingrediente_id'], ctx['fecha'], ctx['precios_insumo'], peso)
@@ -167,10 +145,32 @@ def _costo_receta_por_racion(cur, receta_id, ctx):
                 g = gramos_por_unidad_estandar(
                     fila.get('unidad_abrev'), fila.get('tipo_magnitud'),
                     _f(fila.get('factor_a_base'), 1.0), peso)
-            total += (_f(g) * _f(fila.get('cantidad_requerida'))) * _f(opc['ppg'])
+            gramos = _f(g) * _f(fila.get('cantidad_requerida'))
+            lineas.append({
+                'ingrediente_id': fila['ingrediente_id'],
+                'gramos_totales': gramos,
+                'costo_parcial': gramos * _f(opc['ppg']),
+                'ppg': _f(opc['ppg']),
+            })
         except Exception:
             traceback.print_exc()
             completo = False
+    resultado = (lineas, completo)
+    ctx['cache_costo'][clave] = resultado
+    return resultado
+
+
+def _costo_receta_por_racion(cur, receta_id, ctx):
+    """Costo por ración (lote completo / raciones) y flag de precio completo."""
+    if receta_id in ctx['cache_costo']:
+        return ctx['cache_costo'][receta_id]
+    cur.execute("SELECT raciones FROM recetas_almuerzo WHERE id = %s;", (receta_id,))
+    fila_rec = cur.fetchone()
+    if not fila_rec:
+        return None
+    raciones = _f(fila_rec.get('raciones'), 0.0) or 4.0
+    lineas, completo = _detalle_lineas_receta(cur, receta_id, ctx)
+    total = sum(l['costo_parcial'] for l in lineas)
     resultado = (round(total / raciones, 2), completo)
     ctx['cache_costo'][receta_id] = resultado
     return resultado
@@ -332,6 +332,66 @@ def _reporte_un_comedor(cur, comedor_id, candidata_id=None, presupuesto_id=None)
                 'pct_del_presupuesto': pct,
             })
 
+        # ---- COM-59A: SUBVENCIONADO VS COMPRADO + margen semanal objetivo ----
+        subsidio_bloque = None
+        try:
+            stock_mes = subsidio_gramos_del_mes(cur, comedor_id, fecha_hoy.year, fecha_hoy.month)
+            comensales = _f(comensales_dia) or 120.0
+            consumo = {}
+            sin_subsidio = 0.0
+            ppg_por_ing = {}
+            for d in dias:
+                if not d['receta_id']:
+                    continue
+                lineas, _completo = _detalle_lineas_receta(cur, d['receta_id'], ctx)
+                for l in lineas:
+                    sin_subsidio += l['costo_parcial'] * comensales
+                    ppg_por_ing.setdefault(l['ingrediente_id'], l['ppg'])
+                    if l['ingrediente_id'] in stock_mes:
+                        consumo[l['ingrediente_id']] = consumo.get(l['ingrediente_id'], 0.0) + \
+                            l['gramos_totales'] * comensales
+            ahorro = 0.0
+            detalle_ing = []
+            if stock_mes:
+                cur.execute("SELECT id, nombre FROM ingredientes WHERE id = ANY(%s);",
+                            (list(stock_mes.keys()),))
+                nombres = {r['id']: r['nombre'] for r in cur.fetchall()}
+                for ing_id, stock_g in stock_mes.items():
+                    cons = consumo.get(ing_id, 0.0)
+                    cubierto = min(cons, stock_g)
+                    ah = cubierto * ppg_por_ing.get(ing_id, 0.0)
+                    ahorro += ah
+                    detalle_ing.append({
+                        'ingrediente': nombres.get(ing_id),
+                        'gramos_mes': round(stock_g, 2),
+                        'consumo_semana_g': round(cons, 2),
+                        'cubierto_pct': round((cubierto / cons) * 100, 1) if cons else 100.0,
+                        'ahorro_soles': round(ah, 2),
+                    })
+            con_subsidio = max(0.0, sin_subsidio - ahorro)
+            margen_obj = margen_semanal_objetivo(cur)
+            margen_semana_pct = round(((recoleccion - con_subsidio) / con_subsidio) * 100, 2) \
+                if con_subsidio else None
+            subsidio_bloque = {
+                'costo_semana_sin_subsidio': round(sin_subsidio, 2),
+                'costo_semana_con_subsidio': round(con_subsidio, 2),
+                'ahorro_subsidio': round(ahorro, 2),
+                'detalle_por_ingrediente': detalle_ing,
+                'margen_semanal_pct': margen_semana_pct,
+                'margen_semanal_objetivo_pct': round(margen_obj * 100, 2),
+                'cumple_margen_semanal': bool(margen_semana_pct is not None and
+                                              margen_semana_pct >= margen_obj * 100),
+                # Precios de venta vigentes usados como referencia de recolección
+                'precios_venta_vigentes': {
+                    'Social': precio_venta_vigente(cur, 'Social'),
+                    'Afiliado': precio_venta_vigente(cur, 'Afiliado'),
+                    'Normal': precio_venta_vigente(cur, 'Normal'),
+                },
+            }
+        except Exception:
+            traceback.print_exc()
+            subsidio_bloque = None
+
         # ---- Sugerencias (bloque aislado por día) ----
         sugerencias = []
         nota = None
@@ -399,6 +459,13 @@ def _reporte_un_comedor(cur, comedor_id, candidata_id=None, presupuesto_id=None)
                     'texto': (f"La recolección proyectada (S/ {recoleccion:.2f}) NO cubre el costo semanal "
                               f"(S/ {costo_total:.2f}): margen negativo de S/ {abs(margen):.2f}."),
                 })
+            if subsidio_bloque and not subsidio_bloque['cumple_margen_semanal']:
+                sugerencias.append({
+                    'tipo': 'alerta',
+                    'texto': (f"El margen semanal con subsidio ({subsidio_bloque['margen_semanal_pct']}%) está por "
+                              f"debajo del objetivo ({subsidio_bloque['margen_semanal_objetivo_pct']}%): el comedor "
+                              f"quedaría expuesto si un día vende menos de lo proyectado."),
+                })
             if _f(presupuesto_total) and costo_total > _f(presupuesto_total):
                 sugerencias.append({
                     'tipo': 'alerta',
@@ -438,6 +505,7 @@ def _reporte_un_comedor(cur, comedor_id, candidata_id=None, presupuesto_id=None)
             'menu': dias,
             'sugerencias': sugerencias,
             'nota_sugerencias': nota,
+            'subsidio': subsidio_bloque,   # COM-59A: subvencionado vs comprado
             'umbral_sugerencia_pct': UMBRAL_SUGERENCIA_PCT,
         }
     except Exception:
@@ -451,12 +519,8 @@ def _reporte_un_comedor(cur, comedor_id, candidata_id=None, presupuesto_id=None)
 def generar_reporte_gestion(cur, comedores_alcance, nivel='comedor', zona=None,
                             comedor_id=None, candidata_id=None, presupuesto_id=None):
     """
-    COM-50 v3: genera el reporte según el nivel:
-      * 'comedor': un solo comedor (debe estar dentro del alcance del solicitante).
-      * 'zona':    agregado de los comedores del alcance cuya zona coincide.
-      * 'macro':   agregado de todos los comedores del alcance.
-    `comedores_alcance`: lista de dicts {id, nombre, zona} ya filtrada por permisos
-    en el router. Retorna dict de reporte o {'error': ...}.
+    COM-50 v3 + COM-59A: genera el reporte según el nivel ('comedor' | 'zona' | 'macro').
+    En niveles agregados, el resumen suma el ahorro de subsidio de los comedores con plan.
     """
     if not comedores_alcance:
         return {'error': 'sin_alcance',
@@ -482,7 +546,6 @@ def generar_reporte_gestion(cur, comedores_alcance, nivel='comedor', zona=None,
             return {'error': 'zona_requerida', 'detalle': 'Indique la zona a reportar.'}
         objetivos = [c for c in comedores_alcance if (c.get('zona') or '').strip().lower() == zona.strip().lower()]
         if not objetivos:
-            # coincidencia parcial como fallback amigable
             objetivos = [c for c in comedores_alcance if zona.strip().lower() in (c.get('zona') or '').strip().lower()]
     else:
         objetivos = list(comedores_alcance)
@@ -493,7 +556,7 @@ def generar_reporte_gestion(cur, comedores_alcance, nivel='comedor', zona=None,
     por_comedor = []
     sugerencias = []
     uso_agregado = {}
-    tot_costo = tot_rec = tot_pres = 0.0
+    tot_costo = tot_rec = tot_pres = tot_ahorro_sub = 0.0
     todos_dentro = True
     for c in objetivos:
         rep = _reporte_un_comedor(cur, c['id'])
@@ -506,10 +569,13 @@ def generar_reporte_gestion(cur, comedores_alcance, nivel='comedor', zona=None,
             'fuente_plan': rep['fuente_plan'],
             'resumen': rep['resumen'],
             'menu': rep['menu'],
+            # COM-59A: cada comedor expone su bloque subvencionado vs comprado
+            'subsidio': rep.get('subsidio'),
         })
         tot_costo += _f(rep['resumen']['costo_total_semana'])
         tot_rec += _f(rep['resumen']['recoleccion_total_semana'])
         tot_pres += _f(rep['resumen']['presupuesto_semanal'])
+        tot_ahorro_sub += _f((rep.get('subsidio') or {}).get('ahorro_subsidio'))
         todos_dentro = todos_dentro and bool(rep['resumen']['dentro_de_presupuesto'])
         for u in rep['uso_presupuesto_por_dia']:
             clave = u['dia_nombre']
@@ -548,6 +614,8 @@ def generar_reporte_gestion(cur, comedores_alcance, nivel='comedor', zona=None,
             'presupuesto_semanal': round(tot_pres, 2) if tot_pres else None,
             'dentro_de_presupuesto': todos_dentro,
             'n_comedores_con_plan': len(por_comedor),
+            # COM-59A: ahorro de subsidio agregado del nivel
+            'ahorro_subsidio_semana': round(tot_ahorro_sub, 2),
             'costo_racion_promedio': round(
                 sum(_f(p['resumen']['costo_racion_promedio']) for p in por_comedor) / len(por_comedor), 2),
         },

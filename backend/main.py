@@ -16,8 +16,10 @@ Historial:
  - COM-37: router de Gestión de Ingredientes (ingredientes_admin), exclusivo del
    Administrador de Sistemas: CRUD sin borrado, precios manuales con vigencia y
    re-emparejado de insumos huérfanos.
- - COM-50 (este archivo): router del Reporte de Gestión "Resumen ejecutivo y
-   recomendaciones" (reportes_gestion), para rendición de cuentas de la administradora.
+ - COM-50: router del Reporte de Gestión "Resumen ejecutivo y recomendaciones"
+   (reportes_gestion), con alcances por perfil (comedor/zona/macro).
+ - COM-59A (este archivo): routers de Subsidio mensual de víveres (subsidio) y de
+   Precios de Venta con historial (precios_venta). Versión 2.17.0.
 """
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -45,13 +47,15 @@ from routers import (
     reset_clave,      # COM-38: reseteo/cambio de clave por Admin de Sistemas
     directivos,       # COM-39: gestión de directivos por comedor (solo Admin de Sistemas)
     ingredientes_admin,  # COM-37: gestión de ingredientes y precios manuales (solo Admin)
-    reportes_gestion,    # COM-50: resumen ejecutivo y recomendaciones (módulo 'reportes')
+    reportes_gestion,    # COM-50: resumen ejecutivo y recomendaciones (alcances por perfil)
+    subsidio,            # COM-59A: subsidio mensual de víveres por comedor
+    precios_venta,       # COM-59A: precios de venta con historial (solo Admin de Sistemas)
 )
 # Asegurado de esquema dinámico (parámetros, planificación, raciones, seguridad,
 # comedores, grupos, gestión de usuarios, permisos por vistas, ubicaciones,
 # esquema K-means con seed nutricional, esquema de propuestas COM-8, seeds de
-# módulos ML / proteínas configurables COM-5 v4 y esquema COM-37 de precios
-# manuales + módulo gestion_ingredientes) al arrancar
+# módulos ML / proteínas configurables COM-5 v4, esquema COM-37 de precios
+# manuales + módulo gestion_ingredientes, y esquema COM-59A de subsidio/precios)
 from db_bootstrap import asegurar_esquema
 
 
@@ -62,7 +66,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="API - NutriComedor", version="2.16.0", lifespan=lifespan)
+app = FastAPI(title="API - NutriComedor", version="2.17.0", lifespan=lifespan)
 
 # Configuración de CORS (Mantiene compatibilidad con tu Frontend)
 app.add_middleware(
@@ -91,6 +95,8 @@ app.include_router(modelos_ml.router, prefix="/api/v1")       # COM-5 v4 / COM-8
 app.include_router(reset_clave.router, prefix="/api/v1")      # COM-38
 app.include_router(ingredientes_admin.router, prefix="/api/v1")  # COM-37
 app.include_router(reportes_gestion.router, prefix="/api/v1")    # COM-50
+app.include_router(subsidio.router, prefix="/api/v1")            # COM-59A
+app.include_router(precios_venta.router, prefix="/api/v1")       # COM-59A
 # COM-39 fix (trazabilidad): posición original del include de directivos, comentada.
 # app.include_router(directivos.router, prefix="/api/v1")     # COM-39 (antes, después de reset_clave)
 app.include_router(parametros.router, prefix="/api/v1")

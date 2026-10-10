@@ -11,21 +11,21 @@
  * Uso: Montado en main.jsx mediante <React.StrictMode>. Envuelve toda la app con
  *      AuthProvider y ParametrosProvider.
  * Historial de cambios:
- *  - COM-19/20/21/22/23/25: flujo de login, selección de comedor, pestañas y permisos.
- *  - COM-27: pestañas filtradas por módulos y formularios con cascada de ubicación.
- *  - COM-5: nueva pestaña "Clusters K-Means" ligada al módulo 'recetario'.
- *  - COM-8: nueva pestaña "Propuestas de Menú" ligada al módulo 'propuestas'.
- *  - COM-8 v2: la pestaña "Presupuesto" (generación aleatoria) se RETIRA y se comenta;
- *              su función es reemplazada por "Propuestas de Menú" (motor greedy).
- *  - COM-5 v4 / COM-8 v7 (este archivo): "Clusters K-Means" pasa del módulo 'recetario'
- *              al módulo 'clusters' (EXCLUSIVO del Admin de Sistemas; la línea anterior
- *              queda comentada por trazabilidad) y se agrega la pestaña "Modelos ML"
- *              (módulo 'modelos_ml', también exclusiva del Admin), montando ModelosMLView.
- *  - COM-37 (este archivo): se AGREGA la pestaña "Gestión de Ingredientes" (módulo
- *              'gestion_ingredientes', exclusivo del Admin de Sistemas) montando
- *              GestionIngredientesView. Solo hay 4 adiciones marcadas COM-37 (ícono,
- *              import de vista, entrada en TABS_BASE y línea de render); ninguna línea
- *              existente se elimina ni se comenta.
+ *   COM-19/20/21/22/23/25: flujo de login, selección de comedor, pestañas y permisos.
+ *   COM-27: pestañas filtradas por módulos y formularios con cascada de ubicación.
+ *   COM-5: nueva pestaña "Clusters K-Means" ligada al módulo 'recetario'.
+ *   COM-8: nueva pestaña "Propuestas de Menú" ligada al módulo 'propuestas'.
+ *   COM-8 v2: la pestaña "Presupuesto" (generación aleatoria) se RETIRA y se comenta;
+ *             su función es reemplazada por "Propuestas de Menú" (motor greedy).
+ *   COM-5 v4 / COM-8 v7: "Clusters K-Means" pasa al módulo 'clusters' (solo Admin) y
+ *             se agrega "Modelos ML" (módulo 'modelos_ml', solo Admin).
+ *   COM-37: se AGREGA la pestaña "Gestión de Ingredientes" (módulo 'gestion_ingredientes').
+ *   COM-59A (este archivo): se AGREGAN dos pestañas del modelo de autogestión:
+ *             * "Subsidio de Víveres" (módulo 'subsidio'): Admin de Sistemas y Directivos
+ *               gestionan; perfiles municipales/auditoría solo lectura (gate backend).
+ *             * "Precios de Venta" (módulo 'precios_venta'): exclusivo Admin de Sistemas.
+ *             Solo hay 4 adiciones marcadas COM-59A (2 íconos, 2 imports, 2 entradas en
+ *             TABS_BASE y 2 líneas de render); ninguna línea existente se elimina.
  */
 import React, { useState, useEffect } from 'react';
 import {
@@ -33,14 +33,20 @@ import {
     LogOut, Store, UserCog, Loader2, MapPin, Contact, BarChart3, PieChart,
     Sparkles,  // COM-8: ícono de la pestaña "Propuestas de Menú"
     LineChart, // COM-5 v4: ícono de la pestaña "Modelos ML"
-    Package    // COM-37: ícono de la pestaña "Gestión de Ingredientes"
+    Package,   // COM-37: ícono de la pestaña "Gestión de Ingredientes"
+    Gift,      // COM-59A: ícono de la pestaña "Subsidio de Víveres"
+    Coins      // COM-59A: ícono de la pestaña "Precios de Venta"
 } from 'lucide-react';
 import { RecipesView } from './components/recipes/RecipesView';
 import { ClusterRecetasView } from './components/recipes/ClusterRecetasView';
-// COM-5 v4: panel de gráficos de Machine Learning (exclusivo Admin de Sistemas)
+// COM-5 v4: panel de gráficos de validación de los modelos ML (exclusivo Admin de Sistemas)
 import { ModelosMLView } from './components/ml/ModelosMLView';
 // COM-37: gestión de ingredientes y precios manuales con vigencia (exclusivo Admin)
 import { GestionIngredientesView } from './components/ingredients/GestionIngredientesView';
+// COM-59A: subsidio mensual de víveres por comedor (Admin + Directivos gestionan)
+import { SubsidioView } from './components/subsidio/SubsidioView';
+// COM-59A: precios de venta con historial (exclusivo Admin de Sistemas)
+import { PreciosVentaView } from './components/precios/PreciosVentaView';
 // COM-8 v2: import COMENTADO. La vista de Presupuesto (generación aleatoria de menús)
 // fue reemplazada por GenerarPropuestasView (motor greedy search). Se conserva la
 // línea comentada para trazabilidad; el archivo BudgetView.jsx NO se elimina.
@@ -65,7 +71,7 @@ import { api } from './services/api';
 // COM-25: módulos de administración que abren el panel global de usuarios
 const MODULOS_ADMIN = ['municipalidades', 'roles', 'bloqueos', 'vistas'];
 
-// COM-25 + COM-5 + COM-8 + COM-5 v4: catálogo de pestañas con su módulo requerido
+// COM-25 + COM-5 + COM-8 + COM-5 v4 + COM-37 + COM-59A: catálogo de pestañas con su módulo requerido
 const TABS_BASE = [
     { id: 'recipes', label: 'Recetario', icon: ChefHat, color: 'emerald', modulo: 'recetario' },
     // COM-5 v4 (trazabilidad): línea ANTERIOR comentada. Hasta COM-5 v3 la pestaña de
@@ -77,6 +83,11 @@ const TABS_BASE = [
     { id: 'modelos_ml', label: 'Modelos ML', icon: LineChart, color: 'blue', modulo: 'modelos_ml' },
     // COM-37: gestión de ingredientes y precios manuales con vigencia (solo Admin)
     { id: 'gestion_ingredientes', label: 'Gestión de Ingredientes', icon: Package, color: 'amber', modulo: 'gestion_ingredientes' },
+    // COM-59A: subsidio mensual de víveres (módulo 'subsidio': Admin gestiona todo;
+    // Directivos gestionan su comedor; municipales/auditoría solo lectura vía backend)
+    { id: 'subsidio', label: 'Subsidio de Víveres', icon: Gift, color: 'emerald', modulo: 'subsidio' },
+    // COM-59A: precios de venta con historial (módulo 'precios_venta': solo Admin)
+    { id: 'precios_venta', label: 'Precios de Venta', icon: Coins, color: 'amber', modulo: 'precios_venta' },
     // COM-8 v2: pestaña RETIRADA (se comenta, no se borra): su esquema de generación
     // aleatoria de menús fue reemplazado por el motor greedy de "Propuestas de Menú".
     // { id: 'budget', label: 'Presupuesto', icon: Calculator, color: 'emerald', modulo: 'presupuesto' },
@@ -164,7 +175,6 @@ function AppContent() {
     if (!usuario) {
         return <LoginView />;
     }
-
     // COM-20: verificando comedor recordado
     if (validando) {
         return (
@@ -174,7 +184,6 @@ function AppContent() {
             </div>
         );
     }
-
     // COM-20: con sesión pero sin selección => pantalla de selección
     if (!seleccion) {
         return (
@@ -190,14 +199,12 @@ function AppContent() {
     // COM-25: pestañas visibles según módulos permitidos
     const tieneModulosAdmin = MODULOS_ADMIN.some(m => misModulos.includes(m));
     const puedeVerUsuarios = tieneModulosAdmin || perfilGestion === 'COMEDOR_ADMIN';
-
     // COM-8 v2: compatibilidad de módulos. La pestaña "Presupuesto" fue retirada y
     // reemplazada por "Propuestas de Menú"; quien conservaba el módulo 'presupuesto'
     // mantiene visibilidad de propuestas aunque el seed 'propuestas' no se le aplicara.
     const modulosEfectivos = (misModulos.includes('presupuesto') && !misModulos.includes('propuestas'))
         ? [...misModulos, 'propuestas']
         : misModulos;
-
     // COM-8 v2: el filtro usa modulosEfectivos (línea anterior comentada abajo).
     // const tabs = TABS_BASE.filter(t => misModulos.includes(t.modulo));  // COM-8 v2: reemplazada
     const tabs = TABS_BASE.filter(t => modulosEfectivos.includes(t.modulo));
@@ -205,12 +212,10 @@ function AppContent() {
         const idx = tabs.findIndex(t => t.id === 'comedores');
         tabs.splice(idx === -1 ? tabs.length : idx, 0, TAB_USUARIOS);
     }
-
     // Mantiene activa una pestaña visible
     if (tabs.length > 0 && !tabs.some(t => t.id === activeTab)) {
         setTimeout(() => setActiveTab(tabs[0].id), 0);
     }
-
     // Sin módulos asignados
     if (!cargandoModulos && tabs.length === 0) {
         return (
@@ -304,6 +309,10 @@ function AppContent() {
                                 {activeTab === 'modelos_ml' && <ModelosMLView />} {/* COM-5 v4: panel ML solo Admin */}
                                 {/* COM-37: gestión de ingredientes y precios manuales (solo Admin) */}
                                 {activeTab === 'gestion_ingredientes' && <GestionIngredientesView />}
+                                {/* COM-59A: subsidio mensual de víveres por comedor */}
+                                {activeTab === 'subsidio' && <SubsidioView />}
+                                {/* COM-59A: precios de venta con historial (solo Admin) */}
+                                {activeTab === 'precios_venta' && <PreciosVentaView />}
                                 {/* COM-8 v2: render COMENTADO de la vista Presupuesto retirada.
                                     Su esquema de generación aleatoria fue reemplazado por el
                                     motor greedy de Propuestas de Menú. */}
@@ -326,7 +335,6 @@ function AppContent() {
                     )}
                 </main>
             </div>
-
             {/* COM-19: cambio obligatorio de clave */}
             {pendienteCambio && (
                 <ModalCambioClave usuario={usuario} onExito={completarCambioClave} onSalir={cerrarSesion} />
