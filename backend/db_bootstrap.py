@@ -8,7 +8,6 @@ Uso: Importar en main.py y ejecutar `asegurar_esquema()` durante el startup (lif
 Nota: Todas las sentencias son idempotentes (IF NOT EXISTS / ON CONFLICT DO NOTHING /
       NOT EXISTS / UPDATE condicionales), por lo que pueden ejecutarse en cada arranque
       sin efectos secundarios.
-
 Historial de integraciones:
  - COM-17: tabla parametros_sistema + seed de parámetros operativos.
  - COM-19: columnas de seguridad en usuarios, migración de hashes legacy a PBKDF2
@@ -45,11 +44,13 @@ Historial de integraciones:
            (mes calendario, por comedor) y precios_venta (precio único vigente con
            historial), parámetro MARGEN_SEMANAL_OBJETIVO, y módulos de vista
            'subsidio'/'precios_venta' con permisos por rol. Auditoría en logs.
- - COM-59A v2 (este archivo): FIX del crash de arranque "too many values to unpack
-           (expected 6)": el esquema v2 de COM-59A retorna 7 valores (agregó el estado
-           NOT NULL de subsidio_mensual.comedor_id) y este bootstrap seguía desempacando
-           6, abortando ANTES del commit (nada de COM-59A se persistía). Se actualiza el
-           desempaque a 7 y la auditoría imprime el estado de la columna comedor_id.
+ - COM-59A v2: FIX del crash de arranque "too many values to unpack (expected 6)":
+           el esquema v2 de COM-59A retorna 7 valores y este bootstrap seguía
+           desempacando 6, abortando ANTES del commit. Desempaque actualizado a 7.
+ - COM-62 v2 (este archivo): paso 16 de esquema de comensales POS: apellidos y flag
+           es_generico en comensales, retiro del UNIQUE histórico de documento,
+           índices únicos parciales (DNI real / nombre sin DNI) y seed del Cliente
+           Genérico para cargas masivas. Auditoría en logs.
 """
 import time
 import psycopg2
@@ -83,6 +84,8 @@ from esquema_modelos_ml import aplicar_esquema_modelos_ml, auditar_modulos_ml
 from esquema_ingredientes_admin import aplicar_esquema_ingredientes_admin
 # COM-59A: esquema de Subsidio mensual y Precios de venta (módulos + permisos)
 from esquema_subsidio_precios import aplicar_esquema_subsidio_precios
+# COM-62 v2: esquema de comensales POS (identidad por nombre + DNI opcional + genérico)
+from esquema_comensales_pos import aplicar_esquema_comensales_pos
 
 # ==========================================
 # CONSTANTES DE ROLES (COM-21)
@@ -645,9 +648,9 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
     COM-37: paso de esquema de Gestión de Ingredientes (precios manuales con
     vigencia + módulo 'gestion_ingredientes' exclusivo del Admin) con auditoría.
     COM-44: cascada geográfica de comedores (FK + backfill idempotente) con auditoría.
-    COM-59A: esquema de Subsidio mensual y Precios de venta con auditoría.
-    COM-59A v2: desempaque de 7 valores del esquema de subsidio/precios (fix del
-    crash "too many values to unpack (expected 6)" que abortaba antes del commit).
+    COM-59A/v2: esquema de Subsidio mensual y Precios de venta con auditoría.
+    COM-62 v2: esquema de comensales POS (identidad por nombre, DNI opcional,
+    Cliente Genérico para cargas masivas) con auditoría.
     """
     conn = None
     for intento in range(1, reintentos + 1):
@@ -736,11 +739,12 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
             comedores_total = int(fila_cascada['total'] or 0)
             comedores_con_fk = int(fila_cascada['con_fk'] or 0)
             # 15. COM-59A / COM-59A v2: esquema de Subsidio mensual y Precios de venta.
-            #     COM-59A v2 (fix): el esquema v2 retorna 7 valores (incluye el estado
-            #     NOT NULL de subsidio_mensual.comedor_id); el desempaque anterior de 6
-            #     lanzaba ValueError y abortaba el commit de TODO el bootstrap.
             (tabla_sub_ok, col_comedor_ok, tabla_pv_ok, precios_sembrados,
              param_margen, modulos_sub, permisos_sub) = aplicar_esquema_subsidio_precios(cur)
+            # 16. COM-62 v2: esquema de comensales POS (identidad por nombre + DNI
+            #     opcional + Cliente Genérico para cargas masivas históricas).
+            (col_pos_ok, uniq_retirado, idx_dni_ok, idx_nom_ok,
+             generico_ok) = aplicar_esquema_comensales_pos(cur)
             conn.commit()
             cur.close()
             if migrados:
@@ -778,10 +782,18 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
             if not tabla_sub_ok or not tabla_pv_ok:
                 print("[BOOTSTRAP] COM-59A: [AVISO] Esquema de subsidio/precios incompleto; "
                       "se reintentará en el próximo arranque.")
+            # COM-62 v2: auditoría del esquema de comensales POS
+            print(f"[BOOTSTRAP] COM-62: comensales POS -> columnas={'OK' if col_pos_ok else 'FALTA'}, "
+                  f"unique_documento_retirado={'OK' if uniq_retirado else 'PRESENTE(!)'}, "
+                  f"idx_dni_real={'OK' if idx_dni_ok else 'FALTA'}, idx_nombre_sin_dni={'OK' if idx_nom_ok else 'FALTA'}, "
+                  f"cliente_generico={'OK' if generico_ok else 'FALTA'}.")
+            if not (col_pos_ok and uniq_retirado and idx_dni_ok and idx_nom_ok and generico_ok):
+                print("[BOOTSTRAP] COM-62: [AVISO] Esquema de comensales POS incompleto; "
+                      "se reintentará en el próximo arranque.")
             print("[BOOTSTRAP] Esquema dinámico verificado/creado correctamente "
                   "(incluye ubicación COM-27, K-means COM-5, propuestas COM-8, módulos ML COM-36, "
                   "separación de deberes COM-40/COM-40 v2, gestión de ingredientes COM-37, "
-                  "cascada de comedores COM-44 y subsidio/precios COM-59A v2).")
+                  "cascada de comedores COM-44, subsidio/precios COM-59A v2 y comensales POS COM-62 v2).")
             return True
         except Exception as e:
             print(f"[BOOTSTRAP] Intento {intento}/{reintentos} fallido: {e}")
