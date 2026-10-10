@@ -27,9 +27,14 @@
  *           getCategoriasAlimentos y createIngredienteDesdeReceta.
  *   COM-50 v1/v2/v3: bloque REPORTES DE GESTIÓN: getAlcanceReportes, getReporteGestion
  *           (nivel/zona) y getPlanesGestion.
- *   COM-57 (este archivo): en GESTION_INGREDIENTES se agrega getObsoletosIngredientes
- *           (GET /ingredientes-admin/obsoletos) para la sección de migración de
- *           sinónimos fusionados con referencias atrapadas. Ningún método se modifica.
+ *   COM-57: getObsoletosIngredientes (migración de sinónimos fusionados).
+ *   COM-59A: bloques SUBSIDIO DE VÍVERES (getSubsidioMes, registrarSubsidio,
+ *           editarSubsidio, eliminarSubsidio) y PRECIOS DE VENTA (getPreciosVentaVigentes,
+ *           getHistorialPreciosVenta, registrarPrecioVenta).
+ *   COM-59A v2 (este archivo): getHistorialPreciosVenta acepta `params` y envía
+ *           `usuario_solicitante_id` (obligatorio tras el fix de seguridad del backend
+ *           v2); con esto PreciosVentaView deja de degradar con banner y carga el
+ *           historial completo. Ningún otro método se modifica.
  */
 
 const API_BASE = '/api/v1';
@@ -349,8 +354,7 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al detectar duplicados'));
         return response.json();
     },
-    // COM-57: sinónimos fusionados marcados [OBSOLETO] que aún conservan líneas de
-    // receta o insumos atrapados; alimenta la sección de migración de la vista.
+    // COM-57: sinónimos fusionados ([OBSOLETO]) con líneas/insumos atrapados
     getObsoletosIngredientes: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/ingredientes-admin/obsoletos?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al listar sinónimos obsoletos'));
@@ -784,6 +788,81 @@ export const api = {
     getPlanesGestion: async (comedorId, usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/reportes-gestion/planes?comedor_id=${comedorId}&usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener los planes disponibles'));
+        return response.json();
+    },
+
+    // ==========================================
+    // SUBSIDIO DE VÍVERES (COM-59A)
+    // ==========================================
+    // COM-59A: líneas del subsidio del mes calendario con equivalencia en gramos.
+    getSubsidioMes: async (params) => {
+        const qs = new URLSearchParams();
+        qs.append('comedor_id', params.comedor_id);
+        qs.append('anio', params.anio);
+        qs.append('mes', params.mes);
+        qs.append('usuario_solicitante_id', params.usuario_solicitante_id);
+        const response = await fetch(`${API_BASE}/subsidio?${qs.toString()}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el subsidio del mes'));
+        return response.json();
+    },
+    // COM-59A: alta/actualización (upsert por período) de una línea de subsidio.
+    registrarSubsidio: async (data) => {
+        const response = await fetch(`${API_BASE}/subsidio`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al registrar el subsidio'));
+        return response.json();
+    },
+    // COM-59A: edición de cantidad/unidad/observación de una línea existente.
+    editarSubsidio: async (subsidioId, data) => {
+        const response = await fetch(`${API_BASE}/subsidio/${subsidioId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al editar el subsidio'));
+        return response.json();
+    },
+    // COM-59A: baja de una línea del período.
+    eliminarSubsidio: async (subsidioId, usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/subsidio/${subsidioId}?usuario_solicitante_id=${usuarioSolicitanteId}`, {
+            method: 'DELETE'
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al eliminar el subsidio'));
+        return response.json();
+    },
+
+    // ==========================================
+    // PRECIOS DE VENTA (COM-59A) — exclusivo Admin de Sistemas
+    // ==========================================
+    // COM-59A: precio único vigente por tipo de comensal.
+    getPreciosVentaVigentes: async () => {
+        const response = await fetch(`${API_BASE}/precios-venta/vigentes`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener los precios vigentes'));
+        return response.json();
+    },
+    // COM-59A v2: historial de cambios de precio (auditoría). Envía
+    // usuario_solicitante_id (el backend v2 lo exige para el gate de Admin); acepta
+    // { usuario_solicitante_id, tipo_comensal? }.
+    getHistorialPreciosVenta: async (params = {}) => {
+        const qs = new URLSearchParams();
+        if (params.usuario_solicitante_id) qs.append('usuario_solicitante_id', params.usuario_solicitante_id);
+        if (params.tipo_comensal) qs.append('tipo_comensal', params.tipo_comensal);
+        const response = await fetch(`${API_BASE}/precios-venta/historial?${qs.toString()}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el historial de precios'));
+        return response.json();
+    },
+    // COM-59A: registra un nuevo precio vigente (el anterior queda en historial y el
+    // parámetro legacy PRECIO_* se espeja para POS/consumidores antiguos).
+    registrarPrecioVenta: async (data) => {
+        const response = await fetch(`${API_BASE}/precios-venta`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al registrar el precio'));
         return response.json();
     },
 
