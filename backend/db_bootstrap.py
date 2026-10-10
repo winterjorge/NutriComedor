@@ -41,10 +41,15 @@ Historial de integraciones:
  - COM-44: cascada geográfica de comedores (FK departamento/provincia/distrito +
            backfill idempotente desde nombres legacy), aplicada tras el esquema de
            ubicaciones.
- - COM-59A (este archivo): paso de esquema de Subsidio y Precios de Venta:
-           tablas subsidio_mensual (mes calendario) y precios_venta (precio único
-           vigente con historial), parámetro MARGEN_SEMANAL_OBJETIVO, y módulos de
-           vista 'subsidio'/'precios_venta' con permisos por rol. Auditoría en logs.
+ - COM-59A: paso de esquema de Subsidio y Precios de Venta: tablas subsidio_mensual
+           (mes calendario, por comedor) y precios_venta (precio único vigente con
+           historial), parámetro MARGEN_SEMANAL_OBJETIVO, y módulos de vista
+           'subsidio'/'precios_venta' con permisos por rol. Auditoría en logs.
+ - COM-59A v2 (este archivo): FIX del crash de arranque "too many values to unpack
+           (expected 6)": el esquema v2 de COM-59A retorna 7 valores (agregó el estado
+           NOT NULL de subsidio_mensual.comedor_id) y este bootstrap seguía desempacando
+           6, abortando ANTES del commit (nada de COM-59A se persistía). Se actualiza el
+           desempaque a 7 y la auditoría imprime el estado de la columna comedor_id.
 """
 import time
 import psycopg2
@@ -533,7 +538,7 @@ def _aplicar_cascada_comedores(cur):
 #         ON CONFLICT DO NOTHING;
 #     """, (usuario_id, comedor_id, usuario_id, comedor_id))
 #     creadas += cur.rowcount or 0
-#     return creados
+#     return creadas
 
 
 # =========================================================================
@@ -641,6 +646,8 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
     vigencia + módulo 'gestion_ingredientes' exclusivo del Admin) con auditoría.
     COM-44: cascada geográfica de comedores (FK + backfill idempotente) con auditoría.
     COM-59A: esquema de Subsidio mensual y Precios de venta con auditoría.
+    COM-59A v2: desempaque de 7 valores del esquema de subsidio/precios (fix del
+    crash "too many values to unpack (expected 6)" que abortaba antes del commit).
     """
     conn = None
     for intento in range(1, reintentos + 1):
@@ -728,8 +735,11 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
             fila_cascada = cur.fetchone()
             comedores_total = int(fila_cascada['total'] or 0)
             comedores_con_fk = int(fila_cascada['con_fk'] or 0)
-            # 15. COM-59A: esquema de Subsidio mensual y Precios de venta.
-            (tabla_sub_ok, tabla_pv_ok, precios_sembrados,
+            # 15. COM-59A / COM-59A v2: esquema de Subsidio mensual y Precios de venta.
+            #     COM-59A v2 (fix): el esquema v2 retorna 7 valores (incluye el estado
+            #     NOT NULL de subsidio_mensual.comedor_id); el desempaque anterior de 6
+            #     lanzaba ValueError y abortaba el commit de TODO el bootstrap.
+            (tabla_sub_ok, col_comedor_ok, tabla_pv_ok, precios_sembrados,
              param_margen, modulos_sub, permisos_sub) = aplicar_esquema_subsidio_precios(cur)
             conn.commit()
             cur.close()
@@ -759,8 +769,9 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
             if comedores_total > 0 and comedores_con_fk < comedores_total:
                 print("[BOOTSTRAP] COM-44: [AVISO] Hay comedores sin FK geográfica resuelta "
                       "(nombres de texto no coinciden con el catálogo COM-27); se reintentará el backfill en el próximo arranque.")
-            # COM-59A: auditoría del esquema de subsidio y precios de venta
+            # COM-59A v2: auditoría del esquema de subsidio y precios de venta
             print(f"[BOOTSTRAP] COM-59A: subsidio_mensual={'OK' if tabla_sub_ok else 'FALTA'}, "
+                  f"comedor_id NOT NULL={'OK' if col_comedor_ok else 'PENDIENTE(filas NULL)'}, "
                   f"precios_venta={'OK' if tabla_pv_ok else 'FALTA'}, precios_iniciales_sembrados={precios_sembrados}, "
                   f"param_margen_semanal={'OK' if param_margen else 'ya_existia'}, "
                   f"modulos_nuevos={modulos_sub}, permisos_nuevos={permisos_sub}.")
@@ -770,7 +781,7 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
             print("[BOOTSTRAP] Esquema dinámico verificado/creado correctamente "
                   "(incluye ubicación COM-27, K-means COM-5, propuestas COM-8, módulos ML COM-36, "
                   "separación de deberes COM-40/COM-40 v2, gestión de ingredientes COM-37, "
-                  "cascada de comedores COM-44 y subsidio/precios COM-59A).")
+                  "cascada de comedores COM-44 y subsidio/precios COM-59A v2).")
             return True
         except Exception as e:
             print(f"[BOOTSTRAP] Intento {intento}/{reintentos} fallido: {e}")
