@@ -11,6 +11,7 @@
  * Historial:
  *  - Sprint 1/2: versión original (búsqueda por DNI obligatorio).
  *  - COM-62 v2 (este archivo): identidad por nombre, DNI opcional, completado posterior.
+ *    Fix: try/catch en confirmarVenta y registrarNuevo para mostrar errores del 422.
  * Uso: Montado por POSView.jsx en la columna izquierda del POS.
  */
 import React, { useState, useEffect, useRef } from 'react';
@@ -58,6 +59,9 @@ export const FormularioVenta = ({ onVentaRegistrada }) => {
     const [registrando, setRegistrando] = useState(false);
     const [errorRegistro, setErrorRegistro] = useState('');
 
+    // Error de venta (banner visible)
+    const [errorVenta, setErrorVenta] = useState('');
+
     // Confirmación de venta con muchas raciones
     const [modalConf, setModalConf] = useState(false);
 
@@ -87,6 +91,7 @@ export const FormularioVenta = ({ onVentaRegistrada }) => {
         setNombreBusqueda(c.nombres);
         setSugerencias([]);
         setMostrarSugerencias(false);
+        setErrorVenta('');
     };
 
     // ---------- Registro sin DNI (crea ficha con DNI 00000000, reutilizable) ----------
@@ -95,6 +100,7 @@ export const FormularioVenta = ({ onVentaRegistrada }) => {
         if (nombres.length < 2) return;
         setRegistrando(true);
         setErrorRegistro('');
+        setErrorVenta('');
         try {
             const res = await api.registrarComensal({
                 tipo_documento: 'DNI',
@@ -102,7 +108,6 @@ export const FormularioVenta = ({ onVentaRegistrada }) => {
                 nombres,
                 tipo_comensal: 'Normal',
             });
-            // El backend devuelve { creado: true|false, ... }
             setComensal(res);
             setTipoVenta(res.tipo_comensal || 'Normal');
             setSugerencias([]);
@@ -118,6 +123,7 @@ export const FormularioVenta = ({ onVentaRegistrada }) => {
     const registrarConDni = async (e) => {
         e.preventDefault();
         setErrorRegistro('');
+        setErrorVenta('');
         if (!formRegistro.documento_identidad.trim() || !formRegistro.nombres.trim()) {
             setErrorRegistro('Documento y nombres son obligatorios.');
             return;
@@ -172,21 +178,31 @@ export const FormularioVenta = ({ onVentaRegistrada }) => {
     // ---------- Venta ----------
     const confirmarVenta = async () => {
         setModalConf(false);
+        setErrorVenta('');
+        // Validación defensiva: comensal.id debe existir
+        if (!comensal || !comensal.id) {
+            setErrorVenta('No hay comensal seleccionado. Busque o registre un comensal primero.');
+            return;
+        }
         const precio = tipoVenta === 'Social' ? precioSocial : tipoVenta === 'Afiliado' ? precioAfiliado : precioNormal;
-        await api.registrarVenta({
-            comensal_id: comensal.id,
-            raciones,
-            monto_pagado: precio * raciones,
-            tipo_menu: 'Almuerzo regular',
-            tipo_comensal_venta: tipoVenta,
-            observacion: obs,
-        });
-        setNombreBusqueda('');
-        setComensal(null);
-        setRaciones(1);
-        setObs('');
-        setSugerencias([]);
-        onVentaRegistrada();
+        try {
+            await api.registrarVenta({
+                comensal_id: comensal.id,
+                raciones,
+                monto_pagado: precio * raciones,
+                tipo_menu: 'Almuerzo regular',
+                tipo_comensal_venta: tipoVenta,
+                observacion: obs,
+            });
+            setNombreBusqueda('');
+            setComensal(null);
+            setRaciones(1);
+            setObs('');
+            setSugerencias([]);
+            onVentaRegistrada();
+        } catch (e) {
+            setErrorVenta(e.message);
+        }
     };
 
     const intentarVenta = () => {
@@ -212,6 +228,13 @@ export const FormularioVenta = ({ onVentaRegistrada }) => {
                     <UserCheck size={20} className="text-blue-600" />
                     Atender en Ventanilla
                 </h3>
+
+                {/* Banner de error de venta (fix COM-62 v2) */}
+                {errorVenta && (
+                    <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-center gap-2 text-sm">
+                        <AlertCircle size={16} /> {errorVenta}
+                    </div>
+                )}
 
                 {/* Caja de nombre con autocompletado */}
                 <div className="relative mb-6">
@@ -349,7 +372,7 @@ export const FormularioVenta = ({ onVentaRegistrada }) => {
 
                         <div className="flex gap-2">
                             <button
-                                onClick={() => { setComensal(null); setNombreBusqueda(''); setSugerencias([]); }}
+                                onClick={() => { setComensal(null); setNombreBusqueda(''); setSugerencias([]); setErrorVenta(''); }}
                                 className="flex-1 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold py-3 rounded-lg text-sm"
                             >
                                 Cambiar comensal

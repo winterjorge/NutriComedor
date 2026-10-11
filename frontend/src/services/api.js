@@ -1014,24 +1014,45 @@ export const api = {
         return response.json();
     },
     // Legacy: búsqueda exacta por documento (usada por TablaVentasHoy y flujos antiguos).
-    buscarComensal: async (doc) => fetch(`${API_BASE}/comensales/${doc}`),
+    buscarComensal: async (doc) => {
+        const response = await fetch(`${API_BASE}/comensales/${doc}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Comensal no encontrado'));
+        return response.json();
+    },
     // COM-62 v2: alta con documento OPCIONAL (sin DNI => '00000000', reutiliza ficha por nombre).
-    registrarComensal: async (data) => fetch(`${API_BASE}/comensales/registrar`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data)
-    }),
-    registrarVenta: async (data) => fetch(`${API_BASE}/padron`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data)
-    }),
-    modificarVenta: async (id, data) => fetch(`${API_BASE}/padron/${id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data)
-    }),
-    eliminarVenta: async (id) => fetch(`${API_BASE}/padron/${id}`, { method: 'DELETE' }),
+    registrarComensal: async (data) => {
+        const response = await fetch(`${API_BASE}/comensales/registrar`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al registrar el comensal'));
+        return response.json();
+    },
+    // COM-62 v2: registro de venta con manejo de errores visible.
+    registrarVenta: async (data) => {
+        const response = await fetch(`${API_BASE}/padron`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al registrar la venta'));
+        return response.json();
+    },
+    modificarVenta: async (id, data) => {
+        const response = await fetch(`${API_BASE}/padron/${id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al modificar la venta'));
+        return response.json();
+    },
+    eliminarVenta: async (id) => {
+        const response = await fetch(`${API_BASE}/padron/${id}`, { method: 'DELETE' });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al eliminar la venta'));
+        return response.json();
+    },
 
     // ==========================================
     // PRESUPUESTO
