@@ -113,7 +113,7 @@ DNIS_ADMIN_SISTEMA = (DNI_ADMIN_CEROS, DNI_ADMIN_NUEVES)
 # COM-40 v2 (trazabilidad): DNI del usuario piloto del seed que recibía membresía
 # Directivo/Presidente del comedor default. Ya no se crea ni se asegura nada para él:
 # el seed no crea usuarios de comedor y las membresías se gestionan desde la interfaz.
-# DNI_USUARIO_PILOTO = "43604221"
+DNI_USUARIO_PILOTO = "43604221"
 
 # =========================================================================
 # DDL: Tabla de parámetros dinámicos (COM-17)
@@ -746,6 +746,9 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
             comedores_total = int(fila_cascada['total'] or 0)
             comedores_con_fk = int(fila_cascada['con_fk'] or 0)
             # 15. COM-59A / COM-59A v2: esquema de Subsidio mensual y Precios de venta.
+            #     COM-59A v2 (fix): el esquema v2 retorna 7 valores (incluye el estado
+            #     NOT NULL de subsidio_mensual.comedor_id); el desempaque anterior de 6
+            #     lanzaba ValueError y abortaba el commit de TODO el bootstrap.
             (tabla_sub_ok, col_comedor_ok, tabla_pv_ok, precios_sembrados,
              param_margen, modulos_sub, permisos_sub) = aplicar_esquema_subsidio_precios(cur)
             # 16. COM-62 v2: esquema de comensales POS (identidad por nombre + DNI
