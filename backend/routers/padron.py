@@ -1,33 +1,29 @@
 """
 routers/padron.py
-Objetivo: Contener la lógica de los endpoints para la gestión del padrón, ventas diarias
-          (POS) y predicción de demanda.
+Objetivo: Endpoints para la gestión del padrón, ventas diarias (POS) y predicción
+          de demanda.
 Historial:
  - Sprint 1/2: versión original (predicción, búsqueda/registro de comensales por DNI,
    CRUD de ventas y estadísticas del día).
  - COM-62 v2 (este archivo): atención ágil sin DNI:
-     * GET  /comensales/buscar-por-nombre: autocompletado por nombre (excluye al Cliente
-       Genérico) para seleccionar la ficha existente antes de vender.
-     * POST /comensales/registrar: documento OPCIONAL; sin DNI se guarda con
-       '00000000' y se REUTILIZA la ficha si ya existe ese nombre (dedup por índice
-       parcial); con DNI real se valida unicidad de DNI.
-     * PUT  /comensales/{id}: edición de ficha, incluido COMPLETAR/CORREGIR el DNI días
-       después (el comedor puede empezar a pedir DNI sin migrar nada).
+     * GET  /comensales/buscar-por-nombre: autocompletado por nombre (excluye al
+       Cliente Genérico) para seleccionar la ficha existente antes de vender.
+     * PUT  /comensales/{comensal_id}: edición de ficha, incluido COMPLETAR/CORREGIR
+       el DNI días después (el comedor puede empezar a pedir DNI sin migrar nada).
      * GET  /comensales/{documento}: si el documento es '00000000' devuelve el Cliente
        Genérico (reservado para cargas masivas históricas).
-     * Modelos de entrada POS definidos localmente (NuevoComensalPOSInput /
-       EditarComensalPOSInput) para no romper el contrato existente de schemas.comensal.
-Uso: Registrado en main.py con prefijo /api/v1. Expone rutas como /padron/hoy,
-     /comensales/registrar.
+     * POST /comensales/registrar: documento OPCIONAL; sin DNI se guarda con '00000000'
+       y se REUTILIZA la ficha si ya existe ese nombre (dedup por índice parcial).
+Uso: Registrado en main.py con prefijo /api/v1.
 Referencia: tickets COM-62 (solo trazabilidad).
 """
 from datetime import date, datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
 import psycopg2
-from pydantic import BaseModel
 
 from database import get_db, get_parametros_dict
 from schemas.comensal import RegistroVentaInput, ModificarVentaInput
@@ -54,7 +50,7 @@ class NuevoComensalPOSInput(BaseModel):
 
 
 class EditarComensalPOSInput(BaseModel):
-    """Edición de ficha; permite COMPLETAR el DNI tiempo después (solo campos presentes)."""
+    """Edición de ficha; permite COMPLETAR el DNI tiempo después."""
     nombres: Optional[str] = None
     apellido_paterno: Optional[str] = None
     apellido_materno: Optional[str] = None
@@ -62,20 +58,17 @@ class EditarComensalPOSInput(BaseModel):
     documento_identidad: Optional[str] = None
 
 
+# ==========================================
+# PREDICCIÓN DE DEMANDA
+# ==========================================
 @router.get("/padron/prediccion_demanda")
 def predecir_demanda_diaria(fecha_str: str = None, db=Depends(get_db)):
-    """
-    Predice la demanda diaria.
-    Ahora lee los umbrales mínimos y de fin de semana desde la tabla parametros_sistema.
-    """
     fecha_eval = datetime.strptime(fecha_str, "%Y-%m-%d").date() if fecha_str else date.today()
-    # 1. Leer parámetros de IA desde la BD de forma centralizada
     claves_ia = [
         'IA_MIN_SOCIAL', 'IA_MIN_AFILIADO', 'IA_MIN_NORMAL',
         'IA_FINDE_SOCIAL', 'IA_FINDE_AFILIADO', 'IA_FINDE_NORMAL'
     ]
     params = get_parametros_dict(db, claves_ia)
-    # 2. Estructurar diccionarios para el motor de IA
     limites_minimos = {
         'SOCIAL': params.get('IA_MIN_SOCIAL', 15),
         'AFILIADO': params.get('IA_MIN_AFILIADO', 35),
@@ -86,12 +79,8 @@ def predecir_demanda_diaria(fecha_str: str = None, db=Depends(get_db)):
         'AFILIADO': params.get('IA_FINDE_AFILIADO', 20),
         'NORMAL': params.get('IA_FINDE_NORMAL', 30)
     }
-    # 3. Ejecutar predicción inyectando los parámetros
     pred = predecir_demanda_raciones(
-        fecha_eval.weekday(),
-        fecha_eval.day,
-        limites_minimos,
-        limites_finde
+        fecha_eval.weekday(), fecha_eval.day, limites_minimos, limites_finde
     )
     return {
         "fecha": fecha_eval.strftime("%Y-%m-%d"),
@@ -130,6 +119,9 @@ def buscar_comensales_por_nombre(q: str = '', limite: int = 8, db=Depends(get_db
         cur.close()
 
 
+# ==========================================
+# BÚSQUEDA EXACTA POR DOCUMENTO
+# ==========================================
 @router.get("/comensales/{documento}")
 def buscar_comensal(documento: str, db=Depends(get_db)):
     """
@@ -151,82 +143,16 @@ def buscar_comensal(documento: str, db=Depends(get_db)):
         cur.close()
 
 
-@router.post("/comensales/registrar")
-def registrar_comensal_manual(data: NuevoComensalPOSInput, db=Depends(get_db)):
-    """
-    COM-62 v2: alta de comensal con documento OPCIONAL.
-      - Sin DNI (vacío o '00000000'): se guarda con '00000000'; si ya existe una ficha
-        sin DNI con el mismo nombre normalizado, se REUTILIZA (creado=False) en lugar
-        de duplicar (lo garantiza uq_comensales_nombre_sin_dni).
-      - Con DNI real: se inserta con ese DNI; la unicidad de DNI reales la garantiza
-        uq_comensales_dni_real (IntegrityError -> 400 'Documento ya registrado').
-    """
-    if data.tipo_comensal not in TIPOS_COMENSAL_VALIDOS:
-        raise HTTPException(status_code=400, detail=f"Tipo de comensal inválido: use uno de {TIPOS_COMENSAL_VALIDOS}.")
-    nombres = (data.nombres or '').strip()
-    if len(nombres) < 2:
-        raise HTTPException(status_code=400, detail="El nombre del comensal es obligatorio.")
-    doc = (data.documento_identidad or '').strip() or DNI_SIN_DATO
-    cur = db.cursor(cursor_factory=RealDictCursor)
-    try:
-        if doc == DNI_SIN_DATO:
-            # Reutiliza ficha "solo nombre" existente (dedup por nombre normalizado)
-            cur.execute("""
-                SELECT * FROM comensales
-                WHERE es_generico = FALSE
-                  AND documento_identidad = %s
-                  AND LOWER(BTRIM(nombres)) = LOWER(BTRIM(%s))
-                LIMIT 1;
-            """, (DNI_SIN_DATO, nombres))
-            existente = cur.fetchone()
-            if existente:
-                return {**existente, 'creado': False,
-                        'message': 'Comensal sin DNI ya existía: se reutiliza su ficha.'}
-        cur.execute(
-            """INSERT INTO comensales
-               (tipo_documento, documento_identidad, nombres, apellido_paterno, apellido_materno, tipo_comensal)
-               VALUES (%s, %s, %s, %s, %s, %s) RETURNING *;""",
-            (data.tipo_documento or 'DNI', doc, nombres,
-             (data.apellido_paterno or '').strip() or None,
-             (data.apellido_materno or '').strip() or None,
-             data.tipo_comensal)
-        )
-        db.commit()
-        nuevo = cur.fetchone()
-        return {**nuevo, 'creado': True,
-                'message': ('Comensal registrado sin DNI (podrá completarse después).'
-                            if doc == DNI_SIN_DATO else 'Comensal registrado con DNI.')}
-    except psycopg2.IntegrityError:
-        db.rollback()
-        # Carrera o índice parcial: devuelve la ficha sin DNI ya existente si aplica
-        if doc == DNI_SIN_DATO:
-            cur.execute("""
-                SELECT * FROM comensales
-                WHERE es_generico = FALSE AND documento_identidad = %s
-                  AND LOWER(BTRIM(nombres)) = LOWER(BTRIM(%s)) LIMIT 1;
-            """, (DNI_SIN_DATO, nombres))
-            existente = cur.fetchone()
-            if existente:
-                return {**existente, 'creado': False,
-                        'message': 'Comensal sin DNI ya existía: se reutiliza su ficha.'}
-        raise HTTPException(status_code=400, detail="Documento ya registrado.")
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        cur.close()
-
-
 # ==========================================
 # COM-62 v2: EDICIÓN DE FICHA (incluye completar/corregir DNI después)
 # ==========================================
 @router.put("/comensales/{comensal_id}")
 def editar_comensal(comensal_id: int, data: EditarComensalPOSInput, db=Depends(get_db)):
     """
-    COM-62 v2: edita nombre/apellidos/tipo y, lo importante, permite ASIGNAR el DNI real
-    tiempo después (o corregirlo). Validaciones:
+    COM-62 v2: edita nombre/apellidos/tipo y permite ASIGNAR el DNI real tiempo después.
+    Validaciones:
       - DNI real duplicado -> 400 (uq_comensales_dni_real).
-      - Al quitar/el DNI pasa a '00000000': si ya hubiera otra ficha sin DNI con ese
+      - Al quitar el DNI pasa a '00000000': si ya hubiera otra ficha sin DNI con ese
         nombre -> 400 (uq_comensales_nombre_sin_dni).
       - El Cliente Genérico no se edita (es reserva de cargas masivas).
     """
@@ -277,11 +203,79 @@ def editar_comensal(comensal_id: int, data: EditarComensalPOSInput, db=Depends(g
         cur.close()
 
 
+# ==========================================
+# REGISTRO DE COMENSAL (COM-62 v2: documento OPCIONAL)
+# ==========================================
+@router.post("/comensales/registrar")
+def registrar_comensal_manual(data: NuevoComensalPOSInput, db=Depends(get_db)):
+    """
+    COM-62 v2: alta de comensal con documento OPCIONAL.
+      - Sin DNI (vacío o '00000000'): se guarda con '00000000'; si ya existe una ficha
+        sin DNI con el mismo nombre normalizado, se REUTILIZA (creado=False).
+      - Con DNI real: se inserta con ese DNI; la unicidad de DNI reales la garantiza
+        uq_comensales_dni_real (IntegrityError -> 400 'Documento ya registrado').
+    """
+    if data.tipo_comensal not in TIPOS_COMENSAL_VALIDOS:
+        raise HTTPException(status_code=400, detail=f"Tipo de comensal inválido: use uno de {TIPOS_COMENSAL_VALIDOS}.")
+    nombres = (data.nombres or '').strip()
+    if len(nombres) < 2:
+        raise HTTPException(status_code=400, detail="El nombre del comensal es obligatorio.")
+    doc = (data.documento_identidad or '').strip() or DNI_SIN_DATO
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        if doc == DNI_SIN_DATO:
+            cur.execute("""
+                SELECT * FROM comensales
+                WHERE es_generico = FALSE
+                  AND documento_identidad = %s
+                  AND LOWER(BTRIM(nombres)) = LOWER(BTRIM(%s))
+                LIMIT 1;
+            """, (DNI_SIN_DATO, nombres))
+            existente = cur.fetchone()
+            if existente:
+                return {**existente, 'creado': False,
+                        'message': 'Comensal sin DNI ya existía: se reutiliza su ficha.'}
+        cur.execute(
+            """INSERT INTO comensales
+               (tipo_documento, documento_identidad, nombres, apellido_paterno, apellido_materno, tipo_comensal)
+               VALUES (%s, %s, %s, %s, %s, %s) RETURNING *;""",
+            (data.tipo_documento or 'DNI', doc, nombres,
+             (data.apellido_paterno or '').strip() or None,
+             (data.apellido_materno or '').strip() or None,
+             data.tipo_comensal)
+        )
+        db.commit()
+        nuevo = cur.fetchone()
+        return {**nuevo, 'creado': True,
+                'message': ('Comensal registrado sin DNI (podrá completarse después).'
+                            if doc == DNI_SIN_DATO else 'Comensal registrado con DNI.')}
+    except psycopg2.IntegrityError:
+        db.rollback()
+        if doc == DNI_SIN_DATO:
+            cur.execute("""
+                SELECT * FROM comensales
+                WHERE es_generico = FALSE AND documento_identidad = %s
+                  AND LOWER(BTRIM(nombres)) = LOWER(BTRIM(%s)) LIMIT 1;
+            """, (DNI_SIN_DATO, nombres))
+            existente = cur.fetchone()
+            if existente:
+                return {**existente, 'creado': False,
+                        'message': 'Comensal sin DNI ya existía: se reutiliza su ficha.'}
+        raise HTTPException(status_code=400, detail="Documento ya registrado.")
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cur.close()
+
+
+# ==========================================
+# VENTAS (POS)
+# ==========================================
 @router.post("/padron")
 def registrar_venta_padron(data: RegistroVentaInput, db=Depends(get_db)):
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
-        # Validar que raciones sea al menos 1
         if data.raciones < 1:
             raise HTTPException(status_code=400, detail="Las raciones deben ser al menos 1")
         cur.execute(
@@ -291,10 +285,10 @@ def registrar_venta_padron(data: RegistroVentaInput, db=Depends(get_db)):
         )
         db.commit()
         return cur.fetchone()
-    except Exception as e:
+    except Exception as e: 
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
+    finally: 
         cur.close()
 
 
@@ -302,16 +296,13 @@ def registrar_venta_padron(data: RegistroVentaInput, db=Depends(get_db)):
 def modificar_venta_padron(venta_id: int, data: ModificarVentaInput, db=Depends(get_db)):
     if not data.motivo_modificacion or data.motivo_modificacion.strip() == "":
         raise HTTPException(status_code=400, detail="El motivo de modificación es obligatorio.")
-    # Validar que raciones sea al menos 1
     if data.raciones < 1:
         raise HTTPException(status_code=400, detail="Las raciones deben ser al menos 1. Use el botón Eliminar si desea remover la venta.")
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
-        # Verificar si la venta existe
         cur.execute("SELECT id FROM padron_diario WHERE id = %s;", (venta_id,))
         if not cur.fetchone():
             raise HTTPException(status_code=404, detail="Venta no encontrada")
-        # Construir query dinámica para actualizar solo los campos proporcionados
         update_fields = [
             "raciones = %s",
             "monto_pagado = %s",
@@ -328,7 +319,6 @@ def modificar_venta_padron(venta_id: int, data: ModificarVentaInput, db=Depends(
             data.observacion,
             data.motivo_modificacion
         ]
-        # Si se proporciona un nuevo comensal_id, incluirlo en el UPDATE
         if data.comensal_id is not None:
             update_fields.insert(0, "comensal_id = %s")
             params.insert(0, data.comensal_id)
@@ -346,26 +336,21 @@ def modificar_venta_padron(venta_id: int, data: ModificarVentaInput, db=Depends(
         db.rollback()
         print(f"Error de base de datos: {e}")
         raise HTTPException(status_code=500, detail=f"Error de base de datos: {str(e)}")
-    except Exception as e:
+    except Exception as e: 
         db.rollback()
         print(f"Error general: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
+    finally: 
         cur.close()
 
 
 @router.delete("/padron/{venta_id}")
 def eliminar_venta_padron(venta_id: int, db=Depends(get_db)):
-    """
-    Elimina físicamente una venta del padrón diario.
-    """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
-        # Verificar si la venta existe
         cur.execute("SELECT id FROM padron_diario WHERE id = %s;", (venta_id,))
         if not cur.fetchone():
             raise HTTPException(status_code=404, detail="Venta no encontrada")
-        # Eliminar la venta
         cur.execute("DELETE FROM padron_diario WHERE id = %s RETURNING id;", (venta_id,))
         db.commit()
         return {"message": "Venta eliminada exitosamente"}
@@ -373,11 +358,11 @@ def eliminar_venta_padron(venta_id: int, db=Depends(get_db)):
         db.rollback()
         print(f"Error de base de datos: {e}")
         raise HTTPException(status_code=500, detail=f"Error de base de datos: {str(e)}")
-    except Exception as e:
+    except Exception as e: 
         db.rollback()
         print(f"Error general: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
+    finally: 
         cur.close()
 
 
@@ -386,7 +371,7 @@ def obtener_ventas_hoy(db=Depends(get_db)):
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute(
-            """SELECT pd.*, c.nombres, c.documento_identidad
+            """SELECT pd.*, c.nombres, c.documento_identidad, c.es_generico
                FROM padron_diario pd
                JOIN comensales c ON pd.comensal_id = c.id
                WHERE pd.fecha = CURRENT_DATE
