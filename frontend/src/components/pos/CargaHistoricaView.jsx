@@ -61,8 +61,8 @@ export const CargaHistoricaView = () => {
                         fecha;afiliados;publico;sociales;cocineras
                     </code>
                     <p className="text-xs text-blue-600 mt-2">
-                        • Fecha: YYYY-MM-DD o DD/MM/YYYY<br/>
-                        • Números enteros >= 0<br/>
+                        • Fecha: YYYY-MM-DD o DD/MM/YYYY<br />
+                        • Números enteros mayor o igual a 0<br />
                         • Separador: punto y coma (;)
                     </p>
                 </div>
