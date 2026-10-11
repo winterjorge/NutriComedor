@@ -5,54 +5,58 @@
  *           (1) tarjetas de resumen con Costo semanal, Recolección semanal, MARGEN
  *               (ventas - compras), Kcal/día, Hierro/día y Proteína/día;
  *           (2) el detalle POR DÍA con comensales Social/Afiliado/Normal en columnas
- *               separadas (anticipación diaria solicitada en COM-8 v4), recolección
- *               proyectada y nutrición por ración;
- *           (3) la lista de compras consolidada y la acción de eliminar planificación
- *               (funcionalidad original de Sprint 2, conservada activa).
+ *               separadas, recolección proyectada y nutrición por ración;
+ *           (3) la lista de compras consolidada (semanal o por día) con exportación
+ *               a PDF para imprimir o llevar al mercado.
  * Historial:
- *  - Sprint 2: versión original (api.getPlanificaciones / getPlanificacionDetalle /
- *    eliminarPlanificacion / getListaCompras).
- *  - COM-8 v2: reconstruida sobre /propuestas/historial y /propuestas/historial/{id}/dias
- *              (maestro presupuesto_semanal + detalle planificacion_dia vinculados al
- *              comedor y a la candidata COM-8).
- *  - COM-8 v4: comensales por día en columnas separadas; tarjetas de hierro y proteína;
- *              nutrición por ración en el detalle diario.
- *  - COM-8 v5 (este archivo): trazabilidad recuperada. Todo lo reemplazado se conserva
- *              COMENTADO (carga original, detalle original y bloque de comensales
- *              semanal); eliminar planificación se mantiene ACTIVO.
+ *   Sprint 2: versión original (api.getPlanificaciones / getPlanificacionDetalle /
+ *             eliminarPlanificacion / getListaCompras).
+ *   COM-8 v2: reconstruida sobre /propuestas/historial y /propuestas/historial/{id}/dias.
+ *   COM-8 v4: comensales por día en columnas separadas; tarjetas de hierro y proteína.
+ *   COM-8 v5: trazabilidad recuperada. Todo lo reemplazado se conserva COMENTADO.
+ *   COM-65 (este archivo): FIX del bug "Sin ítems de compra registrados" (el frontend
+ *             leía data.items/data.grupos pero el backend devuelve data.lista_compras).
+ *             Se agrega filtro por día y exportación a PDF de la lista de compras.
  * Permisos: módulo 'planificaciones' (Directivo y Operativo del comedor, COM-25/COM-8).
  * Uso: Montada por App.jsx en la pestaña "Planificaciones".
- * Referencia: tickets COM-8 / HU-06 / HU-07 (solo trazabilidad).
  */
 import React, { useState, useEffect, useCallback } from 'react';
 import {
     ClipboardList, Loader2, AlertCircle, ChevronDown, ChevronUp,
     Wallet, Coins, TrendingUp, Flame, Users, ShoppingCart, History,
-    Droplet, Trash2
+    Droplet, Trash2, FileDown, Calendar, Printer
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { ModalConfirmacion } from '../common/ModalConfirmacion';
 
+// COM-65: nombres de los días para el filtro
+const DIAS_SEMANA = [
+    { num: 1, nombre: 'Lunes' },
+    { num: 2, nombre: 'Martes' },
+    { num: 3, nombre: 'Miércoles' },
+    { num: 4, nombre: 'Jueves' },
+    { num: 5, nombre: 'Viernes' },
+    { num: 6, nombre: 'Sábado' },
+    { num: 7, nombre: 'Domingo' },
+];
+
 export const PlanificacionesView = () => {
     const { usuario, seleccion } = useAuth();
     const comedorId = seleccion?.comedor_id;
-
     const [planificaciones, setPlanificaciones] = useState([]);
     const [cargando, setCargando] = useState(true);
     const [error, setError] = useState('');
-
     // Caché por planificación expandida: { id: { dias } }
     const [expandidos, setExpandidos] = useState({});
     const [cache, setCache] = useState({});
     const [cargandoDetalle, setCargandoDetalle] = useState({});
-
-    // Lista de compras: { id: filas } y { id: bool cargando }
+    // COM-65: lista de compras con filtro por día
     const [compras, setCompras] = useState({});
     const [cargandoCompras, setCargandoCompras] = useState({});
     const [mostrarCompras, setMostrarCompras] = useState({});
-
-    // COM-8 v5: confirmación de eliminación (funcionalidad original de Sprint 2, conservada)
+    const [diaFiltro, setDiaFiltro] = useState({}); // { planId: null | 1..7 }
+    // COM-65: confirmación de eliminación
     const [confEliminar, setConfEliminar] = useState(null);
 
     // ---------- Carga del listado ----------
@@ -61,10 +65,7 @@ export const PlanificacionesView = () => {
         setCargando(true);
         setError('');
         try {
-            // COM-8 v2: lectura filtrada por comedor y con variante/estado/selector.
             setPlanificaciones(await api.getHistorialPropuestas(comedorId, usuario.id));
-            // COM-8 v5 (trazabilidad): carga original de Sprint 2, comentada:
-            // setPlanificaciones(await api.getPlanificaciones());
         } catch (e) {
             setError(e.message);
         } finally {
@@ -81,13 +82,10 @@ export const PlanificacionesView = () => {
             return;
         }
         setExpandidos({ ...expandidos, [plan.id]: true });
-        if (cache[plan.id]) return; // ya cargado previamente
+        if (cache[plan.id]) return;
         setCargandoDetalle({ ...cargandoDetalle, [plan.id]: true });
         try {
-            // COM-8 v2/v4: detalle con comensales por día, recolección y nutrición por ración.
             const dias = await api.getHistorialDias(plan.id, usuario.id);
-            // COM-8 v5 (trazabilidad): detalle original de Sprint 2, comentado:
-            // const dias = await api.getPlanificacionDetalle(plan.id);
             setCache(prev => ({ ...prev, [plan.id]: { dias } }));
         } catch (e) {
             setError(e.message);
@@ -96,27 +94,135 @@ export const PlanificacionesView = () => {
         }
     };
 
-    // ---------- Lista de compras (Sprint 2, conservada activa) ----------
+    // ---------- COM-65: Lista de compras (semanal o por día) ----------
     const toggleCompras = async (plan) => {
         if (mostrarCompras[plan.id]) {
             setMostrarCompras({ ...mostrarCompras, [plan.id]: false });
             return;
         }
         setMostrarCompras({ ...mostrarCompras, [plan.id]: true });
-        if (compras[plan.id]) return;
-        setCargandoCompras({ ...cargandoCompras, [plan.id]: true });
+        // COM-65: si ya hay datos cargados para el día seleccionado, reutilizar
+        const dia = diaFiltro[plan.id] || null;
+        const cacheKey = `${plan.id}_${dia || 'all'}`;
+        if (compras[cacheKey]) return;
+        setCargandoCompras({ ...cargandoCompras, [cacheKey]: true });
         try {
-            const data = await api.getListaCompras(plan.id);
-            const filas = Array.isArray(data) ? data : (data.items || data.grupos || []);
-            setCompras(prev => ({ ...prev, [plan.id]: filas }));
+            const data = await api.getListaCompras(plan.id, dia);
+            // COM-65 FIX: el backend devuelve { lista_compras: [...] }
+            const filas = Array.isArray(data.lista_compras) ? data.lista_compras : [];
+            setCompras(prev => ({ ...prev, [cacheKey]: filas }));
         } catch (e) {
             setError(e.message);
         } finally {
-            setCargandoCompras({ ...cargandoCompras, [plan.id]: false });
+            setCargandoCompras({ ...cargandoCompras, [cacheKey]: false });
         }
     };
 
-    // ---------- Eliminación (Sprint 2, conservada activa sobre el mismo maestro) ----------
+    // COM-65: cambiar el día de filtro y recargar
+    const cambiarDiaFiltro = async (planId, dia) => {
+        setDiaFiltro(prev => ({ ...prev, [planId]: dia }));
+        const cacheKey = `${planId}_${dia || 'all'}`;
+        if (compras[cacheKey]) return;
+        setCargandoCompras({ ...cargandoCompras, [cacheKey]: true });
+        try {
+            const data = await api.getListaCompras(planId, dia);
+            const filas = Array.isArray(data.lista_compras) ? data.lista_compras : [];
+            setCompras(prev => ({ ...prev, [cacheKey]: filas }));
+        } catch (e) {
+            setError(e.message);
+        } finally {
+            setCargandoCompras({ ...cargandoCompras, [cacheKey]: false });
+        }
+    };
+
+    // COM-65: exportar a PDF (usa window.print con estilos de impresión)
+    const exportarPDF = (planId) => {
+        const dia = diaFiltro[planId] || null;
+        const cacheKey = `${planId}_${dia || 'all'}`;
+        const filas = compras[cacheKey] || [];
+        if (filas.length === 0) {
+            setError('No hay ítems para exportar. Cargue la lista primero.');
+            return;
+        }
+        const plan = planificaciones.find(p => p.id === planId);
+        const diaInfo = dia ? DIAS_SEMANA.find(d => d.num === dia) : null;
+        const titulo = diaInfo
+            ? `Lista de compras - ${diaInfo.nombre} (${plan?.fecha_referencia || ''})`
+            : `Lista de compras semanal (${plan?.fecha_referencia || ''})`;
+
+        // Abrir ventana de impresión con HTML formateado
+        const ventana = window.open('', '_blank', 'width=800,height=600');
+        if (!ventana) {
+            setError('El navegador bloqueó la ventana de impresión. Permita popups.');
+            return;
+        }
+        ventana.document.write(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <title>${titulo}</title>
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 20px; color: #1e293b; }
+                    h1 { color: #059669; border-bottom: 2px solid #059669; padding-bottom: 8px; }
+                    h2 { color: #475569; margin-top: 24px; }
+                    table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+                    th { background: #f1f5f9; padding: 10px; text-align: left; border: 1px solid #cbd5e1; font-size: 12px; text-transform: uppercase; }
+                    td { padding: 8px 10px; border: 1px solid #e2e8f0; font-size: 13px; }
+                    tr:nth-child(even) { background: #f8fafc; }
+                    .total { font-weight: bold; background: #ecfdf5; }
+                    .footer { margin-top: 40px; font-size: 11px; color: #64748b; text-align: center; border-top: 1px solid #cbd5e1; padding-top: 12px; }
+                    @media print {
+                        body { margin: 10mm; }
+                        .no-print { display: none; }
+                    }
+                </style>
+            </head>
+            <body>
+                <h1>${titulo}</h1>
+                <p><strong>Comedor:</strong> ${plan?.etiqueta || 'Planificación semanal'}</p>
+                <p><strong>Generado:</strong> ${new Date().toLocaleDateString('es-PE', { day: '2-digit', month: 'long', year: 'numeric' })}</p>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Ingrediente</th>
+                            <th>Cantidad</th>
+                            <th>Unidad</th>
+                            <th>Días de uso</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${filas.map((f, i) => `
+                            <tr>
+                                <td>${i + 1}</td>
+                                <td>${f.nombre || '—'}</td>
+                                <td><strong>${f.cantidad ?? '—'}</strong></td>
+                                <td>${f.unidad || '—'}</td>
+                                <td>${(f.dias_uso || []).join(', ') || '—'}</td>
+                            </tr>
+                        `).join('')}
+                        <tr class="total">
+                            <td colspan="2">Total de ingredientes</td>
+                            <td colspan="3">${filas.length} ítems</td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div class="footer">
+                    NutriComedor OSB · Lista generada automáticamente desde la planificación semanal
+                </div>
+                <div class="no-print" style="margin-top: 20px; text-align: center;">
+                    <button onclick="window.print()" style="padding: 10px 24px; background: #059669; color: white; border: none; border-radius: 6px; font-size: 14px; cursor: pointer;">
+                        🖨️ Imprimir / Guardar como PDF
+                    </button>
+                </div>
+            </body>
+            </html>
+        `);
+        ventana.document.close();
+    };
+
+    // ---------- Eliminación ----------
     const confirmarEliminar = async () => {
         const plan = confEliminar;
         setConfEliminar(null);
@@ -135,8 +241,6 @@ export const PlanificacionesView = () => {
         if (p.margen !== null && p.margen !== undefined) return Number(p.margen);
         return Number(p.recoleccion_total_proyectada || 0) - Number(p.costo_total_semana || 0);
     };
-
-    // COM-8 v4: promedios nutricionales calculados desde los días persistidos
     const calcularPromedios = (dias) => {
         if (!dias || dias.length === 0) return { kcal: '—', hierro: '—', proteina: '—' };
         const n = dias.length;
@@ -149,7 +253,6 @@ export const PlanificacionesView = () => {
             proteina: sumP > 0 ? (sumP / n).toFixed(1) : '—',
         };
     };
-
     const tarjeta = (icono, valor, etiqueta, colorExtra = 'text-slate-800') => (
         <div className="bg-slate-50 rounded-lg py-2 px-3 text-center">
             <p className={`flex items-center justify-center gap-1 text-sm font-bold ${colorExtra}`}>
@@ -173,13 +276,11 @@ export const PlanificacionesView = () => {
                     </p>
                 </div>
             </div>
-
             {error && (
                 <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-center gap-2 text-sm">
                     <AlertCircle size={16} /> {error}
                 </div>
             )}
-
             {cargando ? (
                 <div className="p-12 text-center text-emerald-600"><Loader2 className="animate-spin mx-auto" size={28} /></div>
             ) : planificaciones.length === 0 ? (
@@ -234,7 +335,6 @@ export const PlanificacionesView = () => {
                                             <td className="p-3 text-slate-600">{p.seleccionado_por || '—'}</td>
                                             <td className="p-3">
                                                 <div className="flex justify-end gap-2">
-                                                    {/* COM-8 v5: eliminar planificación (Sprint 2), conservado activo */}
                                                     <button
                                                         onClick={() => setConfEliminar(p)}
                                                         className="p-1.5 bg-red-50 text-red-600 hover:bg-red-100 rounded-lg transition-colors"
@@ -250,7 +350,6 @@ export const PlanificacionesView = () => {
                                                 </div>
                                             </td>
                                         </tr>
-
                                         {/* ===== Detalle expandido ===== */}
                                         {abierto && (
                                             <tr>
@@ -261,9 +360,7 @@ export const PlanificacionesView = () => {
                                                         </div>
                                                     ) : (
                                                         <>
-                                                        {/* COM-8 v4: tarjetas de resumen (margen = ventas - compras,
-                                                            al mismo nivel visual que costo y kcal; hierro y proteína
-                                                            agregados por ser factor crítico) */}
+                                                        {/* Tarjetas de resumen */}
                                                         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
                                                             {tarjeta(<Wallet size={12} className="text-slate-500" />,
                                                                 `S/ ${p.costo_total_semana}`, 'Costo total semanal (compras)')}
@@ -280,30 +377,7 @@ export const PlanificacionesView = () => {
                                                             {tarjeta(<Users size={12} className="text-blue-500" />,
                                                                 `${calcularPromedios(det.dias).proteina} g`, 'Proteína promedio por día')}
                                                         </div>
-
-                                                        {/* COM-8 v5 (trazabilidad): bloque de comensales de COM-8 v2,
-                                                            COMENTADO. Mostraba un único número por categoría para toda
-                                                            la semana (tomado del día 1), lo cual era erróneo para
-                                                            anticipar la atención diaria. Reemplazado por las columnas
-                                                            Social/Afiliado/Normal POR DÍA en la tabla siguiente.
-                                                        <div className="grid grid-cols-3 gap-3">
-                                                            <div className="border rounded-xl p-3 text-center bg-red-50 border-red-200 text-red-700">
-                                                                <p className="text-3xl font-bold">{det.dias[0].comensales_social}</p>
-                                                                <p className="text-xs font-semibold">Casos Sociales / día</p>
-                                                            </div>
-                                                            <div className="border rounded-xl p-3 text-center bg-blue-50 border-blue-200 text-blue-700">
-                                                                <p className="text-3xl font-bold">{det.dias[0].comensales_afiliado}</p>
-                                                                <p className="text-xs font-semibold">Afiliados / día</p>
-                                                            </div>
-                                                            <div className="border rounded-xl p-3 text-center bg-emerald-50 border-emerald-200 text-emerald-700">
-                                                                <p className="text-3xl font-bold">{det.dias[0].comensales_normal}</p>
-                                                                <p className="text-xs font-semibold">Normales / día</p>
-                                                            </div>
-                                                        </div>
-                                                        */}
-
-                                                        {/* COM-8 v4: tabla por día con comensales en columnas
-                                                            separadas, recolección proyectada y nutrición por ración */}
+                                                        {/* Tabla por día */}
                                                         <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
                                                             <table className="w-full text-left border-collapse whitespace-nowrap text-sm">
                                                                 <thead>
@@ -342,48 +416,122 @@ export const PlanificacionesView = () => {
                                                                 </tbody>
                                                             </table>
                                                         </div>
-
-                                                        {/* Lista de compras de la semana (Sprint 2, conservada) */}
-                                                        <div>
-                                                            <button onClick={() => toggleCompras(p)}
-                                                                className="flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-slate-800 transition-colors">
-                                                                <ShoppingCart size={14} />
-                                                                {mostrarCompras[p.id] ? 'Ocultar lista de compras' : 'Ver lista de compras'}
-                                                            </button>
-                                                            {mostrarCompras[p.id] && (
-                                                                <div className="mt-2 rounded-lg border border-slate-200 bg-white p-3">
-                                                                    {cargandoCompras[p.id] ? (
-                                                                        <Loader2 className="animate-spin mx-auto text-emerald-600" size={18} />
-                                                                    ) : (compras[p.id] || []).length === 0 ? (
-                                                                        <p className="text-xs text-slate-500">Sin ítems de compra registrados.</p>
-                                                                    ) : (
-                                                                        <table className="w-full text-left text-xs">
-                                                                            <thead>
-                                                                                <tr className="text-slate-500 border-b border-slate-200">
-                                                                                    <th className="p-1.5 font-semibold">Insumo</th>
-                                                                                    <th className="p-1.5 font-semibold">Cantidad</th>
-                                                                                    <th className="p-1.5 font-semibold">Unidad</th>
-                                                                                    <th className="p-1.5 font-semibold">Costo aprox.</th>
-                                                                                </tr>
-                                                                            </thead>
-                                                                            <tbody className="divide-y divide-slate-100">
-                                                                                {compras[p.id].map((row, i) => (
-                                                                                    <tr key={i}>
-                                                                                        <td className="p-1.5 text-slate-700">
-                                                                                            {row.nombre || row.ingrediente || row.insumo || '—'}
-                                                                                        </td>
-                                                                                        <td className="p-1.5 text-slate-600">{row.cantidad ?? '—'}</td>
-                                                                                        <td className="p-1.5 text-slate-600">{row.unidad || '—'}</td>
-                                                                                        <td className="p-1.5 text-slate-600">
-                                                                                            {row.costo_total ?? row.costo ?? row.costo_estimado ?? '—'}
-                                                                                        </td>
-                                                                                    </tr>
-                                                                                ))}
-                                                                            </tbody>
-                                                                        </table>
-                                                                    )}
+                                                        {/* COM-65: Lista de compras con filtro por día y exportación PDF */}
+                                                        <div className="bg-white rounded-lg border border-slate-200 p-4">
+                                                            <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+                                                                <h4 className="font-bold text-slate-700 flex items-center gap-2">
+                                                                    <ShoppingCart size={16} className="text-emerald-600" />
+                                                                    Lista de compras
+                                                                </h4>
+                                                                <div className="flex flex-wrap items-center gap-2">
+                                                                    {/* Filtro por día */}
+                                                                    <div className="flex items-center gap-1 text-xs">
+                                                                        <Calendar size={12} className="text-slate-500" />
+                                                                        <span className="text-slate-600 font-medium">Ver:</span>
+                                                                    </div>
+                                                                    <button
+                                                                        onClick={() => cambiarDiaFiltro(p.id, null)}
+                                                                        className={`px-2 py-1 rounded text-xs font-medium transition-colors ${
+                                                                            !diaFiltro[p.id] ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                                                                        }`}
+                                                                        title="Lista consolidada de la semana">
+                                                                        Semana
+                                                                    </button>
+                                                                    {DIAS_SEMANA.map(d => (
+                                                                        <button
+                                                                            key={d.num}
+                                                                            onClick={() => cambiarDiaFiltro(p.id, d.num)}
+                                                                            className={`px-2 py-1 rounded text-xs font-medium transition-colors ${
+                                                                                diaFiltro[p.id] === d.num ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                                                                            }`}
+                                                                            title={`Lista solo para ${d.nombre}`}>
+                                                                            {d.nombre.slice(0, 3)}
+                                                                        </button>
+                                                                    ))}
+                                                                    {/* Botón exportar PDF */}
+                                                                    <button
+                                                                        onClick={() => exportarPDF(p.id)}
+                                                                        className="ml-2 flex items-center gap-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors"
+                                                                        title="Exportar lista de compras a PDF">
+                                                                        <FileDown size={12} /> PDF
+                                                                    </button>
                                                                 </div>
-                                                            )}
+                                                            </div>
+                                                            {/* Contenido de la lista */}
+                                                            {(() => {
+                                                                const cacheKey = `${p.id}_${diaFiltro[p.id] || 'all'}`;
+                                                                const filas = compras[cacheKey] || [];
+                                                                const cargando = cargandoCompras[cacheKey];
+                                                                return (
+                                                                    <>
+                                                                        {!mostrarCompras[p.id] && (
+                                                                            <button
+                                                                                onClick={() => toggleCompras(p)}
+                                                                                className="flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-slate-800 transition-colors">
+                                                                                <ShoppingCart size={14} />
+                                                                                {diaFiltro[p.id]
+                                                                                    ? `Ver lista para ${DIAS_SEMANA.find(d => d.num === diaFiltro[p.id])?.nombre}`
+                                                                                    : 'Ver lista de compras semanal'}
+                                                                            </button>
+                                                                        )}
+                                                                        {mostrarCompras[p.id] && (
+                                                                            <div className="rounded-lg border border-slate-200 bg-white overflow-hidden">
+                                                                                {cargando ? (
+                                                                                    <div className="p-6 text-center text-emerald-600">
+                                                                                        <Loader2 className="animate-spin mx-auto" size={18} />
+                                                                                    </div>
+                                                                                ) : filas.length === 0 ? (
+                                                                                    <p className="p-4 text-xs text-slate-500 text-center">
+                                                                                        Sin ítems de compra registrados para
+                                                                                        {diaFiltro[p.id] ? ` ${DIAS_SEMANA.find(d => d.num === diaFiltro[p.id])?.nombre}` : ' esta semana'}.
+                                                                                    </p>
+                                                                                ) : (
+                                                                                    <>
+                                                                                        <div className="overflow-x-auto">
+                                                                                            <table className="w-full text-left text-xs">
+                                                                                                <thead>
+                                                                                                    <tr className="bg-slate-50 text-slate-600 border-b border-slate-200">
+                                                                                                        <th className="p-2 font-semibold">#</th>
+                                                                                                        <th className="p-2 font-semibold">Ingrediente</th>
+                                                                                                        <th className="p-2 font-semibold text-right">Cantidad</th>
+                                                                                                        <th className="p-2 font-semibold">Unidad</th>
+                                                                                                        <th className="p-2 font-semibold">Días de uso</th>
+                                                                                                    </tr>
+                                                                                                </thead>
+                                                                                                <tbody className="divide-y divide-slate-100">
+                                                                                                    {filas.map((row, i) => (
+                                                                                                        <tr key={i} className="hover:bg-slate-50">
+                                                                                                            <td className="p-2 text-slate-500">{i + 1}</td>
+                                                                                                            <td className="p-2 font-medium text-slate-800">{row.nombre || '—'}</td>
+                                                                                                            <td className="p-2 text-right font-bold text-emerald-700">{row.cantidad ?? '—'}</td>
+                                                                                                            <td className="p-2 text-slate-600">{row.unidad || '—'}</td>
+                                                                                                            <td className="p-2 text-slate-500 text-[10px]">{(row.dias_uso || []).join(', ') || '—'}</td>
+                                                                                                        </tr>
+                                                                                                    ))}
+                                                                                                </tbody>
+                                                                                                <tfoot>
+                                                                                                    <tr className="bg-emerald-50 font-bold text-emerald-800">
+                                                                                                        <td colSpan="2" className="p-2">Total de ingredientes</td>
+                                                                                                        <td colSpan="3" className="p-2">{filas.length} ítems</td>
+                                                                                                    </tr>
+                                                                                                </tfoot>
+                                                                                            </table>
+                                                                                        </div>
+                                                                                        {/* Botón imprimir dentro del panel */}
+                                                                                        <div className="p-2 bg-slate-50 border-t border-slate-200 flex justify-end">
+                                                                                            <button
+                                                                                                onClick={() => exportarPDF(p.id)}
+                                                                                                className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors">
+                                                                                                <Printer size={12} /> Imprimir / Guardar como PDF
+                                                                                            </button>
+                                                                                        </div>
+                                                                                    </>
+                                                                                )}
+                                                                            </div>
+                                                                        )}
+                                                                    </>
+                                                                );
+                                                            })()}
                                                         </div>
                                                         </>
                                                     )}
@@ -397,8 +545,7 @@ export const PlanificacionesView = () => {
                     </table>
                 </div>
             )}
-
-            {/* COM-8 v5: confirmación de eliminación (Sprint 2, conservada) */}
+            {/* Confirmación de eliminación */}
             <ModalConfirmacion
                 isOpen={!!confEliminar}
                 onClose={() => setConfEliminar(null)}

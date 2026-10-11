@@ -1112,6 +1112,7 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener detalle de planificación'));
         return response.json();
     },
+    // COM-65: lista de compras con filtro opcional por día (1=Lunes, 7=Domingo)
     getListaCompras: async (planificacionId, dia = null) => {
         const url = dia
             ? `${API_BASE}/planificaciones/${planificacionId}/lista-compras?dia=${dia}`
