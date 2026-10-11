@@ -5,10 +5,12 @@ Objetivo: Endpoints para la gestión del padrón, ventas diarias (POS), predicci
 Historial:
  - Sprint 1/2: versión original (predicción, búsqueda/registro de comensales por DNI,
    CRUD de ventas y estadísticas del día).
- - COM-62 v2: atención ágil sin DNI (autocompletado por nombre, DNI opcional).
+ - COM-62 v2: atención ágil sin DNI (autocompletado por nombre, DNI opcional, edición).
  - COM-63: carga masiva de atenciones históricas desde CSV + tipo "Cocinera".
+ - COM-64 (este archivo): predicción de demanda con datos reales de padron_diario
+   (pasa el cursor al motor de IA para entrenar con historial real).
 Uso: Registrado en main.py con prefijo /api/v1.
-Referencia: tickets COM-62, COM-63.
+Referencia: tickets COM-62, COM-63, COM-64.
 """
 from datetime import date, datetime
 from typing import Optional
@@ -54,16 +56,24 @@ class EditarComensalPOSInput(BaseModel):
 
 
 # ==========================================
-# PREDICCIÓN DE DEMANDA
+# PREDICCIÓN DE DEMANDA (COM-64: con datos reales)
 # ==========================================
 @router.get("/padron/prediccion_demanda")
 def predecir_demanda_diaria(fecha_str: str = None, db=Depends(get_db)):
+    """
+    COM-64: predice la demanda diaria usando datos reales de padron_diario
+    si existen ≥30 días de historial; fallback a modelo simulado si no.
+    """
     fecha_eval = datetime.strptime(fecha_str, "%Y-%m-%d").date() if fecha_str else date.today()
+    
+    # 1. Leer parámetros de IA desde la BD de forma centralizada
     claves_ia = [
         'IA_MIN_SOCIAL', 'IA_MIN_AFILIADO', 'IA_MIN_NORMAL',
         'IA_FINDE_SOCIAL', 'IA_FINDE_AFILIADO', 'IA_FINDE_NORMAL'
     ]
     params = get_parametros_dict(db, claves_ia)
+    
+    # 2. Estructurar diccionarios para el motor de IA
     limites_minimos = {
         'SOCIAL': params.get('IA_MIN_SOCIAL', 15),
         'AFILIADO': params.get('IA_MIN_AFILIADO', 35),
@@ -74,14 +84,25 @@ def predecir_demanda_diaria(fecha_str: str = None, db=Depends(get_db)):
         'AFILIADO': params.get('IA_FINDE_AFILIADO', 20),
         'NORMAL': params.get('IA_FINDE_NORMAL', 30)
     }
-    pred = predecir_demanda_raciones(
-        fecha_eval.weekday(), fecha_eval.day, limites_minimos, limites_finde
-    )
+    
+    # 3. COM-64: ejecutar predicción pasando el cursor para usar datos reales
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        pred = predecir_demanda_raciones(
+            fecha_eval.weekday(), 
+            fecha_eval.day, 
+            limites_minimos, 
+            limites_finde,
+            cur=cur  # <-- COM-64: pasar cursor para datos reales
+        )
+    finally:
+        cur.close()
+    
     return {
-        "fecha": fecha_eval.strftime("%Y-%m-%d"),
-        "prediccion_social": pred[0],
-        "prediccion_afiliado": pred[1],
-        "prediccion_normal": pred[2],
+        "fecha": fecha_eval.strftime("%Y-%m-%d"), 
+        "prediccion_social": pred[0], 
+        "prediccion_afiliado": pred[1], 
+        "prediccion_normal": pred[2], 
         "total_raciones_sugeridas": sum(pred)
     }
 
@@ -91,6 +112,10 @@ def predecir_demanda_diaria(fecha_str: str = None, db=Depends(get_db)):
 # ==========================================
 @router.get("/comensales/buscar-por-nombre")
 def buscar_comensales_por_nombre(q: str = '', limite: int = 8, db=Depends(get_db)):
+    """
+    COM-62 v2: sugerencias de comensales por nombre para la caja del POS. Excluye al
+    Cliente Genérico (es_generico=TRUE) y marca cuáles tienen DNI real (tiene_dni).
+    """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("""
@@ -115,6 +140,11 @@ def buscar_comensales_por_nombre(q: str = '', limite: int = 8, db=Depends(get_db
 # ==========================================
 @router.get("/comensales/{documento}")
 def buscar_comensal(documento: str, db=Depends(get_db)):
+    """
+    Búsqueda exacta por documento. COM-62 v2: si el documento es '00000000' se devuelve
+    el Cliente Genérico (reservado para cargas masivas); cualquier otro DNI busca la
+    fila con ese DNI real.
+    """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         if documento == DNI_SIN_DATO:
@@ -134,6 +164,14 @@ def buscar_comensal(documento: str, db=Depends(get_db)):
 # ==========================================
 @router.put("/comensales/{comensal_id}")
 def editar_comensal(comensal_id: int, data: EditarComensalPOSInput, db=Depends(get_db)):
+    """
+    COM-62 v2: edita nombre/apellidos/tipo y permite ASIGNAR el DNI real tiempo después.
+    Validaciones:
+      - DNI real duplicado -> 400 (uq_comensales_dni_real).
+      - Al quitar el DNI pasa a '00000000': si ya hubiera otra ficha sin DNI con ese
+        nombre -> 400 (uq_comensales_nombre_sin_dni).
+      - El Cliente Genérico no se edita (es reserva de cargas masivas).
+    """
     if data.tipo_comensal is not None and data.tipo_comensal not in TIPOS_COMENSAL_VALIDOS:
         raise HTTPException(status_code=400, detail=f"Tipo de comensal inválido: use uno de {TIPOS_COMENSAL_VALIDOS}.")
     cur = db.cursor(cursor_factory=RealDictCursor)
@@ -186,6 +224,13 @@ def editar_comensal(comensal_id: int, data: EditarComensalPOSInput, db=Depends(g
 # ==========================================
 @router.post("/comensales/registrar")
 def registrar_comensal_manual(data: NuevoComensalPOSInput, db=Depends(get_db)):
+    """
+    COM-62 v2: alta de comensal con documento OPCIONAL.
+      - Sin DNI (vacío o '00000000'): se guarda con '00000000'; si ya existe una ficha
+        sin DNI con el mismo nombre normalizado, se REUTILIZA (creado=False).
+      - Con DNI real: se inserta con ese DNI; la unicidad de DNI reales la garantiza
+        uq_comensales_dni_real (IntegrityError -> 400 'Documento ya registrado').
+    """
     if data.tipo_comensal not in TIPOS_COMENSAL_VALIDOS:
         raise HTTPException(status_code=400, detail=f"Tipo de comensal inválido: use uno de {TIPOS_COMENSAL_VALIDOS}.")
     nombres = (data.nombres or '').strip()
