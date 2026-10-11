@@ -47,10 +47,14 @@ Historial de integraciones:
  - COM-59A v2: FIX del crash de arranque "too many values to unpack (expected 6)":
            el esquema v2 de COM-59A retorna 7 valores y este bootstrap seguía
            desempacando 6, abortando ANTES del commit. Desempaque actualizado a 7.
- - COM-62 v2 (este archivo): paso 16 de esquema de comensales POS: apellidos y flag
-           es_generico en comensales, retiro del UNIQUE histórico de documento,
-           índices únicos parciales (DNI real / nombre sin DNI) y seed del Cliente
-           Genérico para cargas masivas. Auditoría en logs.
+ - COM-62 v2: paso 16 de esquema de comensales POS: apellidos y flag es_generico en
+           comensales, retiro del UNIQUE histórico de documento, índices únicos
+           parciales (DNI real / nombre sin DNI) y seed del Cliente Genérico para
+           cargas masivas. Auditoría en logs.
+ - COM-63: paso 17 de esquema de carga histórica: tipo "Cocinera" en comensales,
+           padron_diario y precios_venta; comensal genérico "Cocinera" (DNI='CO000000');
+           precio 0.00 para Cocinera; parámetros PRECIO_COCINERA y LIMITE_COCINERA.
+           Auditoría en logs.
 """
 import time
 import psycopg2
@@ -86,6 +90,8 @@ from esquema_ingredientes_admin import aplicar_esquema_ingredientes_admin
 from esquema_subsidio_precios import aplicar_esquema_subsidio_precios
 # COM-62 v2: esquema de comensales POS (identidad por nombre + DNI opcional + genérico)
 from esquema_comensales_pos import aplicar_esquema_comensales_pos
+# COM-63: esquema de carga histórica y tipo Cocinera
+from esquema_carga_historica import aplicar_esquema_carga_historica
 
 # ==========================================
 # CONSTANTES DE ROLES (COM-21)
@@ -651,6 +657,7 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
     COM-59A/v2: esquema de Subsidio mensual y Precios de venta con auditoría.
     COM-62 v2: esquema de comensales POS (identidad por nombre, DNI opcional,
     Cliente Genérico para cargas masivas) con auditoría.
+    COM-63: esquema de carga histórica y tipo Cocinera con auditoría.
     """
     conn = None
     for intento in range(1, reintentos + 1):
@@ -745,6 +752,8 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
             #     opcional + Cliente Genérico para cargas masivas históricas).
             (col_pos_ok, uniq_retirado, idx_dni_ok, idx_nom_ok,
              generico_ok) = aplicar_esquema_comensales_pos(cur)
+            # 17. COM-63: esquema de carga histórica y tipo Cocinera.
+            (comensal_coc_ok, precio_coc_ok, params_coc_ok) = aplicar_esquema_carga_historica(cur)
             conn.commit()
             cur.close()
             if migrados:
@@ -790,10 +799,18 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
             if not (col_pos_ok and uniq_retirado and idx_dni_ok and idx_nom_ok and generico_ok):
                 print("[BOOTSTRAP] COM-62: [AVISO] Esquema de comensales POS incompleto; "
                       "se reintentará en el próximo arranque.")
+            # COM-63: auditoría del esquema de carga histórica y tipo Cocinera
+            print(f"[BOOTSTRAP] COM-63: comensal_cocinera={'OK' if comensal_coc_ok else 'FALTA'}, "
+                  f"precio_cocinera={'OK' if precio_coc_ok else 'FALTA'}, "
+                  f"parametros_cocinera={'OK' if params_coc_ok else 'FALTA'}.")
+            if not (comensal_coc_ok and precio_coc_ok and params_coc_ok):
+                print("[BOOTSTRAP] COM-63: [AVISO] Esquema de carga histórica incompleto; "
+                      "se reintentará en el próximo arranque.")
             print("[BOOTSTRAP] Esquema dinámico verificado/creado correctamente "
                   "(incluye ubicación COM-27, K-means COM-5, propuestas COM-8, módulos ML COM-36, "
                   "separación de deberes COM-40/COM-40 v2, gestión de ingredientes COM-37, "
-                  "cascada de comedores COM-44, subsidio/precios COM-59A v2 y comensales POS COM-62 v2).")
+                  "cascada de comedores COM-44, subsidio/precios COM-59A v2, comensales POS COM-62 v2 "
+                  "y carga histórica COM-63).")
             return True
         except Exception as e:
             print(f"[BOOTSTRAP] Intento {intento}/{reintentos} fallido: {e}")
