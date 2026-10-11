@@ -3,10 +3,13 @@ routers/planificacion.py
 Objetivo: Endpoints para consultar planificaciones guardadas y generar listas de compras.
 Historial:
  - Sprint 2: versión original (listar, detalle, lista-compras con filtro por día, eliminar).
- - COM-65 (este archivo): trazabilidad. El endpoint /lista-compras ya soporta ?dia=N
-   para generar la lista consolidada semanal o filtrada por un día específico.
-   El frontend (PlanificacionesView.jsx) fue corregido para leer data.lista_compras
-   (antes leía data.items/data.grupos, que no existían).
+ - COM-65: trazabilidad. El endpoint /lista-compras ya soporta ?dia=N.
+ - COM-67 (este archivo): FIX de unidades de compra usando equivalencias existentes.
+   La lógica ahora:
+   1) Obtiene equivalencia unidad_receta → gramos (tabla ingredientes_equivalencias)
+   2) Obtiene unidad de compra del insumo (tabla insumos.unidad_medida_id)
+   3) Convierte gramos → unidad_compra usando unidades_medida.factor_a_base
+   4) Agrupa por insumo (no por ingrediente) para consolidar compras
 Uso: Registrado en main.py con prefijo /api/v1.
 """
 import math
@@ -100,13 +103,15 @@ def generar_lista_compras(
     db=Depends(get_db)
 ):
     """
-    COM-65: Genera la lista de compras consolidada para una planificación.
-    Si se especifica 'dia', genera la lista solo para ese día.
-    LÓGICA DE CÁLCULO:
-      1. Cada receta tiene un campo 'raciones' que indica para cuántas personas alcanza
-      2. Cantidad por ración = cantidad_requerida / raciones
-      3. Cantidad total = total_comensales * (cantidad_requerida / raciones)
-      4. Convertir a unidades de compra estándar (kg para sólidos, L para líquidos)
+    COM-67: Genera la lista de compras consolidada usando equivalencias existentes.
+    
+    LÓGICA DE CONVERSIÓN:
+    1. Para cada ingrediente en la receta, buscar equivalencia activa (unidad_receta → gramos)
+    2. Calcular cantidad total en gramos: cantidad_receta × gramos_por_unidad_uso × (total_comensales / raciones_receta)
+    3. Buscar el insumo vinculado al ingrediente
+    4. Obtener unidad de compra del insumo (insumos.unidad_medida_id)
+    5. Convertir gramos a unidad de compra: cantidad_gramos / factor_a_base_unidad_compra
+    6. Agrupar por insumo (no por ingrediente) para consolidar compras
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -134,77 +139,150 @@ def generar_lista_compras(
         if not dias_planificados:
             raise HTTPException(status_code=404, detail="No hay días planificados")
 
-        # Consolidar ingredientes
+        # Consolidar ingredientes por insumo
         lista_compras = {}
+        
         for dia_plan in dias_planificados:
             receta_id = dia_plan['receta_id']
             total_comensales = dia_plan['total_comensales']
+            
+            # Obtener raciones de la receta
             cur.execute("SELECT raciones FROM recetas_almuerzo WHERE id = %s", (receta_id,))
             receta_info = cur.fetchone()
             raciones_receta = receta_info['raciones'] if receta_info and receta_info['raciones'] and receta_info['raciones'] > 0 else 1
 
+            # Obtener ingredientes de la receta
             cur.execute("""
                 SELECT 
                     ri.ingrediente_id,
                     i.nombre as ingrediente_nombre,
                     ri.cantidad_requerida,
-                    ri.unidad_medida_id,
-                    um.nombre as unidad_nombre,
-                    um.abreviatura as unidad_abrev,
-                    um.factor_a_base,
-                    um.tipo_magnitud
+                    ri.unidad_medida_id as unidad_receta_id
                 FROM receta_ingrediente ri
                 JOIN ingredientes i ON ri.ingrediente_id = i.id
-                JOIN unidades_medida um ON ri.unidad_medida_id = um.id
                 WHERE ri.receta_id = %s
             """, (receta_id,))
             ingredientes = cur.fetchall()
+            
             for ing in ingredientes:
                 ing_id = ing['ingrediente_id']
+                ing_nombre = ing['ingrediente_nombre']
                 cantidad_requerida = float(ing['cantidad_requerida'])
-                factor = float(ing['factor_a_base'])
-                tipo_magnitud = ing['tipo_magnitud']
+                unidad_receta_id = ing['unidad_receta_id']
+                
+                # Calcular cantidad total para todos los comensales
                 cantidad_por_racion = cantidad_requerida / raciones_receta
-                cantidad_total = cantidad_por_racion * total_comensales
-                if tipo_magnitud == 'masa':
-                    cantidad_base = cantidad_total * factor
-                elif tipo_magnitud == 'volumen':
-                    cantidad_base = cantidad_total * factor
+                cantidad_total_receta = cantidad_por_racion * total_comensales
+                
+                # COM-67: Buscar equivalencia activa (unidad_receta → gramos)
+                cur.execute("""
+                    SELECT ie.gramos_por_unidad_uso
+                    FROM ingredientes_equivalencias ie
+                    WHERE ie.ingrediente_id = %s 
+                      AND ie.unidad_uso_id = %s
+                      AND ie.estado_activo = TRUE
+                    ORDER BY ie.fecha_registro DESC
+                    LIMIT 1
+                """, (ing_id, unidad_receta_id))
+                equivalencia = cur.fetchone()
+                
+                if equivalencia:
+                    # Usar equivalencia: cantidad_gramos = cantidad_receta × gramos_por_unidad_uso
+                    cantidad_gramos = cantidad_total_receta * float(equivalencia['gramos_por_unidad_uso'])
                 else:
-                    cantidad_base = cantidad_total
+                    # Fallback: usar factor_a_base de la unidad de receta
+                    cur.execute("""
+                        SELECT um.factor_a_base, um.tipo_magnitud
+                        FROM unidades_medida um
+                        WHERE um.id = %s
+                    """, (unidad_receta_id,))
+                    unidad_info = cur.fetchone()
+                    if unidad_info:
+                        factor = float(unidad_info['factor_a_base'])
+                        tipo = unidad_info['tipo_magnitud']
+                        if tipo in ('masa', 'volumen'):
+                            cantidad_gramos = cantidad_total_receta * factor
+                        else:
+                            # Discreto: asumir 1 unidad = 100g (peso estimado)
+                            cantidad_gramos = cantidad_total_receta * 100.0
+                    else:
+                        cantidad_gramos = cantidad_total_receta * 100.0
+                
+                # COM-67: Buscar insumo vinculado al ingrediente
+                cur.execute("""
+                    SELECT ins.id as insumo_id, ins.nombre as insumo_nombre,
+                           ins.unidad_medida_id as unidad_compra_id
+                    FROM insumos ins
+                    WHERE ins.ingrediente_id = %s
+                    ORDER BY ins.id
+                    LIMIT 1
+                """, (ing_id,))
+                insumo = cur.fetchone()
+                
+                if insumo:
+                    insumo_id = insumo['insumo_id']
+                    insumo_nombre = insumo['insumo_nombre']
+                    unidad_compra_id = insumo['unidad_compra_id']
+                    
+                    # Obtener factor de conversión de la unidad de compra
+                    cur.execute("""
+                        SELECT um.nombre as unidad_nombre, um.abreviatura, um.factor_a_base
+                        FROM unidades_medida um
+                        WHERE um.id = %s
+                    """, (unidad_compra_id,))
+                    unidad_compra = cur.fetchone()
+                    
+                    if unidad_compra:
+                        factor_compra = float(unidad_compra['factor_a_base'])
+                        # Convertir gramos a unidad de compra
+                        cantidad_compra = cantidad_gramos / factor_compra
+                        
+                        # Agrupar por insumo
+                        if insumo_id not in lista_compras:
+                            lista_compras[insumo_id] = {
+                                'insumo_id': insumo_id,
+                                'nombre': insumo_nombre,
+                                'unidad': unidad_compra['abreviatura'],
+                                'cantidad': 0,
+                                'dias_uso': []
+                            }
+                        
+                        lista_compras[insumo_id]['cantidad'] += cantidad_compra
+                        if dia_plan['dia_nombre'] not in lista_compras[insumo_id]['dias_uso']:
+                            lista_compras[insumo_id]['dias_uso'].append(dia_plan['dia_nombre'])
+                else:
+                    # Sin insumo vinculado: usar nombre del ingrediente y unidad genérica
+                    if ing_id not in lista_compras:
+                        lista_compras[ing_id] = {
+                            'ingrediente_id': ing_id,
+                            'nombre': ing_nombre,
+                            'unidad': 'g',
+                            'cantidad': 0,
+                            'dias_uso': []
+                        }
+                    lista_compras[ing_id]['cantidad'] += cantidad_gramos
+                    if dia_plan['dia_nombre'] not in lista_compras[ing_id]['dias_uso']:
+                        lista_compras[ing_id]['dias_uso'].append(dia_plan['dia_nombre'])
 
-                if ing_id not in lista_compras:
-                    lista_compras[ing_id] = {
-                        'ingrediente_id': ing_id,
-                        'nombre': ing['ingrediente_nombre'],
-                        'unidad_nombre': ing['unidad_nombre'],
-                        'unidad_abrev': ing['unidad_abrev'],
-                        'tipo_magnitud': tipo_magnitud,
-                        'cantidad_base': 0,
-                        'dias_uso': []
-                    }
-                lista_compras[ing_id]['cantidad_base'] += cantidad_base
-                if dia_plan['dia_nombre'] not in lista_compras[ing_id]['dias_uso']:
-                    lista_compras[ing_id]['dias_uso'].append(dia_plan['dia_nombre'])
-
-        # Formatear para presentación
+        # Formatear lista final
         lista_formateada = []
-        for ing_id, data in sorted(lista_compras.items(), key=lambda x: x[1]['nombre']):
-            cantidad = data['cantidad_base']
-            if data['tipo_magnitud'] == 'masa':
-                cantidad_display = math.ceil((cantidad / 1000.0) * 10) / 10
-                unidad_display = 'kg'
-            elif data['tipo_magnitud'] == 'volumen':
-                cantidad_display = math.ceil((cantidad / 1000.0) * 10) / 10
-                unidad_display = 'L'
+        for key, data in sorted(lista_compras.items(), key=lambda x: x[1]['nombre']):
+            cantidad = data['cantidad']
+            unidad = data['unidad']
+            
+            # Redondear según unidad
+            if unidad in ('kg', 'L'):
+                cantidad = round(cantidad, 2)
+            elif unidad == 'g' or unidad == 'ml':
+                cantidad = round(cantidad, 1)
             else:
-                cantidad_display = math.ceil(cantidad)
-                unidad_display = 'und'
+                cantidad = math.ceil(cantidad)
+            
             lista_formateada.append({
-                'ingrediente_id': ing_id,
+                'insumo_id' if 'insumo_id' in data else 'ingrediente_id': key,
                 'nombre': data['nombre'],
-                'cantidad': cantidad_display,
-                'unidad': unidad_display,
+                'cantidad': cantidad,
+                'unidad': unidad,
                 'dias_uso': data['dias_uso']
             })
 
