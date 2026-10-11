@@ -995,7 +995,7 @@ export const api = {
     },
 
     // ==========================================
-    // COMENSALES Y VENTAS (POS) — COM-62 v2: identidad por nombre + DNI opcional
+    // COMENSALES Y VENTAS (POS) — COM-62 v2: métodos consistentes con el resto del api
     // ==========================================
     // COM-62 v2: autocompletado por nombre (excluye al Cliente Genérico).
     buscarComensalesPorNombre: async (q = '', limite = 8) => {
@@ -1013,7 +1013,8 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al editar el comensal'));
         return response.json();
     },
-    // Legacy: búsqueda exacta por documento (usada por TablaVentasHoy y flujos antiguos).
+    // Búsqueda exacta por documento (usada por TablaVentasHoy y flujos antiguos).
+    // COM-62 v2: ahora consistente (lanza error si 404, retorna JSON parseado).
     buscarComensal: async (doc) => {
         const response = await fetch(`${API_BASE}/comensales/${doc}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Comensal no encontrado'));
