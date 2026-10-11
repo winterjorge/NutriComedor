@@ -1,26 +1,21 @@
 """
 routers/padron.py
-Objetivo: Endpoints para la gestión del padrón, ventas diarias (POS) y predicción
-          de demanda.
+Objetivo: Endpoints para la gestión del padrón, ventas diarias (POS), predicción
+          de demanda y carga masiva de atenciones históricas.
 Historial:
  - Sprint 1/2: versión original (predicción, búsqueda/registro de comensales por DNI,
    CRUD de ventas y estadísticas del día).
- - COM-62 v2 (este archivo): atención ágil sin DNI:
-     * GET  /comensales/buscar-por-nombre: autocompletado por nombre (excluye al
-       Cliente Genérico) para seleccionar la ficha existente antes de vender.
-     * PUT  /comensales/{comensal_id}: edición de ficha, incluido COMPLETAR/CORREGIR
-       el DNI días después (el comedor puede empezar a pedir DNI sin migrar nada).
-     * GET  /comensales/{documento}: si el documento es '00000000' devuelve el Cliente
-       Genérico (reservado para cargas masivas históricas).
-     * POST /comensales/registrar: documento OPCIONAL; sin DNI se guarda con '00000000'
-       y se REUTILIZA la ficha si ya existe ese nombre (dedup por índice parcial).
+ - COM-62 v2: atención ágil sin DNI (autocompletado por nombre, DNI opcional).
+ - COM-63: carga masiva de atenciones históricas desde CSV + tipo "Cocinera".
 Uso: Registrado en main.py con prefijo /api/v1.
-Referencia: tickets COM-62 (solo trazabilidad).
+Referencia: tickets COM-62, COM-63.
 """
 from datetime import date, datetime
 from typing import Optional
+import csv
+import io
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
 import psycopg2
@@ -33,7 +28,7 @@ router = APIRouter(tags=["Padrón y POS"])
 
 # COM-62 v2: documento reservado para comensales atendidos solo por nombre.
 DNI_SIN_DATO = '00000000'
-TIPOS_COMENSAL_VALIDOS = ('Social', 'Afiliado', 'Normal')
+TIPOS_COMENSAL_VALIDOS = ('Social', 'Afiliado', 'Normal', 'Cocinera')
 
 
 # ==========================================
@@ -96,10 +91,6 @@ def predecir_demanda_diaria(fecha_str: str = None, db=Depends(get_db)):
 # ==========================================
 @router.get("/comensales/buscar-por-nombre")
 def buscar_comensales_por_nombre(q: str = '', limite: int = 8, db=Depends(get_db)):
-    """
-    COM-62 v2: sugerencias de comensales por nombre para la caja del POS. Excluye al
-    Cliente Genérico (es_generico=TRUE) y marca cuáles tienen DNI real (tiene_dni).
-    """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("""
@@ -124,11 +115,6 @@ def buscar_comensales_por_nombre(q: str = '', limite: int = 8, db=Depends(get_db
 # ==========================================
 @router.get("/comensales/{documento}")
 def buscar_comensal(documento: str, db=Depends(get_db)):
-    """
-    Búsqueda exacta por documento. COM-62 v2: si el documento es '00000000' se devuelve
-    el Cliente Genérico (reservado para cargas masivas); cualquier otro DNI busca la
-    fila con ese DNI real.
-    """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         if documento == DNI_SIN_DATO:
@@ -148,14 +134,6 @@ def buscar_comensal(documento: str, db=Depends(get_db)):
 # ==========================================
 @router.put("/comensales/{comensal_id}")
 def editar_comensal(comensal_id: int, data: EditarComensalPOSInput, db=Depends(get_db)):
-    """
-    COM-62 v2: edita nombre/apellidos/tipo y permite ASIGNAR el DNI real tiempo después.
-    Validaciones:
-      - DNI real duplicado -> 400 (uq_comensales_dni_real).
-      - Al quitar el DNI pasa a '00000000': si ya hubiera otra ficha sin DNI con ese
-        nombre -> 400 (uq_comensales_nombre_sin_dni).
-      - El Cliente Genérico no se edita (es reserva de cargas masivas).
-    """
     if data.tipo_comensal is not None and data.tipo_comensal not in TIPOS_COMENSAL_VALIDOS:
         raise HTTPException(status_code=400, detail=f"Tipo de comensal inválido: use uno de {TIPOS_COMENSAL_VALIDOS}.")
     cur = db.cursor(cursor_factory=RealDictCursor)
@@ -208,13 +186,6 @@ def editar_comensal(comensal_id: int, data: EditarComensalPOSInput, db=Depends(g
 # ==========================================
 @router.post("/comensales/registrar")
 def registrar_comensal_manual(data: NuevoComensalPOSInput, db=Depends(get_db)):
-    """
-    COM-62 v2: alta de comensal con documento OPCIONAL.
-      - Sin DNI (vacío o '00000000'): se guarda con '00000000'; si ya existe una ficha
-        sin DNI con el mismo nombre normalizado, se REUTILIZA (creado=False).
-      - Con DNI real: se inserta con ese DNI; la unicidad de DNI reales la garantiza
-        uq_comensales_dni_real (IntegrityError -> 400 'Documento ya registrado').
-    """
     if data.tipo_comensal not in TIPOS_COMENSAL_VALIDOS:
         raise HTTPException(status_code=400, detail=f"Tipo de comensal inválido: use uno de {TIPOS_COMENSAL_VALIDOS}.")
     nombres = (data.nombres or '').strip()
@@ -395,10 +366,147 @@ def obtener_estadisticas_padron(db=Depends(get_db)):
                GROUP BY pd.tipo_comensal_venta;"""
         )
         resultados = cur.fetchall()
-        stats = {"Social": 0, "Afiliado": 0, "Normal": 0, "recaudacion_total": 0.0}
+        stats = {"Social": 0, "Afiliado": 0, "Normal": 0, "Cocinera": 0, "recaudacion_total": 0.0}
         for row in resultados:
             stats[row['tipo_comensal']] = int(row['total_raciones'])
             stats["recaudacion_total"] += float(row['recaudacion'])
         return stats
+    finally:
+        cur.close()
+
+
+# ==========================================
+# COM-63: CARGA MASIVA DE ATENCIONES HISTÓRICAS
+# ==========================================
+@router.post("/padron/carga-masiva")
+async def carga_masiva_historica(
+    file: UploadFile = File(...),
+    db=Depends(get_db)
+):
+    """
+    COM-63: carga masiva de atenciones históricas desde CSV.
+    Estructura del CSV: fecha;afiliados;publico;sociales;cocineras
+    - fecha: YYYY-MM-DD o DD/MM/YYYY
+    - afiliados: int >= 0
+    - publico: int >= 0 (mapeado a 'Normal')
+    - sociales: int >= 0 (mapeado a 'Social')
+    - cocineras: int >= 0 (nuevo tipo, precio 0.00)
+    
+    Retorna resumen con filas procesadas, omitidas y ventas creadas.
+    """
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(status_code=400, detail="El archivo debe ser CSV")
+    
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        # Leer contenido del CSV
+        contenido = await file.read()
+        texto = contenido.decode('utf-8-sig')  # utf-8-sig maneja BOM de Excel
+        
+        # Parsear CSV con separador ;
+        reader = csv.DictReader(io.StringIO(texto), delimiter=';')
+        
+        filas_procesadas = 0
+        filas_omitidas = 0
+        ventas_creadas = 0
+        detalle_omitidas = []
+        fechas = []
+        
+        # Obtener comensal genérico "Cocinera"
+        cur.execute("SELECT id FROM comensales WHERE documento_identidad = 'CO000000';")
+        comensal_cocinera = cur.fetchone()
+        if not comensal_cocinera:
+            raise HTTPException(status_code=500, detail="Comensal genérico 'Cocinera' no existe")
+        cocinera_id = comensal_cocinera['id']
+        
+        for idx, fila in enumerate(reader, start=2):  # start=2 porque fila 1 es header
+            try:
+                # Parsear fecha (aceptar YYYY-MM-DD o DD/MM/YYYY)
+                fecha_str = fila.get('fecha', '').strip()
+                if not fecha_str:
+                    detalle_omitidas.append({"fila": idx, "razon": "fecha vacía"})
+                    filas_omitidas += 1
+                    continue
+                
+                try:
+                    fecha = datetime.strptime(fecha_str, "%Y-%m-%d").date()
+                except ValueError:
+                    try:
+                        fecha = datetime.strptime(fecha_str, "%d/%m/%Y").date()
+                    except ValueError:
+                        detalle_omitidas.append({"fila": idx, "razon": f"fecha inválida: {fecha_str}"})
+                        filas_omitidas += 1
+                        continue
+                
+                # Parsear cantidades
+                afiliados = int(fila.get('afiliados', 0) or 0)
+                publico = int(fila.get('publico', 0) or 0)
+                sociales = int(fila.get('sociales', 0) or 0)
+                cocineras = int(fila.get('cocineras', 0) or 0)
+                
+                if afiliados + publico + sociales + cocineras == 0:
+                    detalle_omitidas.append({"fila": idx, "razon": "todos los tipos en 0"})
+                    filas_omitidas += 1
+                    continue
+                
+                # Insertar ventas para cada tipo
+                tipos_venta = [
+                    ('Afiliado', afiliados),
+                    ('Normal', publico),
+                    ('Social', sociales),
+                    ('Cocinera', cocineras),
+                ]
+                
+                for tipo, cantidad in tipos_venta:
+                    if cantidad > 0:
+                        # Determinar comensal_id y precio
+                        if tipo == 'Cocinera':
+                            comensal_id = cocinera_id
+                            precio = 0.00
+                        else:
+                            # Para otros tipos, usar comensal_id = NULL para históricos
+                            comensal_id = None
+                            precio = {'Afiliado': 3.00, 'Normal': 5.00, 'Social': 0.00}[tipo]
+                        
+                        monto = precio * cantidad
+                        
+                        cur.execute("""
+                            INSERT INTO padron_diario 
+                            (comensal_id, fecha, tipo_comensal_venta, raciones, monto_pagado, tipo_menu, observacion)
+                            VALUES (%s, %s, %s, %s, %s, 'Almuerzo regular', 'Carga histórica COM-63')
+                            ON CONFLICT DO NOTHING
+                            RETURNING id;
+                        """, (comensal_id, fecha, tipo, cantidad, monto))
+                        
+                        if cur.fetchone():
+                            ventas_creadas += 1
+                
+                filas_procesadas += 1
+                fechas.append(fecha)
+                
+            except Exception as e:
+                detalle_omitidas.append({"fila": idx, "razon": str(e)})
+                filas_omitidas += 1
+        
+        db.commit()
+        
+        rango = {
+            "desde": min(fechas).isoformat() if fechas else None,
+            "hasta": max(fechas).isoformat() if fechas else None
+        }
+        
+        return {
+            "filas_procesadas": filas_procesadas,
+            "filas_omitidas": filas_omitidas,
+            "ventas_creadas": ventas_creadas,
+            "detalle_omitidas": detalle_omitidas[:10],
+            "rango_fechas": rango
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error al procesar CSV: {str(e)}")
     finally:
         cur.close()

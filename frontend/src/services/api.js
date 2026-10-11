@@ -995,7 +995,7 @@ export const api = {
     },
 
     // ==========================================
-    // COMENSALES Y VENTAS (POS) — COM-62 v2: métodos consistentes con el resto del api
+    // COMENSALES Y VENTAS (POS) — COM-62 v2 + COM-63
     // ==========================================
     // COM-62 v2: autocompletado por nombre (excluye al Cliente Genérico).
     buscarComensalesPorNombre: async (q = '', limite = 8) => {
@@ -1014,7 +1014,6 @@ export const api = {
         return response.json();
     },
     // Búsqueda exacta por documento (usada por TablaVentasHoy y flujos antiguos).
-    // COM-62 v2: ahora consistente (lanza error si 404, retorna JSON parseado).
     buscarComensal: async (doc) => {
         const response = await fetch(`${API_BASE}/comensales/${doc}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Comensal no encontrado'));
@@ -1052,6 +1051,15 @@ export const api = {
     eliminarVenta: async (id) => {
         const response = await fetch(`${API_BASE}/padron/${id}`, { method: 'DELETE' });
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al eliminar la venta'));
+        return response.json();
+    },
+    // COM-63: carga masiva de atenciones históricas desde CSV.
+    cargaMasivaHistorica: async (formData) => {
+        const response = await fetch(`${API_BASE}/padron/carga-masiva`, {
+            method: 'POST',
+            body: formData
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al cargar archivo histórico'));
         return response.json();
     },
 

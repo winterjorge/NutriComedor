@@ -1,6 +1,7 @@
 /**
  * components/pos/FormularioVenta.jsx
- * Objetivo: COM-62 v2: atención ágil en ventanilla. Flujo:
+ * Objetivo: COM-62 v2 + COM-63: atención ágil en ventanilla con tipo "Cocinera".
+ * Flujo:
  *   1) Caja de NOMBRE con autocompletado (busca por nombre, excluye al Cliente Genérico).
  *   2) Al seleccionar una ficha: se usa para la venta. Si NO tiene DNI real, se muestra
  *      badge "Sin DNI" + botón "Completar DNI" (mini-modal para editar la ficha).
@@ -8,10 +9,11 @@
  *      nombre, reutilizable la próxima vez) o "Registrar con DNI" (formulario completo).
  *   4) El Cliente Genérico (es_generico=TRUE) NO aparece en el autocompletado: es reserva
  *      para cargas masivas históricas (no se usa en el POS diario).
+ *   5) COM-63: tipo "Cocinera" con precio 0.00.
  * Historial:
  *  - Sprint 1/2: versión original (búsqueda por DNI obligatorio).
- *  - COM-62 v2 (este archivo): identidad por nombre, DNI opcional, completado posterior.
- *    Fix: try/catch en confirmarVenta y registrarNuevo para mostrar errores del 422.
+ *  - COM-62 v2: identidad por nombre, DNI opcional, completado posterior.
+ *  - COM-63: tipo "Cocinera" agregado.
  * Uso: Montado por POSView.jsx en la columna izquierda del POS.
  */
 import React, { useState, useEffect, useRef } from 'react';
@@ -21,13 +23,14 @@ import { useParametros } from '../../context/ParametrosContext';
 import { ModalConfirmacion } from '../common/ModalConfirmacion';
 
 const DNI_SIN_DATO = '00000000';
-const TIPOS_COMENSAL = ['Social', 'Afiliado', 'Normal'];
+const TIPOS_COMENSAL = ['Social', 'Afiliado', 'Normal', 'Cocinera'];
 
 export const FormularioVenta = ({ onVentaRegistrada }) => {
     const { parametros } = useParametros();
     const precioSocial = parametros?.PRECIO_SOCIAL ?? 0;
     const precioAfiliado = parametros?.PRECIO_AFILIADO ?? 3;
     const precioNormal = parametros?.PRECIO_NORMAL ?? 5;
+    const precioCocinera = parametros?.PRECIO_COCINERA ?? 0;
     const alertaRaciones = parametros?.ALERTA_RACIONES_MAX || 3;
 
     // Autocompletado por nombre
@@ -184,7 +187,10 @@ export const FormularioVenta = ({ onVentaRegistrada }) => {
             setErrorVenta('No hay comensal seleccionado. Busque o registre un comensal primero.');
             return;
         }
-        const precio = tipoVenta === 'Social' ? precioSocial : tipoVenta === 'Afiliado' ? precioAfiliado : precioNormal;
+        const precio = tipoVenta === 'Social' ? precioSocial 
+            : tipoVenta === 'Afiliado' ? precioAfiliado 
+            : tipoVenta === 'Cocinera' ? precioCocinera
+            : precioNormal;
         try {
             await api.registrarVenta({
                 comensal_id: comensal.id,
@@ -212,7 +218,10 @@ export const FormularioVenta = ({ onVentaRegistrada }) => {
     };
 
     const calcularTotal = () => {
-        const p = tipoVenta === 'Social' ? precioSocial : tipoVenta === 'Afiliado' ? precioAfiliado : precioNormal;
+        const p = tipoVenta === 'Social' ? precioSocial 
+            : tipoVenta === 'Afiliado' ? precioAfiliado 
+            : tipoVenta === 'Cocinera' ? precioCocinera
+            : precioNormal;
         return (p * raciones).toFixed(2);
     };
 
@@ -342,6 +351,7 @@ export const FormularioVenta = ({ onVentaRegistrada }) => {
                                 <option value="Social">Social (S/ {precioSocial.toFixed(2)})</option>
                                 <option value="Afiliado">Afiliado (S/ {precioAfiliado.toFixed(2)})</option>
                                 <option value="Normal">Normal (S/ {precioNormal.toFixed(2)})</option>
+                                <option value="Cocinera">Cocinera (S/ {precioCocinera.toFixed(2)})</option>
                             </select>
                         </div>
 

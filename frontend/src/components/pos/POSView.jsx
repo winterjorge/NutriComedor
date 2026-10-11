@@ -1,116 +1,135 @@
-import React, { useState } from 'react';
-import { Lightbulb, AlertTriangle, AlertCircle } from 'lucide-react';
-import { usePOS } from '../../hooks/usePOS';
+/**
+ * components/pos/POSView.jsx
+ * Objetivo: Vista principal del POS (Punto de Venta). Muestra el formulario de venta,
+ *           la tabla de ventas del día, las estadísticas y la predicción de demanda.
+ *           COM-63: agrega stats de Cocineras y acceso a carga histórica.
+ * Historial:
+ *  - Sprint 1/2: versión original.
+ *  - COM-62 v2: integración con FormularioVenta COM-62 (autocompletado por nombre).
+ *  - COM-63: stats de Cocineras + botón de carga histórica.
+ */
+import React, { useState, useEffect } from 'react';
+import { Activity, TrendingUp, AlertTriangle, Upload } from 'lucide-react';
+import { api } from '../../services/api';
 import { useParametros } from '../../context/ParametrosContext';
 import { FormularioVenta } from './FormularioVenta';
 import { TablaVentasHoy } from './TablaVentasHoy';
 import { ModalEdicionVenta } from './ModalEdicionVenta';
+import { CargaHistoricaView } from './CargaHistoricaView';
 
 export const POSView = () => {
-    const { stats, ventasHoy, prediccion, refrescarDatos } = usePOS();
-    const { parametros, cargando } = useParametros(); // <-- CAMBIO: Usar useParametros
-    const [ventaEditando, setVentaEditando] = useState(null);
+    const { parametros } = useParametros();
+    const limiteSocial = parametros?.LIMITE_SOCIAL || 20;
+    const limiteAfiliado = parametros?.LIMITE_AFILIADO || 45;
+    const limiteCocinera = parametros?.LIMITE_COCINERA || 10;
 
-    // Si está cargando, mostrar spinner
-    if (cargando) {
-        return (
-            <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-emerald-600"></div>
-            </div>
-        );
-    }
+    const [stats, setStats] = useState({ Social: 0, Afiliado: 0, Normal: 0, Cocinera: 0, recaudacion_total: 0 });
+    const [ventas, setVentas] = useState([]);
+    const [prediccion, setPrediccion] = useState(null);
+    const [modalEditar, setModalEditar] = useState(null);
+    const [mostrarCarga, setMostrarCarga] = useState(false);
+
+    const cargarDatos = async () => {
+        try {
+            const [statsData, ventasData, predData] = await Promise.all([
+                api.getPadronStats(),
+                api.getVentasHoy(),
+                api.getPrediccionDemanda(new Date().toISOString().split('T')[0])
+            ]);
+            setStats(statsData);
+            setVentas(ventasData);
+            setPrediccion(predData);
+        } catch (e) {
+            console.error("Error cargando datos del POS:", e);
+        }
+    };
+
+    useEffect(() => {
+        cargarDatos();
+    }, []);
 
     const tSoc = stats.Social || 0;
     const tAfi = stats.Afiliado || 0;
-
-    // Usar parámetros dinámicos con fallback a valores por defecto
-    const limiteSocial = parametros?.LIMITE_SOCIAL || 20;
-    const limiteAfiliado = parametros?.LIMITE_AFILIADO || 45;
+    const tNor = stats.Normal || 0;
+    const tCoc = stats.Cocinera || 0;
 
     return (
-        <>
-            <div className="animate-in fade-in duration-300">
-                {prediccion && (
-                    <div className="bg-gradient-to-r from-blue-600 to-indigo-700 rounded-xl p-5 mb-8 text-white shadow-md flex items-center justify-between flex-wrap gap-4">
-                        <div className="flex items-center gap-4">
-                            <div className="bg-white/20 p-3 rounded-lg">
-                                <Lightbulb size={32} className="text-blue-100" />
-                            </div>
-                            <div>
-                                <h3 className="font-bold text-lg">Proyección de Cocina (Random Forest)</h3>
-                                <p className="text-blue-100 text-sm">La IA estima la demanda para planificar la olla de hoy:</p>
-                            </div>
-                        </div>
-                        <div className="flex gap-6 bg-white/10 px-5 py-3 rounded-xl border border-white/20">
-                            <div className="text-center">
-                                <p className="text-xs text-blue-200 uppercase">Social</p>
-                                <p className="text-xl font-bold">{prediccion.prediccion_social}</p>
-                            </div>
-                            <div className="text-center">
-                                <p className="text-xs text-blue-200 uppercase">Afiliados</p>
-                                <p className="text-xl font-bold">{prediccion.prediccion_afiliado}</p>
-                            </div>
-                            <div className="text-center">
-                                <p className="text-xs text-blue-200 uppercase">Normales</p>
-                                <p className="text-xl font-bold">{prediccion.prediccion_normal}</p>
-                            </div>
-                            <div className="text-center border-l border-white/20 pl-6">
-                                <p className="text-xs text-amber-200 uppercase">Cocinar</p>
-                                <p className="text-3xl font-black text-amber-300">{prediccion.total_raciones_sugeridas}</p>
-                            </div>
-                        </div>
-                    </div>
-                )}
+        <div className="animate-in fade-in duration-300 space-y-6">
+            <div className="flex justify-between items-center">
+                <h2 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
+                    <Activity className="text-emerald-600" size={28} />
+                    Punto de Venta
+                </h2>
+                <button
+                    onClick={() => setMostrarCarga(!mostrarCarga)}
+                    className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-sm font-medium transition-colors"
+                >
+                    <Upload size={16} />
+                    {mostrarCarga ? 'Ocultar Carga Histórica' : 'Carga Histórica'}
+                </button>
+            </div>
 
-                <h3 className="font-bold text-slate-700 mb-4 uppercase tracking-wider text-sm border-b pb-2">Progreso de Ventas Real (Hoy)</h3>
-                
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                    <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm text-center">
-                        <p className="text-xs font-semibold text-slate-500 uppercase">Recaudación</p>
-                        <p className="text-3xl font-black text-emerald-600 mt-1">S/ {(stats.recaudacion_total||0).toFixed(2)}</p>
-                    </div>
-                    
-                    <div className={`p-4 rounded-xl border shadow-sm text-center ${tSoc > limiteSocial ? 'bg-red-50 border-red-200' : 'bg-white border-slate-200'}`}>
-                        <p className="text-xs font-semibold uppercase text-slate-500">Sociales</p>
-                        <p className={`text-3xl font-black ${tSoc > limiteSocial ? 'text-red-600' : 'text-slate-700'}`}>
-                            {tSoc} <span className="text-sm font-medium text-slate-400">/ {limiteSocial}</span>
-                        </p>
-                    </div>
-                    
-                    <div className={`p-4 rounded-xl border shadow-sm text-center ${tAfi > limiteAfiliado ? 'bg-amber-50 border-amber-200' : 'bg-white border-slate-200'}`}>
-                        <p className="text-xs font-semibold uppercase text-slate-500">Afiliados</p>
-                        <p className={`text-3xl font-black ${tAfi > limiteAfiliado ? 'text-amber-600' : 'text-slate-700'}`}>
-                            {tAfi} <span className="text-sm font-medium text-slate-400">/ {limiteAfiliado}</span>
-                        </p>
-                    </div>
-                    
-                    <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm text-center">
-                        <p className="text-xs font-semibold text-slate-500 uppercase">Normales</p>
-                        <p className="text-3xl font-black text-blue-600 mt-1">{stats.Normal || 0}</p>
-                    </div>
+            {mostrarCarga && <CargaHistoricaView />}
+
+            {/* Stats */}
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+                <div className={`p-4 rounded-xl border shadow-sm text-center ${tSoc > limiteSocial ? 'bg-red-50 border-red-200' : 'bg-white border-slate-200'}`}>
+                    <p className="text-xs font-semibold uppercase text-slate-500">Social</p>
+                    <p className={`text-3xl font-black ${tSoc > limiteSocial ? 'text-red-600' : 'text-slate-700'}`}>
+                        {tSoc} <span className="text-sm font-medium text-slate-400">/ {limiteSocial}</span>
+                    </p>
+                    {tSoc > limiteSocial && <AlertTriangle size={16} className="text-red-600 mx-auto mt-1" />}
                 </div>
-
-                <div className="space-y-3 mb-8">
-                    {tSoc > limiteSocial && (
-                        <div className="bg-red-100 border border-red-300 text-red-800 px-4 py-3 rounded-lg flex items-center gap-3">
-                            <AlertTriangle className="shrink-0" />
-                            <p className="font-medium text-sm">¡Alerta! Límite de <b>Casos Sociales</b> sobrepasado.</p>
-                        </div>
-                    )}
-                    {tAfi > limiteAfiliado && (
-                        <div className="bg-amber-100 border border-amber-300 text-amber-800 px-4 py-3 rounded-lg flex items-center gap-3">
-                            <AlertCircle className="shrink-0" />
-                            <p className="font-medium text-sm">Atención: Cupo de <b>Afiliados</b> lleno. Cobrar precio normal.</p>
-                        </div>
-                    )}
+                <div className={`p-4 rounded-xl border shadow-sm text-center ${tAfi > limiteAfiliado ? 'bg-amber-50 border-amber-200' : 'bg-white border-slate-200'}`}>
+                    <p className="text-xs font-semibold uppercase text-slate-500">Afiliado</p>
+                    <p className={`text-3xl font-black ${tAfi > limiteAfiliado ? 'text-amber-600' : 'text-slate-700'}`}>
+                        {tAfi} <span className="text-sm font-medium text-slate-400">/ {limiteAfiliado}</span>
+                    </p>
+                    {tAfi > limiteAfiliado && <AlertTriangle size={16} className="text-amber-600 mx-auto mt-1" />}
                 </div>
-
-                <div className="grid md:grid-cols-2 gap-6">
-                    <FormularioVenta onVentaRegistrada={refrescarDatos} />
-                    <TablaVentasHoy ventas={ventasHoy} onEditar={setVentaEditando} />
+                <div className="p-4 rounded-xl border border-slate-200 bg-white shadow-sm text-center">
+                    <p className="text-xs font-semibold uppercase text-slate-500">Normal</p>
+                    <p className="text-3xl font-black text-slate-700">{tNor}</p>
+                </div>
+                <div className={`p-4 rounded-xl border shadow-sm text-center ${tCoc > limiteCocinera ? 'bg-purple-50 border-purple-200' : 'bg-white border-slate-200'}`}>
+                    <p className="text-xs font-semibold uppercase text-slate-500">Cocineras</p>
+                    <p className={`text-3xl font-black ${tCoc > limiteCocinera ? 'text-purple-600' : 'text-slate-700'}`}>
+                        {tCoc} <span className="text-sm font-medium text-slate-400">/ {limiteCocinera}</span>
+                    </p>
+                    {tCoc > limiteCocinera && <AlertTriangle size={16} className="text-purple-600 mx-auto mt-1" />}
+                </div>
+                <div className="p-4 rounded-xl border border-emerald-200 bg-emerald-50 shadow-sm text-center">
+                    <p className="text-xs font-semibold uppercase text-emerald-600">Recaudación</p>
+                    <p className="text-3xl font-black text-emerald-700">S/ {stats.recaudacion_total?.toFixed(2) || '0.00'}</p>
                 </div>
             </div>
-            {ventaEditando && <ModalEdicionVenta venta={ventaEditando} onClose={() => setVentaEditando(null)} onActualizacion={refrescarDatos} />}
-        </>
+
+            {/* Predicción */}
+            {prediccion && (
+                <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex items-center gap-3">
+                    <TrendingUp size={24} className="text-blue-600" />
+                    <div>
+                        <p className="text-sm font-bold text-blue-800">Predicción para hoy:</p>
+                        <p className="text-xs text-blue-600">
+                            Social: {prediccion.prediccion_social} | Afiliado: {prediccion.prediccion_afiliado} | Normal: {prediccion.prediccion_normal} | Total: {prediccion.total_raciones_sugeridas}
+                        </p>
+                    </div>
+                </div>
+            )}
+
+            {/* Formulario y Tabla */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <FormularioVenta onVentaRegistrada={cargarDatos} />
+                <TablaVentasHoy ventas={ventas} onEditar={setModalEditar} />
+            </div>
+
+            {modalEditar && (
+                <ModalEdicionVenta
+                    venta={modalEditar}
+                    onClose={() => setModalEditar(null)}
+                    onActualizacion={cargarDatos}
+                />
+            )}
+        </div>
     );
 };
