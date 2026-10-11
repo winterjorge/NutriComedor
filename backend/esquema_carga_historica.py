@@ -25,7 +25,6 @@ BEGIN
         ALTER TABLE comensales ADD CONSTRAINT comensales_tipo_comensal_check
             CHECK (tipo_comensal IN ('Social', 'Afiliado', 'Normal', 'Cocinera'));
     ELSE
-        -- Si ya existe, recrear con el nuevo valor
         ALTER TABLE comensales DROP CONSTRAINT comensales_tipo_comensal_check;
         ALTER TABLE comensales ADD CONSTRAINT comensales_tipo_comensal_check
             CHECK (tipo_comensal IN ('Social', 'Afiliado', 'Normal', 'Cocinera'));
@@ -71,18 +70,22 @@ BEGIN
 END $$;
 """
 
-# 4) Seed: comensal genérico "Cocinera"
+# 4) Seed: comensal genérico "Cocinera" (FIX: usa WHERE NOT EXISTS porque el UNIQUE de documento_identidad fue eliminado en COM-62)
 SEED_COMENSAL_COCINERA = """
 INSERT INTO comensales (tipo_documento, documento_identidad, nombres, tipo_comensal)
-VALUES ('DNI', 'CO000000', 'Cocinera', 'Cocinera')
-ON CONFLICT (documento_identidad) DO NOTHING;
+SELECT 'DNI', 'CO000000', 'Cocinera', 'Cocinera'
+WHERE NOT EXISTS (
+    SELECT 1 FROM comensales WHERE documento_identidad = 'CO000000' AND tipo_comensal = 'Cocinera'
+);
 """
 
-# 5) Seed: precio 0.00 para Cocinera
+# 5) Seed: precio 0.00 para Cocinera (FIX: usa WHERE NOT EXISTS porque no hay UNIQUE en tipo_comensal, vigente_desde)
 SEED_PRECIO_COCINERA = """
 INSERT INTO precios_venta (tipo_comensal, precio, observacion)
-VALUES ('Cocinera', 0.00, 'Menú a costo cero para staff del comedor')
-ON CONFLICT (tipo_comensal, vigente_desde) DO NOTHING;
+SELECT 'Cocinera', 0.00, 'Menú a costo cero para staff del comedor'
+WHERE NOT EXISTS (
+    SELECT 1 FROM precios_venta WHERE tipo_comensal = 'Cocinera'
+);
 """
 
 # 6) Seed: parámetros PRECIO_COCINERA y LIMITE_COCINERA
@@ -106,7 +109,7 @@ def aplicar_esquema_carga_historica(cur):
     
     # Auditoría
     cur.execute("""
-        SELECT COUNT(*) AS n FROM comensales WHERE documento_identidad = 'CO000000';
+        SELECT COUNT(*) AS n FROM comensales WHERE documento_identidad = 'CO000000' AND tipo_comensal = 'Cocinera';
     """)
     comensal_ok = int(cur.fetchone()['n']) == 1
     
