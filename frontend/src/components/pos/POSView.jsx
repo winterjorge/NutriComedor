@@ -1,8 +1,7 @@
 /**
  * components/pos/POSView.jsx
- * Objetivo: Vista principal del POS (Punto de Venta). Muestra el formulario de venta,
- *           la tabla de ventas del día, las estadísticas y la predicción de demanda.
- *           COM-63: agrega stats de Cocineras (fijo 20) y acceso a carga histórica.
+ * Objetivo: Vista principal del POS. Muestra formulario, tabla, estadísticas y predicción.
+ * COM-64 v3: Muestra mensaje de "datos insuficientes" si el backend devuelve null.
  */
 import React, { useState } from 'react';
 import { Lightbulb, AlertTriangle, AlertCircle, Upload } from 'lucide-react';
@@ -19,7 +18,6 @@ export const POSView = () => {
     const [ventaEditando, setVentaEditando] = useState(null);
     const [mostrarCarga, setMostrarCarga] = useState(false);
 
-    // Si está cargando, mostrar spinner
     if (cargando) {
         return (
             <div className="flex items-center justify-center h-64">
@@ -32,16 +30,13 @@ export const POSView = () => {
     const tAfi = stats.Afiliado || 0;
     const tNor = stats.Normal || 0;
     
-    // Usar parámetros dinámicos con fallback a valores por defecto (SOLO para las alertas)
     const limiteSocial = parametros?.LIMITE_SOCIAL || 20;
     const limiteAfiliado = parametros?.LIMITE_AFILIADO || 45;
 
-    // Calcular total de predicción incluyendo cocineras (20 menús fijos diarios)
-    const totalPrediccion = prediccion 
-        ? prediccion.prediccion_social + prediccion.prediccion_afiliado + prediccion.prediccion_normal + 20
+    const totalPrediccion = prediccion
+        ? prediccion[0] + prediccion[1] + prediccion[2] + 20
         : 0;
 
-    // Formatear fecha actual
     const fechaHoy = new Date().toLocaleDateString('es-PE', {
         weekday: 'long',
         year: 'numeric',
@@ -52,7 +47,6 @@ export const POSView = () => {
     return (
         <>
             <div className="animate-in fade-in duration-300">
-                {/* Botón Carga Histórica */}
                 <div className="flex justify-end mb-4">
                     <button
                         onClick={() => setMostrarCarga(!mostrarCarga)}
@@ -65,8 +59,18 @@ export const POSView = () => {
 
                 {mostrarCarga && <CargaHistoricaView />}
 
-                {/* PREDICCIÓN - Estilo grande y resaltado */}
-                {prediccion && (
+                {/* ZONA DE PREDICCIÓN */}
+                {prediccion === null ? (
+                    <div className="bg-amber-50 border border-amber-200 rounded-xl p-6 mb-8 text-amber-800 shadow-sm flex items-center gap-4">
+                        <AlertCircle size={32} className="text-amber-600 shrink-0" />
+                        <div>
+                            <h3 className="font-bold text-lg">Datos insuficientes</h3>
+                            <p className="text-amber-700 text-sm">
+                                Te faltan datos para poder generar una predicción precisa para este día de la semana.
+                            </p>
+                        </div>
+                    </div>
+                ) : prediccion && (
                     <div className="bg-gradient-to-r from-blue-600 to-indigo-700 rounded-xl p-6 mb-8 text-white shadow-lg">
                         <div className="flex items-start justify-between flex-wrap gap-4">
                             <div className="flex items-center gap-4">
@@ -81,15 +85,15 @@ export const POSView = () => {
                             <div className="flex gap-6 bg-white/10 px-6 py-4 rounded-xl border border-white/20">
                                 <div className="text-center">
                                     <p className="text-xs text-blue-200 uppercase font-semibold">Social</p>
-                                    <p className="text-2xl font-bold">{prediccion.prediccion_social}</p>
+                                    <p className="text-2xl font-bold">{prediccion[0]}</p>
                                 </div>
                                 <div className="text-center">
                                     <p className="text-xs text-blue-200 uppercase font-semibold">Afiliados</p>
-                                    <p className="text-2xl font-bold">{prediccion.prediccion_afiliado}</p>
+                                    <p className="text-2xl font-bold">{prediccion[1]}</p>
                                 </div>
                                 <div className="text-center">
                                     <p className="text-xs text-blue-200 uppercase font-semibold">Normales</p>
-                                    <p className="text-2xl font-bold">{prediccion.prediccion_normal}</p>
+                                    <p className="text-2xl font-bold">{prediccion[2]}</p>
                                 </div>
                                 <div className="text-center">
                                     <p className="text-xs text-blue-200 uppercase font-semibold">Cocineras</p>
@@ -104,7 +108,7 @@ export const POSView = () => {
                     </div>
                 )}
 
-                {/* ESTADÍSTICAS DE VENTAS REALES DEL DÍA (SOLO NÚMEROS REALES, SIN LÍMITES) */}
+                {/* ESTADÍSTICAS DE VENTAS REALES DEL DÍA */}
                 <h3 className="font-bold text-slate-700 mb-4 uppercase tracking-wider text-sm border-b pb-2">
                     Progreso de Ventas Real (Hoy)
                 </h3>
@@ -135,7 +139,7 @@ export const POSView = () => {
                     </div>
                 </div>
 
-                {/* Alertas (solo para Sociales y Afiliados) */}
+                {/* Alertas */}
                 <div className="space-y-3 mb-8">
                     {tSoc > limiteSocial && (
                         <div className="bg-red-100 border border-red-300 text-red-800 px-4 py-3 rounded-lg flex items-center gap-3">
