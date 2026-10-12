@@ -1,28 +1,40 @@
 """
 routers/subsidio.py
 Objetivo: COM-59A: CRUD del subsidio mensual de víveres por comedor (mes calendario).
-          GET  /subsidio?comedor_id&anio&mes  -> líneas del mes con equivalencia en gramos.
-          POST /subsidio                      -> alta/actualización (upsert por período).
-          PUT  /subsidio/{id}                 -> edición de cantidad/unidad/observación.
-          DELETE /subsidio/{id}               -> baja de una línea del período.
+GET  /subsidio?comedor_id&anio&mes  -> líneas del mes con equivalencia en gramos.
+POST /subsidio                      -> alta/actualización (upsert por período).
+PUT  /subsidio/{id}                 -> edición de cantidad/unidad/observación.
+DELETE /subsidio/{id}               -> baja de una línea del período.
+COM-69 (este archivo): REPORTE DE USO DEL SUBSIDIO para el administrativo municipal:
+    GET /subsidio/comedores-visibles -> comedores que el usuario puede leer (selector).
+    GET /subsidio/reporte-uso        -> por comedor y mes: stock recibido, consumo
+        proyectado acumulado de TODAS las planificaciones del mes (gramos por
+        ingrediente), restante, % de uso y estado (OK / POR AGOTAR / AGOTADO /
+        SIN CONSUMO). Es el control semanal cruzado de la Solución B: la lista de
+        compras cubre contra el stock mensual y este reporte vigila el acumulado.
+    El enlace planificacion->comedor se resuelve DE FORMA DEFENSIVA (columna
+    comedor_id o candidata_id en presupuesto_semanal), inspeccionando el esquema en
+    tiempo de ejecución, igual que _comedores_alcance_municipal.
 Permisos (COM-59A, SQL directo sin helpers externos):
-          Gestión (POST/PUT/DELETE): Admin de Sistemas (cualquier comedor) o Directivo
-          activo (Presidente/Tesorero/Secretario) DEL comedor objetivo.
-          Lectura (GET): los anteriores + perfiles con módulo 'subsidio' cuyo alcance
-          municipal (distrito de su municipalidad, COM-27) cubra el comedor.
+    Gestión (POST/PUT/DELETE): Admin de Sistemas o Directivo activo DEL comedor.
+    Lectura (GET y reporte): los anteriores + perfiles con módulo 'subsidio' cuyo
+    alcance municipal (distrito de su municipalidad, COM-27) cubra el comedor.
 Uso: Registrado en main.py con prefijo /api/v1.
-Referencia: tickets COM-59 (solo trazabilidad).
+Referencia: tickets COM-59 / COM-69 (solo trazabilidad).
 """
 import traceback
 from typing import Optional
-
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
-
 from database import get_db
 from permisos import es_admin_sistema
 from subsidio_motor import subsidio_gramos_del_mes
+# COM-69: conversión unidad de receta -> gramos compartida con la lista de compras
+try:
+    from routers.planificacion import _gramos_de_ingrediente
+except Exception:  # degradación controlada si el paquete se importa como módulo suelto
+    from planificacion import _gramos_de_ingrediente
 
 router = APIRouter(prefix="/subsidio", tags=["Subsidio de Víveres (COM-59A)"])
 
@@ -97,7 +109,7 @@ def _comedores_alcance_municipal(cur, usuario_id: int) -> set:
         SELECT c.id
         FROM usuario_municipalidad um
         JOIN municipalidades m ON m.id = um.{col_mun}
-        JOIN comedores c ON c.{col_dist if col_dist in ('distrito_id',) else 'distrito_id'} = m.{col_dist}
+        JOIN comedores c ON c.{col_dist} = m.{col_dist}
         WHERE um.usuario_id = %s;
     """, (usuario_id,))
     return {f['id'] for f in cur.fetchall()}
@@ -138,7 +150,89 @@ def _validar_gestion(cur, usuario_id: int, comedor_id: int) -> None:
 
 
 # ==========================================
-# ENDPOINTS
+# COM-69: HELPERS DEL REPORTE DE USO
+# ==========================================
+def _expresion_comedor_de_plan(cur):
+    """
+    COM-69: resuelve defensivamente cómo se vincula una planificación
+    (presupuesto_semanal) con su comedor: columna directa comedor_id, o indirecta vía
+    candidata_id -> planificaciones_candidatas.comedor_id. Retorna el fragmento SQL o
+    None si el esquema no ofrece enlace (el reporte operará sin filtro de comedor).
+    """
+    cur.execute("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'presupuesto_semanal';
+    """)
+    cols = {r['column_name'] for r in cur.fetchall()}
+    if 'comedor_id' in cols:
+        return 'ps.comedor_id'
+    if 'candidata_id' in cols:
+        return ('(SELECT pc.comedor_id FROM planificaciones_candidatas pc '
+                'WHERE pc.id = ps.candidata_id)')
+    return None
+
+
+def _consumo_planes_del_mes(cur, comedor_id, anio, mes):
+    """
+    COM-69: consumo proyectado acumulado (gramos/ml base por ingrediente) de TODAS las
+    planificaciones cuya fecha_referencia cae en el mes, opcionalmente filtradas por
+    comedor. Retorna (lista_de_planes_con_consumo, aviso_de_enlace).
+    """
+    expr = _expresion_comedor_de_plan(cur)
+    aviso = None
+    if expr is not None and comedor_id is not None:
+        cur.execute(f"""
+            SELECT ps.id, ps.fecha_referencia
+            FROM presupuesto_semanal ps
+            WHERE {expr} = %s
+              AND ps.fecha_referencia >= make_date(%s, %s, 1)
+              AND ps.fecha_referencia <= (make_date(%s, %s, 1) + INTERVAL '1 month - 1 day')::date
+            ORDER BY ps.id;
+        """, (comedor_id, anio, mes, anio, mes))
+    else:
+        if comedor_id is not None:
+            aviso = ('No se encontró enlace planificación->comedor en el esquema; '
+                     'el consumo se calculó con todas las planificaciones del mes.')
+        cur.execute("""
+            SELECT ps.id, ps.fecha_referencia
+            FROM presupuesto_semanal ps
+            WHERE ps.fecha_referencia >= make_date(%s, %s, 1)
+              AND ps.fecha_referencia <= (make_date(%s, %s, 1) + INTERVAL '1 month - 1 day')::date
+            ORDER BY ps.id;
+        """, (anio, mes, anio, mes))
+
+    planes = []
+    for p in cur.fetchall():
+        cur.execute("""
+            SELECT pd.receta_id, pd.total_comensales
+            FROM planificacion_dia pd
+            WHERE pd.presupuesto_semanal_id = %s;
+        """, (p['id'],))
+        consumo = {}
+        for d in cur.fetchall():
+            cur.execute("""
+                SELECT ri.ingrediente_id, ri.unidad_medida_id, ri.cantidad_requerida,
+                       COALESCE(NULLIF(ra.raciones, 0), 1) AS raciones
+                FROM receta_ingrediente ri
+                JOIN recetas_almuerzo ra ON ra.id = ri.receta_id
+                WHERE ri.receta_id = %s;
+            """, (d['receta_id'],))
+            for linea in cur.fetchall():
+                cantidad_total = (float(linea['cantidad_requerida']) / float(linea['raciones'])) \
+                    * float(d['total_comensales'])
+                gramos, _origen = _gramos_de_ingrediente(
+                    cur, linea['ingrediente_id'], linea['unidad_medida_id'], cantidad_total)
+                consumo[linea['ingrediente_id']] = consumo.get(linea['ingrediente_id'], 0.0) + gramos
+        planes.append({
+            'plan_id': p['id'],
+            'fecha_referencia': p['fecha_referencia'].isoformat() if p['fecha_referencia'] else None,
+            'consumo_gramos': {k: round(v, 2) for k, v in consumo.items()},
+        })
+    return planes, aviso
+
+
+# ==========================================
+# ENDPOINTS COM-59A (CRUD)
 # ==========================================
 @router.get("")
 def listar_subsidio(
@@ -281,5 +375,135 @@ def eliminar_subsidio(subsidio_id: int, usuario_solicitante_id: int, db=Depends(
         db.rollback()
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error al eliminar el subsidio ({type(e).__name__}): {e}")
+    finally:
+        cur.close()
+
+
+# ==========================================
+# COM-69: SELECTOR Y REPORTE DE USO DEL SUBSIDIO
+# ==========================================
+@router.get("/comedores-visibles")
+def comedores_visibles(usuario_solicitante_id: int, db=Depends(get_db)):
+    """
+    COM-69: comedores cuyas lecturas de subsidio están permitidas al usuario:
+    Admin de Sistemas -> todos; Directivo activo -> los suyos; perfil municipal con
+    módulo 'subsidio' -> los de su distrito. Sirve para el selector del reporte.
+    """
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        if es_admin_sistema(cur, usuario_solicitante_id):
+            cur.execute("SELECT id, nombre FROM comedores ORDER BY nombre;")
+            return cur.fetchall()
+        visibles = _comedores_directivo(cur, usuario_solicitante_id)
+        if _tiene_modulo_subsidio(cur, usuario_solicitante_id):
+            visibles |= _comedores_alcance_municipal(cur, usuario_solicitante_id)
+        if not visibles:
+            return []
+        cur.execute("SELECT id, nombre FROM comedores WHERE id = ANY(%s) ORDER BY nombre;",
+                    (list(visibles),))
+        return cur.fetchall()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al listar comedores visibles: {e}")
+    finally:
+        cur.close()
+
+
+@router.get("/reporte-uso")
+def reporte_uso_subsidio(
+    usuario_solicitante_id: int,
+    comedor_id: int = Query(...),
+    anio: int = Query(...),
+    mes: int = Query(..., ge=1, le=12),
+    db=Depends(get_db),
+):
+    """
+    COM-69: reporte de uso del subsidio por comedor y mes para el administrativo
+    municipal (y directiva/admin): stock recibido (unidad y gramos/ml base), consumo
+    proyectado ACUMULADO de todas las planificaciones del mes, restante, % de uso y
+    estado por ingrediente:
+      OK           -> consumo <= 90% del stock
+      POR AGOTAR   -> 90% < consumo <= 100%
+      AGOTADO      -> consumo > stock (se deberá comprar el excedente)
+      SIN CONSUMO  -> stock registrado sin uso proyectado en el mes
+    Incluye el detalle por planificación para auditoría semanal.
+    """
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        _validar_lectura(cur, usuario_solicitante_id, comedor_id)
+        cur.execute("SELECT nombre FROM comedores WHERE id = %s;", (comedor_id,))
+        c = cur.fetchone()
+        if not c:
+            raise HTTPException(status_code=404, detail="Comedor no encontrado.")
+
+        # Stock del mes (gramos/ml base por ingrediente) + líneas originales
+        cur.execute("""
+            SELECT sm.ingrediente_id, i.nombre AS ingrediente,
+                   sm.cantidad_recibida, um.nombre AS unidad_recibida,
+                   um.abreviatura AS unidad_abrev
+            FROM subsidio_mensual sm
+            JOIN ingredientes i ON i.id = sm.ingrediente_id
+            JOIN unidades_medida um ON um.id = sm.unidad_medida_id
+            WHERE sm.comedor_id = %s AND sm.anio = %s AND sm.mes = %s
+            ORDER BY i.nombre;
+        """, (comedor_id, anio, mes))
+        lineas_stock = cur.fetchall()
+        stock = subsidio_gramos_del_mes(cur, comedor_id, anio, mes) or {}
+
+        planes, aviso = _consumo_planes_del_mes(cur, comedor_id, anio, mes)
+        consumo_total = {}
+        for p in planes:
+            for ing_id, g in p['consumo_gramos'].items():
+                consumo_total[ing_id] = consumo_total.get(ing_id, 0.0) + g
+
+        lineas = []
+        for l in lineas_stock:
+            ing_id = l['ingrediente_id']
+            g_stock = float(stock.get(ing_id, 0.0) or 0.0)
+            g_consumo = float(consumo_total.get(ing_id, 0.0) or 0.0)
+            restante = g_stock - g_consumo
+            pct = round((g_consumo / g_stock) * 100, 1) if g_stock > 0 else None
+            if g_consumo <= 0:
+                estado = 'SIN_CONSUMO'
+            elif g_consumo > g_stock:
+                estado = 'AGOTADO'
+            elif pct is not None and pct >= 90:
+                estado = 'POR_AGOTAR'
+            else:
+                estado = 'OK'
+            lineas.append({
+                'ingrediente_id': ing_id,
+                'ingrediente': l['ingrediente'],
+                'cantidad_recibida': float(l['cantidad_recibida']),
+                'unidad_recibida': l['unidad_recibida'],
+                'unidad_abrev': l['unidad_abrev'],
+                'gramos_stock': round(g_stock, 2),
+                'gramos_consumo': round(g_consumo, 2),
+                'gramos_restante': round(restante, 2),
+                'pct_uso': pct,
+                'estado': estado,
+            })
+
+        return {
+            'comedor_id': comedor_id,
+            'comedor_nombre': c['nombre'],
+            'anio': anio,
+            'mes': mes,
+            'lineas': lineas,
+            'planes': planes,
+            'n_planes_del_mes': len(planes),
+            'aviso_enlace': aviso,
+            'totales': {
+                'ingredientes_con_subsidio': len(lineas),
+                'ingredientes_agotados': sum(1 for x in lineas if x['estado'] == 'AGOTADO'),
+                'ingredientes_por_agotar': sum(1 for x in lineas if x['estado'] == 'POR_AGOTAR'),
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error al generar el reporte de uso ({type(e).__name__}): {e}")
     finally:
         cur.close()
