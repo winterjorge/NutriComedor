@@ -1,47 +1,61 @@
 /**
- * services/api.js
- * Objetivo: Servicio centralizado de comunicación HTTP con la API del backend.
- *           Todos los componentes consumen este módulo en lugar de hacer fetch directo,
- *           lo que garantiza un manejo uniforme de errores, cabeceras y endpoints.
- * Uso: Importar `api` en hooks y componentes para consumir los endpoints del sistema.
- * Historial:
- *   COM-17: parser defensivo `leerErrorSeguro`.
- *   COM-19: endpoints de autenticación (login, cambiar-clave).
- *   COM-20: getContextoSeleccion y verificarMembresia.
- *   COM-21: bloque COMEDORES (CRUD, usuarios por comedor, asociación, estado, búsqueda).
- *   COM-22: bloque GRUPOS (catálogo, membresías, asignación y estado).
- *   COM-23: bloque USUARIOS, MUNICIPALIDADES y extensiones de GRUPOS.
- *   COM-25: bloque VISTAS (módulos, matriz de permisos, módulos efectivos).
- *   COM-26: flujo CRUD de usuarios por perfil + búsquedas de municipalidades/comedores.
- *   COM-5:  bloque KMEANS (clustering nutricional del recetario).
- *   COM-8:  bloque PROPUESTAS (motor greedy de menú semanal).
- *   COM-5 v4 / COM-8 v7: KMEANS con usuarioSolicitanteId + proteínas configurables +
- *           bloque MODELOS_ML (panel de gráficos exclusivo del Admin).
- *   COM-38: resetearClaveUsuario (reset/cambio de clave por Admin de Sistemas).
- *   COM-39: bloque DIRECTIVOS DE COMEDOR (búsqueda por distrito, listado, lotes).
- *   COM-37 v1/v5/v6/v8: bloque GESTION_INGREDIENTES (ingredientes CRUD sin borrado,
- *           insumos del ingrediente con precio de hoy y fuente, búsqueda y vinculación
- *           de insumos, insumos manuales, equivalencias uso->gramos, precios manuales
- *           por insumo, legacy por ingrediente, re-emparejado y duplicados/fusión).
- *   COM-48: en RECETAS: getComponentesReceta, limpiarIngredientesReceta,
- *           getCategoriasAlimentos y createIngredienteDesdeReceta.
- *   COM-50 v1/v2/v3: bloque REPORTES DE GESTIÓN: getAlcanceReportes, getReporteGestion
- *           (nivel/zona) y getPlanesGestion.
- *   COM-57: getObsoletosIngredientes (migración de sinónimos fusionados).
- *   COM-59A: bloques SUBSIDIO DE VÍVERES (getSubsidioMes, registrarSubsidio,
- *           editarSubsidio, eliminarSubsidio) y PRECIOS DE VENTA (getPreciosVentaVigentes,
- *           getHistorialPreciosVenta, registrarPrecioVenta).
- *   COM-59A v2 (este archivo): getHistorialPreciosVenta acepta `params` y envía
- *           `usuario_solicitante_id` (obligatorio tras el fix de seguridad del backend
- *           v2); con esto PreciosVentaView deja de degradar con banner y carga el
- *           historial completo. Ningún otro método se modifica.
- */
-
+services/api.js
+Objetivo: Servicio centralizado de comunicación HTTP con la API del backend.
+      Todos los componentes consumen este módulo en lugar de hacer fetch directo,
+      lo que garantiza un manejo uniforme de errores, cabeceras y endpoints.
+Uso: Importar `api` en hooks y componentes para consumir los endpoints del sistema.
+Historial:
+COM-17: parser defensivo `leerErrorSeguro`.
+COM-19: endpoints de autenticación (login, cambiar-clave).
+COM-20: getContextoSeleccion y verificarMembresia.
+COM-21: bloque COMEDORES (CRUD, usuarios por comedor, asociación, estado, búsqueda).
+COM-22: bloque GRUPOS (catálogo, membresías, asignación y estado).
+COM-23: bloque USUARIOS, MUNICIPALIDADES y extensiones de GRUPOS.
+COM-25: bloque VISTAS (módulos, matriz de permisos, módulos efectivos).
+COM-26: flujo CRUD de usuarios por perfil + búsquedas de municipalidades/comedores.
+COM-5:  bloque KMEANS (clustering nutricional del recetario).
+COM-8:  bloque PROPUESTAS (motor greedy de menú semanal).
+COM-5 v4 / COM-8 v7: KMEANS con usuarioSolicitanteId + proteínas configurables +
+      bloque MODELOS_ML (panel de gráficos exclusivo del Admin).
+COM-38: resetearClaveUsuario (reset/cambio de clave por Admin de Sistemas).
+COM-39: bloque DIRECTIVOS DE COMEDOR (búsqueda por distrito, listado, lotes).
+COM-37 v1/v5/v6/v8: bloque GESTION_INGREDIENTES (ingredientes CRUD sin borrado,
+      insumos del ingrediente con precio de hoy y fuente, búsqueda y vinculación
+      de insumos, insumos manuales, equivalencias uso->gramos, precios manuales
+      por insumo, legacy por ingrediente, re-emparejado y duplicados/fusión).
+COM-48: en RECETAS: getComponentesReceta, limpiarIngredientesReceta,
+      getCategoriasAlimentos y createIngredienteDesdeReceta.
+COM-50 v1/v2/v3: bloque REPORTES DE GESTIÓN: getAlcanceReportes, getReporteGestion
+      (nivel/zona) y getPlanesGestion.
+COM-57: getObsoletosIngredientes (migración de sinónimos fusionados).
+COM-59A: bloques SUBSIDIO DE VÍVERES (getSubsidioMes, registrarSubsidio,
+      editarSubsidio, eliminarSubsidio) y PRECIOS DE VENTA (getPreciosVentaVigentes,
+      getHistorialPreciosVenta, registrarPrecioVenta).
+COM-59A v2: getHistorialPreciosVenta acepta `params` y envía
+      `usuario_solicitante_id` (obligatorio tras el fix de seguridad del backend
+      v2); con esto PreciosVentaView deja de degradar con banner y carga el
+      historial completo. Ningún otro método se modifica.
+COM-62 v2 (este archivo): bloque POS reconstruido como superconjunto del original:
+      * Nuevos: buscarComensalesPorNombre (autocompletado) y editarComensal
+        (completar/corregir DNI después).
+      * buscarComensal / registrarComensal / registrarVenta / modificarVenta /
+        eliminarVenta pasan a retornar JSON parseado y a lanzar Error con
+        leerErrorSeguro (fix del bug "l.json is not a function" de
+        ModalEdicionVenta: las versiones raw-fetch devolvían el Response crudo).
+      * Las 5 versiones originales raw-fetch quedan COMENTADAS al final del
+        bloque por trazabilidad (convención del proyecto: nada se elimina).
+COM-63: cargaMasivaHistorica (POST /padron/carga-masiva, multipart CSV
+      fecha;afiliados;publico;sociales;cocineras).
+COM-65: getListaCompras documenta el filtro opcional por día (la firma ya lo
+      traía; se agrega el comentario de trazabilidad en PLANIFICACIONES).
+COM-68: reactivarIngrediente (POST /ingredientes-admin/{id}/reactivar): quita el
+      prefijo [OBSOLETO] y devuelve el canónico al catálogo activo.
+*/
 const API_BASE = '/api/v1';
 
 /**
- * Parser defensivo de errores: si el cuerpo no es JSON, devuelve un mensaje legible.
- */
+Parser defensivo de errores: si el cuerpo no es JSON, devuelve un mensaje legible.
+*/
 const leerErrorSeguro = async (response, mensajePorDefecto) => {
     try {
         const data = await response.json();
@@ -84,7 +98,6 @@ export const api = {
             return { ok: false, status: 0, data: { detail: 'Error de conexión con el servidor.' } };
         }
     },
-
     // ==========================================
     // PARÁMETROS DINÁMICOS
     // ==========================================
@@ -93,7 +106,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener parámetros'));
         return response.json();
     },
-
     // ==========================================
     // COMEDORES (COM-21) Y CONTEXTO DE SELECCIÓN (COM-20)
     // ==========================================
@@ -178,7 +190,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al verificar la membresía'));
         return response.json();
     },
-
     // ==========================================
     // DIRECTIVOS DE COMEDOR (COM-39)
     // ==========================================
@@ -204,9 +215,8 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al aplicar los cambios de directivos'));
         return response.json();
     },
-
     // ==========================================
-    // GESTIÓN DE INGREDIENTES (COM-37 v1/v5/v6/v8 + COM-57) — exclusivo Admin de Sistemas
+    // GESTIÓN DE INGREDIENTES (COM-37 v1/v5/v6/v8 + COM-57 + COM-68) — exclusivo Admin de Sistemas
     // ==========================================
     getIngredientesAdmin: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/ingredientes-admin?usuario_solicitante_id=${usuarioSolicitanteId}`);
@@ -369,6 +379,18 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al fusionar ingredientes'));
         return response.json();
     },
+    // COM-68: reactivar un sinónimo obsoleto (quita el prefijo [OBSOLETO] y lo
+    // devuelve al catálogo activo). El backend rechaza (400) si ya existe un
+    // ingrediente activo con el mismo nombre normalizado.
+    reactivarIngrediente: async (ingredienteId, data) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/${ingredienteId}/reactivar`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al reactivar el ingrediente'));
+        return response.json();
+    },
     // LEGACY COM-37 v1: precios manuales por ingrediente (fallback de resolución)
     getPreciosManuales: async (ingredienteId, usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/ingredientes-admin/${ingredienteId}/precios-manuales?usuario_solicitante_id=${usuarioSolicitanteId}`);
@@ -391,7 +413,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al desactivar el precio manual'));
         return response.json();
     },
-
     // ==========================================
     // GRUPOS, PRIVILEGIOS Y ROLES TEMPORALES (COM-22 / COM-23)
     // ==========================================
@@ -476,7 +497,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al revocar el rol temporal'));
         return response.json();
     },
-
     // ==========================================
     // PERMISOS POR VISTAS (COM-25)
     // ==========================================
@@ -504,7 +524,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener sus módulos permitidos'));
         return response.json();
     },
-
     // ==========================================
     // USUARIOS: FLUJO CRUD POR PERFIL (COM-23 / COM-26 / COM-38 / COM-56)
     // ==========================================
@@ -584,7 +603,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al actualizar la política'));
         return response.json();
     },
-
     // ==========================================
     // MUNICIPALIDADES (COM-23)
     // ==========================================
@@ -627,7 +645,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al buscar municipalidades'));
         return response.json();
     },
-
     // ==========================================
     // UBICACIÓN GEOGRÁFICA (COM-27)
     // ==========================================
@@ -651,7 +668,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener municipalidades'));
         return response.json();
     },
-
     // ==========================================
     // CLUSTERING K-MEANS DEL RECETARIO (COM-5 / COM-5 v4)
     // ==========================================
@@ -699,7 +715,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al guardar la configuración de proteínas'));
         return response.json();
     },
-
     // ==========================================
     // PANEL DE GRÁFICOS DE MACHINE LEARNING (COM-5 v4 / COM-8 v7)
     // ==========================================
@@ -723,7 +738,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar el gráfico del Greedy Search'));
         return response.json();
     },
-
     // ==========================================
     // PROPUESTAS DE MENÚ SEMANAL (COM-8)
     // ==========================================
@@ -760,7 +774,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el detalle del menú'));
         return response.json();
     },
-
     // ==========================================
     // REPORTES DE GESTIÓN (COM-50 / HU-10) — alcances por perfil (v3)
     // ==========================================
@@ -790,7 +803,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener los planes disponibles'));
         return response.json();
     },
-
     // ==========================================
     // SUBSIDIO DE VÍVERES (COM-59A)
     // ==========================================
@@ -833,7 +845,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al eliminar el subsidio'));
         return response.json();
     },
-
     // ==========================================
     // PRECIOS DE VENTA (COM-59A) — exclusivo Admin de Sistemas
     // ==========================================
@@ -865,7 +876,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al registrar el precio'));
         return response.json();
     },
-
     // ==========================================
     // RECETAS (+ COM-48: componentes, categorías y alta de ingredientes; limpieza)
     // ==========================================
@@ -955,7 +965,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al crear el ingrediente'));
         return response.json();
     },
-
     // ==========================================
     // COSTOS Y CATÁLOGO
     // ==========================================
@@ -974,7 +983,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener histórico'));
         return response.json();
     },
-
     // ==========================================
     // PADRÓN Y ESTADÍSTICAS
     // ==========================================
@@ -993,7 +1001,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener predicción'));
         return response.json();
     },
-
     // ==========================================
     // COMENSALES Y VENTAS (POS) — COM-62 v2 + COM-63
     // ==========================================
@@ -1062,7 +1069,27 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al cargar archivo histórico'));
         return response.json();
     },
-
+    // COM-62 v2 (TRAZABILIDAD): versiones originales raw-fetch COMENTADAS. Eran la
+    // causa del bug "l.json is not a function": retornaban el Response crudo y los
+    // modales llamaban .json() sobre un objeto ya parseado (o viceversa). Se
+    // conservan aquí para auditoría del cambio:
+    // buscarComensal: async (doc) => fetch(`${API_BASE}/comensales/${doc}`),
+    // registrarComensal: async (data) => fetch(`${API_BASE}/comensales/registrar`, {
+    //     method: 'POST',
+    //     headers: { 'Content-Type': 'application/json' },
+    //     body: JSON.stringify(data)
+    // }),
+    // registrarVenta: async (data) => fetch(`${API_BASE}/padron`, {
+    //     method: 'POST',
+    //     headers: { 'Content-Type': 'application/json' },
+    //     body: JSON.stringify(data)
+    // }),
+    // modificarVenta: async (id, data) => fetch(`${API_BASE}/padron/${id}`, {
+    //     method: 'PUT',
+    //     headers: { 'Content-Type': 'application/json' },
+    //     body: JSON.stringify(data)
+    // }),
+    // eliminarVenta: async (id) => fetch(`${API_BASE}/padron/${id}`, { method: 'DELETE' }),
     // ==========================================
     // PRESUPUESTO
     // ==========================================
@@ -1098,7 +1125,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al calcular presupuesto'));
         return response.json();
     },
-
     // ==========================================
     // PLANIFICACIONES GUARDADAS
     // ==========================================
