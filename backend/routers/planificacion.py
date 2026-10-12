@@ -3,21 +3,38 @@ routers/planificacion.py
 Objetivo: Endpoints para consultar planificaciones guardadas y generar listas de compras.
 Historial:
  - Sprint 2: versión original (listar, detalle, lista-compras con filtro por día, eliminar).
- - COM-65: trazabilidad. El endpoint /lista-compras ya soporta ?dia=N.
- - COM-67 v1: primera corrección de unidades de compra usando insumos.
- - COM-67 v2 (este archivo): corrección sistémica:
-     * El puente de conversión es ingredientes_equivalencias (unidad_receta -> gramos).
-     * Fallback discreto usa ingredientes.peso_estimado_g (NUNCA 100 g hardcodeado).
-     * La unidad de compra sale del insumo (kg / L / und) y la conversión respeta
-       la magnitud de destino (masa, volumen o discreto).
-     * Agrupa por insumo para consolidar compras reales de mercado.
+ - COM-65: trazabilidad. El endpoint /lista-compras ya soporta ?dia=N para generar la
+   lista consolidada semanal o filtrada por un día específico. El frontend
+   (PlanificacionesView.jsx) fue corregido para leer data.lista_compras.
+ - COM-67 v2: unidades reales de compra: puente unidad_receta -> gramos vía
+   ingredientes_equivalencias (o factor_a_base / peso_estimado_g) y conversión final a
+   la unidad de COMPRA del insumo (kg / L / und), agrupando por insumo.
+ - COM-69 (este archivo): SOLUCIÓN B de subsidio en la lista de compras:
+     * Nuevo parámetro opcional comedor_id. Con él, se lee el stock del subsidio del
+       mes de la planificación (subsidio_motor.subsidio_gramos_del_mes) y cada ítem se
+       cubre primero con ese stock: gramos_cubiertos = min(requerido, stock).
+     * El costo estimado se calcula SOLO sobre los gramos que sí se compran
+       (requerido - cubierto) al mejor precio por gramo vigente
+       (precios_insumos.precios_por_gramo_por_ingrediente).
+     * Cada ítem expone: subsidio_completo / subsidio_parcial / cantidad_subsidio /
+       costo_estimado / ahorro_subsidio_estimado, para que la UI muestre "SUBSIDIADO"
+       en rojo en lugar del precio cuando corresponda.
+     * El resumen incluye el bloque 'subsidio' (mes, comedor, ahorro y costo total).
+     * Regla v1 (documentada): la lista cubre contra el stock mensual COMPLETO; el
+       control acumulado entre semanas del mismo mes vive en el reporte de uso
+       (GET /subsidio/reporte-uso, COM-69), que alerta si el consumo supera el stock.
+     * Trazabilidad: el formateo anterior sin subsidio queda comentado al final.
 Uso: Registrado en main.py con prefijo /api/v1.
+Referencia: tickets COM-65 / COM-67 / COM-69 (solo trazabilidad).
 """
 import math
 from datetime import date, datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from psycopg2.extras import RealDictCursor
 from database import get_db
+# COM-69: stock del subsidio del mes (gramos/ml base por ingrediente) y precios por gramo
+from subsidio_motor import subsidio_gramos_del_mes
+from precios_insumos import precios_por_gramo_por_ingrediente
 
 router = APIRouter(prefix="/planificaciones", tags=["Planificaciones"])
 
@@ -72,7 +89,7 @@ def obtener_planificacion_detalle(planificacion_id: int, db=Depends(get_db)):
         if not planificacion:
             raise HTTPException(status_code=404, detail="Planificación no encontrada")
         cur.execute("""
-            SELECT 
+            SELECT
                 pd.dia,
                 pd.dia_nombre,
                 pd.comensales_social,
@@ -95,16 +112,13 @@ def obtener_planificacion_detalle(planificacion_id: int, db=Depends(get_db)):
 
 
 # ============================================================================
-# COM-67 v2: helpers de conversión
+# COM-67 v2 / COM-69: helpers de conversión
 # ============================================================================
 def _gramos_de_ingrediente(cur, ing_id, unidad_receta_id, cantidad_total_receta):
     """
-    Convierte la cantidad en unidad de receta a GRAMOS (puente universal).
-    Prioridad:
-      1) ingredientes_equivalencias activa (unidad_uso -> gramos_por_unidad_uso)
-      2) unidades_medida.factor_a_base para masa/volumen
-      3) ingredientes.peso_estimado_g para discretos (NUNCA un valor hardcodeado)
-    Retorna (gramos, origen) donde origen = 'equivalencia' | 'factor' | 'peso_estimado'.
+    COM-67 v2: convierte la cantidad en unidad de RECETA a GRAMOS (puente universal).
+    Prioridad: equivalencia activa -> factor_a_base (masa/volumen) -> peso_estimado_g
+    (discretos). Retorna (gramos, origen).
     """
     cur.execute("""
         SELECT ie.gramos_por_unidad_uso
@@ -136,11 +150,9 @@ def _gramos_de_ingrediente(cur, ing_id, unidad_receta_id, cantidad_total_receta)
 
 def _convertir_a_unidad_compra(cur, unidad_compra_id, gramos, cantidad_total_receta, peso_estimado_g):
     """
-    Convierte GRAMOS a la unidad de compra del insumo respetando su magnitud:
-      masa     -> kg  = gramos / 1000
-      volumen  -> L   = gramos / 1000  (densidad ~1: el puente gramos≈ml es exacto en volumen)
-      discreto -> und = gramos / peso_estimado_g  (o 1:1 si la receta ya era discreta)
-    Retorna (cantidad, abreviatura_unidad).
+    COM-67 v2: convierte GRAMOS a la unidad de COMPRA del insumo respetando magnitud:
+    masa -> /factor (kg), volumen -> /factor (L), discreto -> /peso_estimado_g (und).
+    Retorna (cantidad, abreviatura).
     """
     cur.execute("""
         SELECT um.nombre, um.abreviatura, um.factor_a_base, um.tipo_magnitud
@@ -150,12 +162,8 @@ def _convertir_a_unidad_compra(cur, unidad_compra_id, gramos, cantidad_total_rec
     um = cur.fetchone()
     if not um:
         return gramos, 'g'
-
-    if um['tipo_magnitud'] == 'masa':
+    if um['tipo_magnitud'] in ('masa', 'volumen'):
         return gramos / float(um['factor_a_base'] or 1000.0), um['abreviatura']
-    if um['tipo_magnitud'] == 'volumen':
-        return gramos / float(um['factor_a_base'] or 1000.0), um['abreviatura']
-    # discreto: número de unidades de compra
     peso_unidad = float(peso_estimado_g) if peso_estimado_g else 0.0
     if peso_unidad > 0:
         return gramos / peso_unidad, um['abreviatura']
@@ -166,21 +174,26 @@ def _convertir_a_unidad_compra(cur, unidad_compra_id, gramos, cantidad_total_rec
 def generar_lista_compras(
     planificacion_id: int,
     dia: int = Query(None, description="Filtrar por día específico (1=Lunes, 7=Domingo)"),
+    comedor_id: int = Query(None, description="COM-69: comedor para aplicar el subsidio del mes"),
     db=Depends(get_db)
 ):
     """
-    COM-67 v2: lista de compras consolidada con unidades reales de mercado.
-    Flujo por ingrediente de cada día:
-      1) cantidad_receta escalada a total_comensales
-      2) -> GRAMOS vía equivalencia / factor / peso_estimado
-      3) -> unidad de compra del insumo (kg, L, und)
-      4) acumula por insumo y registra días de uso
+    COM-67 v2 + COM-69: lista de compras consolidada (semanal o por día) con unidades
+    reales de mercado y cobertura de SUBSIDIO (Solución B):
+      1) requerido en gramos/ml base por ingrediente (equivalencias -> factor -> peso);
+      2) COM-69: cubierto = min(requerido, stock del subsidio del mes del comedor);
+         compra = requerido - cubierto; el costo estimado va SOLO sobre la compra;
+      3) conversión a unidad de compra del insumo (kg/L/und) para mostrar cantidades;
+      4) agrupación por insumo con días de uso.
+    Si no se envía comedor_id, se comporta exactamente como COM-67 v2 (sin subsidio).
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
-        cur.execute("SELECT id FROM presupuesto_semanal WHERE id = %s", (planificacion_id,))
-        if not cur.fetchone():
+        cur.execute("SELECT id, fecha_referencia FROM presupuesto_semanal WHERE id = %s", (planificacion_id,))
+        plan = cur.fetchone()
+        if not plan:
             raise HTTPException(status_code=404, detail="Planificación no encontrada")
+        fecha_ref = plan['fecha_referencia'] or date.today()
 
         query = """
             SELECT pd.dia, pd.dia_nombre, pd.total_comensales, pd.receta_id, pd.nombre_receta
@@ -209,7 +222,7 @@ def generar_lista_compras(
 
             cur.execute("""
                 SELECT ri.ingrediente_id,
-                       i.nombre            AS ingrediente_nombre,
+                       i.nombre AS ingrediente_nombre,
                        i.peso_estimado_g,
                        ri.cantidad_requerida,
                        ri.unidad_medida_id AS unidad_receta_id
@@ -222,10 +235,8 @@ def generar_lista_compras(
             for ing in ingredientes:
                 ing_id = ing['ingrediente_id']
                 cantidad_total_receta = (float(ing['cantidad_requerida']) / raciones_receta) * total_comensales
-
-                gramos, origen = _gramos_de_ingrediente(
-                    cur, ing_id, ing['unidad_receta_id'], cantidad_total_receta
-                )
+                gramos, _origen = _gramos_de_ingrediente(
+                    cur, ing_id, ing['unidad_receta_id'], cantidad_total_receta)
 
                 # Insumo de compra vinculado al ingrediente
                 cur.execute("""
@@ -239,46 +250,105 @@ def generar_lista_compras(
                 insumo = cur.fetchone()
 
                 if insumo:
-                    cantidad, unidad = _convertir_a_unidad_compra(
-                        cur, insumo['unidad_compra_id'], gramos,
-                        cantidad_total_receta, ing['peso_estimado_g']
-                    )
                     clave = ('insumo', insumo['insumo_id'])
                     nombre = insumo['insumo_nombre']
+                    unidad_compra_id = insumo['unidad_compra_id']
                 else:
-                    # Sin insumo: se reporta el ingrediente en gramos/kg genérico
-                    cantidad = gramos / 1000.0
-                    unidad = 'kg'
                     clave = ('ingrediente', ing_id)
                     nombre = ing['ingrediente_nombre']
+                    unidad_compra_id = None
 
                 if clave not in lista_compras:
                     lista_compras[clave] = {
+                        'ingrediente_id': ing_id,
+                        'unidad_compra_id': unidad_compra_id,
                         'nombre': nombre,
-                        'unidad': unidad,
-                        'cantidad': 0.0,
-                        'dias_uso': []
+                        'gramos': 0.0,
+                        'peso_estimado_g': ing['peso_estimado_g'],
+                        'dias_uso': [],
                     }
-                lista_compras[clave]['cantidad'] += cantidad
+                lista_compras[clave]['gramos'] += gramos
                 if dia_plan['dia_nombre'] not in lista_compras[clave]['dias_uso']:
                     lista_compras[clave]['dias_uso'].append(dia_plan['dia_nombre'])
 
+        # ------------------------------------------------------------------
+        # COM-69: stock del subsidio del mes de la planificación y precios por gramo
+        # ------------------------------------------------------------------
+        stock = {}
+        if comedor_id:
+            try:
+                stock = subsidio_gramos_del_mes(cur, comedor_id, fecha_ref.year, fecha_ref.month) or {}
+            except Exception as e:
+                print(f"[COM-69] No se pudo leer el subsidio del mes: {e}")
+                stock = {}
+        try:
+            ppg_map = precios_por_gramo_por_ingrediente(
+                cur, fecha_ref.isoformat(), fallback_ultima_fecha=True) or {}
+        except Exception as e:
+            print(f"[COM-69] No se pudieron leer precios por gramo: {e}")
+            ppg_map = {}
+
         lista_formateada = []
+        items_subsididados = 0
+        ahorro_total = 0.0
+        costo_total_compra = 0.0
+
         for (tipo, key), data in sorted(lista_compras.items(), key=lambda x: x[1]['nombre']):
-            cantidad = data['cantidad']
-            if data['unidad'] in ('kg', 'L', 'l'):
-                cantidad = round(cantidad, 2)
-            elif data['unidad'] in ('g', 'ml'):
-                cantidad = round(cantidad, 1)
+            requerido = data['gramos']
+            ing_id = data['ingrediente_id']
+            stock_ing = float(stock.get(ing_id, 0.0) or 0.0)
+
+            # COM-69 (Solución B): cobertura topada por el stock del subsidio
+            cubierto = min(requerido, stock_ing) if stock_ing > 0 else 0.0
+            compra = max(0.0, requerido - cubierto)
+            subsidio_completo = (cubierto > 0 and compra <= 0.0001)
+            subsidio_parcial = (cubierto > 0 and compra > 0.0001)
+            if subsidio_completo or subsidio_parcial:
+                items_subsididados += 1
+
+            ppg = ppg_map.get(ing_id)
+            costo_estimado = round(compra * ppg, 2) if (ppg is not None and compra > 0) else None
+            ahorro_estimado = round(cubierto * ppg, 2) if (ppg is not None and cubierto > 0) else None
+            if costo_estimado:
+                costo_total_compra += costo_estimado
+            if ahorro_estimado:
+                ahorro_total += ahorro_estimado
+
+            # Conversión a unidad de compra (COM-67 v2) de la COMPRA y del CUBIERTO
+            if data['unidad_compra_id']:
+                cant_compra, unidad = _convertir_a_unidad_compra(
+                    cur, data['unidad_compra_id'], compra, compra, data['peso_estimado_g'])
+                cant_subsidio, _ = _convertir_a_unidad_compra(
+                    cur, data['unidad_compra_id'], cubierto, cubierto, data['peso_estimado_g'])
+                cant_req, _ = _convertir_a_unidad_compra(
+                    cur, data['unidad_compra_id'], requerido, requerido, data['peso_estimado_g'])
             else:
-                cantidad = math.ceil(cantidad)
+                cant_compra, unidad = compra / 1000.0, 'kg'
+                cant_subsidio = cubierto / 1000.0
+                cant_req = requerido / 1000.0
+
+            def _redondear(v, u):
+                if u in ('kg', 'l', 'L'):
+                    return round(v, 2)
+                if u in ('g', 'ml'):
+                    return round(v, 1)
+                return math.ceil(v)
+
             lista_formateada.append({
                 'id': key,
                 'tipo': tipo,
+                'ingrediente_id': ing_id,
                 'nombre': data['nombre'],
-                'cantidad': cantidad,
-                'unidad': data['unidad'],
-                'dias_uso': data['dias_uso']
+                'cantidad': _redondear(cant_compra, unidad),
+                'unidad': unidad,
+                'dias_uso': data['dias_uso'],
+                # COM-69: campos de subsidio para la UI (badge SUBSIDIADO en rojo)
+                'cantidad_requerida': _redondear(cant_req, unidad),
+                'cantidad_subsidio': _redondear(cant_subsidio, unidad),
+                'subsidio_completo': subsidio_completo,
+                'subsidio_parcial': subsidio_parcial,
+                'costo_estimado': costo_estimado,
+                'ahorro_subsidio_estimado': ahorro_estimado,
             })
 
         return {
@@ -287,7 +357,17 @@ def generar_lista_compras(
             'dia_especifico': dia,
             'total_dias': len(dias_planificados),
             'total_ingredientes': len(lista_formateada),
-            'lista_compras': lista_formateada
+            'lista_compras': lista_formateada,
+            # COM-69: resumen de subsidio aplicado a esta lista
+            'subsidio': {
+                'comedor_id': comedor_id,
+                'anio': fecha_ref.year,
+                'mes': fecha_ref.month,
+                'stock_registrado': bool(stock),
+                'items_subsididados': items_subsididados,
+                'ahorro_total_estimado': round(ahorro_total, 2),
+                'costo_total_compra_estimado': round(costo_total_compra, 2),
+            },
         }
     finally:
         cur.close()
@@ -310,3 +390,13 @@ def eliminar_planificacion(planificacion_id: int, db=Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         cur.close()
+
+
+# ============================================================================
+# COM-69 (TRAZABILIDAD): formateo COM-67 v2 sin subsidio, COMENTADO.
+# Antes cada ítem se convertía y mostraba sin campos de cobertura:
+#     cantidad_display = math.ceil((cantidad / 1000.0) * 10) / 10  # kg o L
+#     lista_formateada.append({'ingrediente_id', 'nombre', 'cantidad', 'unidad', 'dias_uso'})
+# Desde COM-69 se agregan: cantidad_requerida, cantidad_subsidio, subsidio_completo,
+# subsidio_parcial, costo_estimado y ahorro_subsidio_estimado por ítem.
+# ============================================================================
