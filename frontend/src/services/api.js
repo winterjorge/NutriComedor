@@ -35,7 +35,7 @@ COM-59A v2: getHistorialPreciosVenta acepta `params` y envía
       `usuario_solicitante_id` (obligatorio tras el fix de seguridad del backend
       v2); con esto PreciosVentaView deja de degradar con banner y carga el
       historial completo. Ningún otro método se modifica.
-COM-62 v2 (este archivo): bloque POS reconstruido como superconjunto del original:
+COM-62 v2: bloque POS reconstruido como superconjunto del original:
       * Nuevos: buscarComensalesPorNombre (autocompletado) y editarComensal
         (completar/corregir DNI después).
       * buscarComensal / registrarComensal / registrarVenta / modificarVenta /
@@ -50,6 +50,13 @@ COM-65: getListaCompras documenta el filtro opcional por día (la firma ya lo
       traía; se agrega el comentario de trazabilidad en PLANIFICACIONES).
 COM-68: reactivarIngrediente (POST /ingredientes-admin/{id}/reactivar): quita el
       prefijo [OBSOLETO] y devuelve el canónico al catálogo activo.
+COM-69 (este archivo): tres adiciones marcadas, ninguna línea existente se elimina:
+      * getListaCompras acepta `comedorId` opcional (query comedor_id) para que el
+        backend aplique la cobertura del subsidio del mes (Solución B).
+      * getComedoresVisiblesSubsidio (GET /subsidio/comedores-visibles): selector
+        del reporte municipal según permisos de lectura de subsidio.
+      * getReporteSubsidio (GET /subsidio/reporte-uso): stock vs consumo proyectado
+        acumulado del mes por comedor, con estados OK/POR AGOTAR/AGOTADO/SIN CONSUMO.
 */
 const API_BASE = '/api/v1';
 
@@ -804,7 +811,7 @@ export const api = {
         return response.json();
     },
     // ==========================================
-    // SUBSIDIO DE VÍVERES (COM-59A)
+    // SUBSIDIO DE VÍVERES (COM-59A + COM-69)
     // ==========================================
     // COM-59A: líneas del subsidio del mes calendario con equivalencia en gramos.
     getSubsidioMes: async (params) => {
@@ -843,6 +850,25 @@ export const api = {
             method: 'DELETE'
         });
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al eliminar el subsidio'));
+        return response.json();
+    },
+    // COM-69: comedores cuyas lecturas de subsidio están permitidas al usuario
+    // (Admin: todos; Directivo: los suyos; municipal con módulo 'subsidio': su distrito).
+    getComedoresVisiblesSubsidio: async (usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/subsidio/comedores-visibles?usuario_solicitante_id=${usuarioSolicitanteId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al listar comedores visibles'));
+        return response.json();
+    },
+    // COM-69: reporte de uso del subsidio por comedor y mes (stock vs consumo
+    // proyectado acumulado de las planificaciones del mes, con estados).
+    getReporteSubsidio: async (params) => {
+        const qs = new URLSearchParams();
+        qs.append('usuario_solicitante_id', params.usuario_solicitante_id);
+        qs.append('comedor_id', params.comedor_id);
+        qs.append('anio', params.anio);
+        qs.append('mes', params.mes);
+        const response = await fetch(`${API_BASE}/subsidio/reporte-uso?${qs.toString()}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar el reporte de uso del subsidio'));
         return response.json();
     },
     // ==========================================
@@ -1138,12 +1164,15 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener detalle de planificación'));
         return response.json();
     },
-    // COM-65: lista de compras con filtro opcional por día (1=Lunes, 7=Domingo)
-    getListaCompras: async (planificacionId, dia = null) => {
-        const url = dia
-            ? `${API_BASE}/planificaciones/${planificacionId}/lista-compras?dia=${dia}`
-            : `${API_BASE}/planificaciones/${planificacionId}/lista-compras`;
-        const response = await fetch(url);
+    // COM-65: filtro opcional por día (1=Lunes, 7=Domingo).
+    // COM-69: `comedorId` opcional -> query comedor_id para que el backend aplique
+    // la cobertura del subsidio del mes (ítems SUBSIDIADOS en la lista).
+    getListaCompras: async (planificacionId, dia = null, comedorId = null) => {
+        const qs = new URLSearchParams();
+        if (dia) qs.append('dia', dia);
+        if (comedorId) qs.append('comedor_id', comedorId);
+        const suffix = qs.toString() ? `?${qs.toString()}` : '';
+        const response = await fetch(`${API_BASE}/planificaciones/${planificacionId}/lista-compras${suffix}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar lista de compras'));
         return response.json();
     },

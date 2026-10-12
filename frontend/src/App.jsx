@@ -1,32 +1,37 @@
 /**
- * App.jsx
- * Objetivo: Componente raíz de la aplicación. Orquesta la navegación por pestañas,
- *           el proveedor de parámetros dinámicos, la capa de autenticación (COM-19),
- *           la selección de comedor post-login (COM-20), el módulo multi-comedor
- *           (COM-21), grupos de usuario (COM-22), gestión de usuarios (COM-23), la
- *           diferenciación de vistas por grupo/rol (COM-25), la pestaña de clusters
- *           K-means del recetario (COM-5), la pestaña de propuestas de menú semanal
- *           del motor greedy (COM-8) y el panel de gráficos de ML (COM-5 v4),
- *           todas filtradas por los módulos permitidos del usuario.
- * Uso: Montado en main.jsx mediante <React.StrictMode>. Envuelve toda la app con
- *      AuthProvider y ParametrosProvider.
- * Historial de cambios:
- *   COM-19/20/21/22/23/25: flujo de login, selección de comedor, pestañas y permisos.
- *   COM-27: pestañas filtradas por módulos y formularios con cascada de ubicación.
- *   COM-5: nueva pestaña "Clusters K-Means" ligada al módulo 'recetario'.
- *   COM-8: nueva pestaña "Propuestas de Menú" ligada al módulo 'propuestas'.
- *   COM-8 v2: la pestaña "Presupuesto" (generación aleatoria) se RETIRA y se comenta;
- *             su función es reemplazada por "Propuestas de Menú" (motor greedy).
- *   COM-5 v4 / COM-8 v7: "Clusters K-Means" pasa al módulo 'clusters' (solo Admin) y
- *             se agrega "Modelos ML" (módulo 'modelos_ml', solo Admin).
- *   COM-37: se AGREGA la pestaña "Gestión de Ingredientes" (módulo 'gestion_ingredientes').
- *   COM-59A (este archivo): se AGREGAN dos pestañas del modelo de autogestión:
- *             * "Subsidio de Víveres" (módulo 'subsidio'): Admin de Sistemas y Directivos
- *               gestionan; perfiles municipales/auditoría solo lectura (gate backend).
- *             * "Precios de Venta" (módulo 'precios_venta'): exclusivo Admin de Sistemas.
- *             Solo hay 4 adiciones marcadas COM-59A (2 íconos, 2 imports, 2 entradas en
- *             TABS_BASE y 2 líneas de render); ninguna línea existente se elimina.
- */
+App.jsx
+Objetivo: Componente raíz de la aplicación. Orquesta la navegación por pestañas,
+      el proveedor de parámetros dinámicos, la capa de autenticación (COM-19),
+      la selección de comedor post-login (COM-20), el módulo multi-comedor
+      (COM-21), grupos de usuario (COM-22), gestión de usuarios (COM-23), la
+      diferenciación de vistas por grupo/rol (COM-25), la pestaña de clusters
+      K-means del recetario (COM-5), la pestaña de propuestas de menú semanal
+      del motor greedy (COM-8) y el panel de gráficos de ML (COM-5 v4),
+      todas filtradas por los módulos permitidos del usuario.
+Uso: Montado en main.jsx mediante <React.StrictMode>. Envuelve toda la app con
+ AuthProvider y ParametrosProvider.
+Historial de cambios:
+COM-19/20/21/22/23/25: flujo de login, selección de comedor, pestañas y permisos.
+COM-27: pestañas filtradas por módulos y formularios con cascada de ubicación.
+COM-5: nueva pestaña "Clusters K-Means" ligada al módulo 'recetario'.
+COM-8: nueva pestaña "Propuestas de Menú" ligada al módulo 'propuestas'.
+COM-8 v2: la pestaña "Presupuesto" (generación aleatoria) se RETIRA y se comenta;
+        su función es reemplazada por "Propuestas de Menú" (motor greedy).
+COM-5 v4 / COM-8 v7: "Clusters K-Means" pasa al módulo 'clusters' (solo Admin) y
+        se agrega "Modelos ML" (módulo 'modelos_ml', solo Admin).
+COM-37: se AGREGA la pestaña "Gestión de Ingredientes" (módulo 'gestion_ingredientes').
+COM-59A: se AGREGAN dos pestañas del modelo de autogestión:
+        * "Subsidio de Víveres" (módulo 'subsidio'): Admin de Sistemas y Directivos
+          gestionan; perfiles municipales/auditoría solo lectura (gate backend).
+        * "Precios de Venta" (módulo 'precios_venta'): exclusivo Admin de Sistemas.
+        Solo hay 4 adiciones marcadas COM-59A (2 íconos, 2 imports, 2 entradas en
+        TABS_BASE y 2 líneas de render); ninguna línea existente se elimina.
+COM-69 (este archivo): se AGREGA la pestaña "Reporte Subsidio" (módulo 'subsidio'):
+        vista de rendición mensual de uso del subsidio por comedor para el
+        administrativo municipal (3 adiciones: import del ícono ClipboardCheck,
+        import de ReporteSubsidioView, entrada en TABS_BASE y línea de render).
+        Ninguna línea existente se elimina.
+*/
 import React, { useState, useEffect } from 'react';
 import {
     ChefHat, Calculator, ShoppingCart, Activity, Users, ClipboardList,
@@ -35,7 +40,8 @@ import {
     LineChart, // COM-5 v4: ícono de la pestaña "Modelos ML"
     Package,   // COM-37: ícono de la pestaña "Gestión de Ingredientes"
     Gift,      // COM-59A: ícono de la pestaña "Subsidio de Víveres"
-    Coins      // COM-59A: ícono de la pestaña "Precios de Venta"
+    Coins,     // COM-59A: ícono de la pestaña "Precios de Venta"
+    ClipboardCheck // COM-69: ícono de la pestaña "Reporte Subsidio"
 } from 'lucide-react';
 import { RecipesView } from './components/recipes/RecipesView';
 import { ClusterRecetasView } from './components/recipes/ClusterRecetasView';
@@ -45,6 +51,8 @@ import { ModelosMLView } from './components/ml/ModelosMLView';
 import { GestionIngredientesView } from './components/ingredients/GestionIngredientesView';
 // COM-59A: subsidio mensual de víveres por comedor (Admin + Directivos gestionan)
 import { SubsidioView } from './components/subsidio/SubsidioView';
+// COM-69: reporte de uso del subsidio por comedor y mes (lectura municipal/directiva)
+import { ReporteSubsidioView } from './components/subsidio/ReporteSubsidioView';
 // COM-59A: precios de venta con historial (exclusivo Admin de Sistemas)
 import { PreciosVentaView } from './components/precios/PreciosVentaView';
 // COM-8 v2: import COMENTADO. La vista de Presupuesto (generación aleatoria de menús)
@@ -71,7 +79,7 @@ import { api } from './services/api';
 // COM-25: módulos de administración que abren el panel global de usuarios
 const MODULOS_ADMIN = ['municipalidades', 'roles', 'bloqueos', 'vistas'];
 
-// COM-25 + COM-5 + COM-8 + COM-5 v4 + COM-37 + COM-59A: catálogo de pestañas con su módulo requerido
+// COM-25 + COM-5 + COM-8 + COM-5 v4 + COM-37 + COM-59A + COM-69: catálogo de pestañas
 const TABS_BASE = [
     { id: 'recipes', label: 'Recetario', icon: ChefHat, color: 'emerald', modulo: 'recetario' },
     // COM-5 v4 (trazabilidad): línea ANTERIOR comentada. Hasta COM-5 v3 la pestaña de
@@ -86,6 +94,9 @@ const TABS_BASE = [
     // COM-59A: subsidio mensual de víveres (módulo 'subsidio': Admin gestiona todo;
     // Directivos gestionan su comedor; municipales/auditoría solo lectura vía backend)
     { id: 'subsidio', label: 'Subsidio de Víveres', icon: Gift, color: 'emerald', modulo: 'subsidio' },
+    // COM-69: reporte de uso del subsidio por comedor y mes (misma puerta 'subsidio';
+    // el backend filtra comedores visibles según alcance del usuario)
+    { id: 'reporte_subsidio', label: 'Reporte Subsidio', icon: ClipboardCheck, color: 'blue', modulo: 'subsidio' },
     // COM-59A: precios de venta con historial (módulo 'precios_venta': solo Admin)
     { id: 'precios_venta', label: 'Precios de Venta', icon: Coins, color: 'amber', modulo: 'precios_venta' },
     // COM-8 v2: pestaña RETIRADA (se comenta, no se borra): su esquema de generación
@@ -106,8 +117,8 @@ const TABS_BASE = [
 const TAB_USUARIOS = { id: 'usuarios', label: 'Usuarios', icon: Contact, color: 'blue', modulo: null };
 
 /**
- * COM-20: describe el contexto de trabajo activo para exhibirlo en el header.
- */
+COM-20: describe el contexto de trabajo activo para exhibirlo en el header.
+*/
 const descripcionContexto = (seleccion) => {
     if (!seleccion) return '';
     if (seleccion.perfil === 'SISTEMA') return 'Administración del Sistema';
@@ -120,7 +131,6 @@ const descripcionContexto = (seleccion) => {
 function AppContent() {
     const [activeTab, setActiveTab] = useState('pos');
     const { usuario, pendienteCambio, completarCambioClave, cerrarSesion, seleccion, validando } = useAuth();
-
     // COM-25: módulos efectivos del usuario en sesión
     const [misModulos, setMisModulos] = useState([]);
     const [cargandoModulos, setCargandoModulos] = useState(true);
@@ -290,18 +300,16 @@ function AppContent() {
                                         <button
                                             key={tab.id}
                                             onClick={() => setActiveTab(tab.id)}
-                                            className={`flex shrink-0 items-center gap-2 px-4 py-2 font-medium rounded-t-lg transition-colors ${
-                                                isActive
-                                                    ? `bg-white text-${tab.color}-700 shadow-sm border-t border-x border-slate-200`
-                                                    : 'text-slate-500 hover:bg-slate-100'
-                                            }`}
+                                            className={`flex shrink-0 items-center gap-2 px-4 py-2 font-medium rounded-t-lg transition-colors ${isActive
+                                                ? `bg-white text-${tab.color}-700 shadow-sm border-t border-x border-slate-200`
+                                                : 'text-slate-500 hover:bg-slate-100'
+                                                }`}
                                         >
                                             <Icon size={18} /> {tab.label}
                                         </button>
                                     );
                                 })}
                             </div>
-
                             {/* Contenedor de vistas */}
                             <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 min-h-[500px]">
                                 {activeTab === 'recipes' && <RecipesView />}
@@ -311,6 +319,8 @@ function AppContent() {
                                 {activeTab === 'gestion_ingredientes' && <GestionIngredientesView />}
                                 {/* COM-59A: subsidio mensual de víveres por comedor */}
                                 {activeTab === 'subsidio' && <SubsidioView />}
+                                {/* COM-69: reporte de uso del subsidio por comedor y mes */}
+                                {activeTab === 'reporte_subsidio' && <ReporteSubsidioView />}
                                 {/* COM-59A: precios de venta con historial (solo Admin) */}
                                 {activeTab === 'precios_venta' && <PreciosVentaView />}
                                 {/* COM-8 v2: render COMENTADO de la vista Presupuesto retirada.
