@@ -1,31 +1,36 @@
 /**
- * components/ingredients/GestionIngredientesView.jsx
- * Objetivo: COM-37 v5/v6 + COM-57: pestaña "Gestión de Ingredientes" (exclusiva Admin de
- *           Sistemas) sobre el modelo de DOS CONCEPTOS (ingrediente=uso / insumo=compra).
- *           Secciones:
- *             A) Catálogo de ingredientes (crear/editar sin borrado, con advertencia).
- *             A2) COM-57: "Sinónimos obsoletos": ingredientes [OBSOLETO] (fusionados en
- *                 COM-37 v8) que aún conservan líneas de receta o insumos atrapados;
- *                 selector de ingrediente activo de destino + botón "Migrar" con
- *                 confirmación (reutiliza POST /{destino}/fusionar, que desde COM-57
- *                 acepta orígenes obsoletos). Al migrar, las recetas heredan precios y
- *                 el prefijo [OBSOLETO] deja de aparecer en el recetario.
- *             B) Emparejamiento ingrediente<->insumo con precio vigente hoy y fuente.
- *             C) Equivalencias unidad de USO -> gramos (CRUD + desactivar).
- *             D) Precios manuales POR INSUMO (períodos con vigencia opcional).
- * Historial:
- *  - COM-37 v5: vista original de dos secciones (emparejamiento + precios manuales).
- *  - COM-37 v6: scroll automático al panel, precio por unidad de compra hoy, precarga
- *    de períodos en Sección D.
- *  - COM-57 (este archivo): sección A2 de sinónimos obsoletos con migración asistida.
- *    Nada existente se elimina; lo ajustado queda comentado por trazabilidad.
- * Uso: Montada por App.jsx en la pestaña "Gestión de Ingredientes".
- * Referencia: tickets COM-37 / COM-57 (solo trazabilidad).
- */
+components/ingredients/GestionIngredientesView.jsx
+Objetivo: COM-37 v5/v6 + COM-57 + COM-68: pestaña "Gestión de Ingredientes" (exclusiva
+      Admin de Sistemas) sobre el modelo de DOS CONCEPTOS (ingrediente=uso / insumo=compra).
+      Secciones:
+        A) Catálogo de ingredientes (crear/editar sin borrado, con advertencia).
+        A2) COM-57: "Sinónimos obsoletos": ingredientes [OBSOLETO] (fusionados en
+            COM-37 v8) que aún conservan líneas de receta o insumos atrapados;
+            selector de ingrediente activo de destino + botón "Migrar" con
+            confirmación (reutiliza POST /{destino}/fusionar, que desde COM-57
+            acepta orígenes obsoletos). Al migrar, las recetas heredan precios y
+            el prefijo [OBSOLETO] deja de aparecer en el recetario.
+            COM-68: botón "Reactivar" (devuelve un canónico genérico al catálogo
+            activo quitándole el prefijo, con confirmación) y filtro
+            "Mostrar solo con referencias atrapadas" (default activado) para
+            ocultar el ruido de obsoletos vacíos.
+        B) Emparejamiento ingrediente<->insumo con precio vigente hoy y fuente.
+        C) Equivalencias unidad de USO -> gramos (CRUD + desactivar).
+        D) Precios manuales POR INSUMO (períodos con vigencia opcional).
+Historial:
+COM-37 v5: vista original de dos secciones (emparejamiento + precios manuales).
+COM-37 v6: scroll automático al panel, precio por unidad de compra hoy, precarga
+de períodos en Sección D.
+COM-57: sección A2 de sinónimos obsoletos con migración asistida.
+COM-68 (este archivo): reactivación de obsoletos desde UI + filtro de ruido.
+Nada existente se elimina; lo ajustado queda comentado por trazabilidad.
+Uso: Montada por App.jsx en la pestaña "Gestión de Ingredientes".
+Referencia: tickets COM-37 / COM-57 / COM-68 (solo trazabilidad).
+*/
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
     Plus, Edit3, Database, RefreshCw, Loader2, AlertCircle, Coins, Power,
-    Sprout, Search, Link2, Package, Scale, Archive
+    Sprout, Search, Link2, Package, Scale, Archive, RotateCcw
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
@@ -42,10 +47,8 @@ const FORM_PER_VACIO = {
 
 export const GestionIngredientesView = () => {
     const { usuario } = useAuth();
-
     // COM-37 v6: referencia del panel para scroll automático al seleccionar ingrediente
     const panelRef = useRef(null);
-
     // ===== Sección A: catálogo =====
     const [ingredientes, setIngredientes] = useState([]);
     const [unidades, setUnidades] = useState([]);
@@ -53,23 +56,23 @@ export const GestionIngredientesView = () => {
     const [error, setError] = useState('');
     const [exito, setExito] = useState('');
     const [reemparejando, setReemparejando] = useState(false);
-
     // ===== COM-57: sinónimos obsoletos y migración =====
     const [obsoletos, setObsoletos] = useState([]);
     const [cargandoObs, setCargandoObs] = useState(false);
     const [destinoObs, setDestinoObs] = useState({});      // { origen_id: destino_id (string) }
     const [confMigracion, setConfMigracion] = useState(null); // { origen, destinoId }
     const [migrandoObs, setMigrandoObs] = useState(false);
-
+    // ===== COM-68: reactivación de obsoletos + filtro de ruido =====
+    const [confReactivar, setConfReactivar] = useState(null); // obs a reactivar
+    const [reactivando, setReactivando] = useState(false);
+    const [soloConReferencias, setSoloConReferencias] = useState(true);
     // Modal crear/editar ingrediente
     const [modalIng, setModalIng] = useState(null);
     const [formIng, setFormIng] = useState({ nombre: '', categoria_id: '', unidad_medida_id: '', peso_estimado_g: 100 });
     const [guardandoIng, setGuardandoIng] = useState(false);
     const [confEdicion, setConfEdicion] = useState(null);
-
     // ===== Ingrediente seleccionado para secciones B/C/D =====
     const [ingSel, setIngSel] = useState(null);
-
     // ===== Sección B: insumos del ingrediente =====
     const [insumos, setInsumos] = useState([]);
     const [cargandoInsumos, setCargandoInsumos] = useState(false);
@@ -83,14 +86,12 @@ export const GestionIngredientesView = () => {
         fecha_inicio: '', fecha_fin: '', observacion: '', equivalencias: [],
     });
     const [guardandoInsumo, setGuardandoInsumo] = useState(false);
-
     // ===== Sección C: equivalencias =====
     const [equivalencias, setEquivalencias] = useState([]);
     const [cargandoEq, setCargandoEq] = useState(false);
     const [formEq, setFormEq] = useState({ insumo_id: '', unidad_uso_id: '', gramos_por_unidad_uso: '', observacion: '' });
     const [eqEditId, setEqEditId] = useState(null);
     const [guardandoEq, setGuardandoEq] = useState(false);
-
     // ===== Sección D: precios manuales por insumo =====
     const [insumoPreciosSel, setInsumoPreciosSel] = useState('');
     const [periodos, setPeriodos] = useState([]);
@@ -147,6 +148,13 @@ export const GestionIngredientesView = () => {
         });
         return [...map.entries()].map(([id, nombre]) => ({ id, nombre })).sort((a, b) => a.nombre.localeCompare(b.nombre));
     }, [ingredientes]);
+
+    // COM-68: filtro de ruido: por defecto solo obsoletos con líneas o insumos atrapados
+    const obsoletosVisibles = useMemo(() => (
+        soloConReferencias
+            ? obsoletos.filter(o => (o.n_lineas_recetas || 0) > 0 || (o.n_insumos || 0) > 0)
+            : obsoletos
+    ), [obsoletos, soloConReferencias]);
 
     const cargarPeriodos = useCallback(async (insumoId) => {
         if (!insumoId) { setPeriodos([]); return; }
@@ -238,11 +246,33 @@ export const GestionIngredientesView = () => {
         }
     };
 
+    // ---------- COM-68: reactivación de sinónimos obsoletos ----------
+    const confirmarReactivacion = async () => {
+        const obs = confReactivar;
+        setConfReactivar(null);
+        setReactivando(true);
+        setError('');
+        try {
+            const res = await api.reactivarIngrediente(obs.id, {
+                usuario_solicitante_id: usuario.id,
+            });
+            setExito(res.message || `Ingrediente "${obs.nombre}" reactivado.`);
+            cargarObsoletos();
+            cargar();
+            if (ingSel) { cargarInsumos(ingSel); cargarEquivalencias(ingSel); }
+        } catch (e) {
+            setError(e.message);
+        } finally {
+            setReactivando(false);
+        }
+    };
+
     // ---------- Sección A: crear/editar ingrediente ----------
     const abrirCrear = () => {
         setFormIng({ nombre: '', categoria_id: '', unidad_medida_id: '', peso_estimado_g: 100 });
         setModalIng({ modo: 'crear' });
     };
+
     const abrirEditar = (ing) => {
         setFormIng({
             nombre: ing.nombre,
@@ -252,6 +282,7 @@ export const GestionIngredientesView = () => {
         });
         setModalIng({ modo: 'editar', ing });
     };
+
     const submitIngrediente = async (e) => {
         e.preventDefault();
         if (!formIng.nombre.trim() || !formIng.unidad_medida_id) {
@@ -282,6 +313,7 @@ export const GestionIngredientesView = () => {
             setConfEdicion(payload); // advertencia de inconsistencias antes de confirmar
         }
     };
+
     const confirmarEdicion = async () => {
         const payload = confEdicion;
         setConfEdicion(null);
@@ -312,6 +344,7 @@ export const GestionIngredientesView = () => {
             setBuscandoInsumo(false);
         }
     };
+
     const vincular = async (ins) => {
         setErrorSeccion('');
         try {
@@ -331,10 +364,12 @@ export const GestionIngredientesView = () => {
             setErrorSeccion(e.message);
         }
     };
+
     const agregarFilaEq = () => setFormInsumoManual(f => ({
         ...f,
         equivalencias: [...f.equivalencias, { unidad_uso_id: '', gramos_por_unidad_uso: '' }],
     }));
+
     const submitInsumoManual = async (e) => {
         e.preventDefault();
         setGuardandoInsumo(true);
@@ -371,6 +406,7 @@ export const GestionIngredientesView = () => {
             setGuardandoInsumo(false);
         }
     };
+
     const desvincular = async (ins) => {
         setErrorSeccion('');
         try {
@@ -415,6 +451,7 @@ export const GestionIngredientesView = () => {
             setGuardandoEq(false);
         }
     };
+
     const desactivarEq = async (eq) => {
         setErrorSeccion('');
         try {
@@ -457,6 +494,7 @@ export const GestionIngredientesView = () => {
             setGuardandoPer(false);
         }
     };
+
     const desactivarPer = async (p) => {
         setErrorSeccion('');
         try {
@@ -513,13 +551,11 @@ export const GestionIngredientesView = () => {
                     </button>
                 </div>
             </div>
-
             {error && (
                 <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-center gap-2 text-sm">
                     <AlertCircle size={16} /> {error}
                 </div>
             )}
-
             {/* ===== Sección A: catálogo de ingredientes ===== */}
             <div className="overflow-x-auto rounded-lg border border-slate-200">
                 <table className="w-full text-left border-collapse whitespace-nowrap text-sm">
@@ -573,27 +609,45 @@ export const GestionIngredientesView = () => {
                     </tbody>
                 </table>
             </div>
-
-            {/* ===== COM-57: Sección A2 — Sinónimos obsoletos pendientes de migración ===== */}
+            {/* ===== COM-57 / COM-68: Sección A2 — Sinónimos obsoletos ===== */}
             <div className="bg-white border border-slate-200 rounded-xl p-5">
-                <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
                     <h3 className="font-bold text-slate-800 text-sm flex items-center gap-2">
                         <Archive size={16} className="text-amber-600" /> Sinónimos obsoletos ([OBSOLETO])
                     </h3>
-                    <button onClick={cargarObsoletos} disabled={cargandoObs}
-                        className="p-1.5 bg-slate-100 hover:bg-slate-200 rounded-lg text-slate-600 transition-colors" title="Recargar lista">
-                        <RefreshCw size={14} className={cargandoObs ? 'animate-spin' : ''} />
-                    </button>
+                    <div className="flex items-center gap-3">
+                        {/* COM-68: filtro de ruido (oculta obsoletos sin referencias) */}
+                        <label className="flex items-center gap-1.5 text-[11px] text-slate-600 cursor-pointer select-none">
+                            <input type="checkbox" checked={soloConReferencias}
+                                onChange={(e) => setSoloConReferencias(e.target.checked)}
+                                className="accent-amber-600" />
+                            Mostrar solo con referencias atrapadas
+                        </label>
+                        <button onClick={cargarObsoletos} disabled={cargandoObs}
+                            className="p-1.5 bg-slate-100 hover:bg-slate-200 rounded-lg text-slate-600 transition-colors" title="Recargar lista">
+                            <RefreshCw size={14} className={cargandoObs ? 'animate-spin' : ''} />
+                        </button>
+                    </div>
                 </div>
                 <p className="text-[11px] text-slate-500 mb-3">
                     Ingredientes fusionados (COM-37 v8) que aún conservan líneas de receta o insumos
-                    atrapados. Migre cada uno a su ingrediente activo para que las recetas hereden
-                    sus precios y el prefijo [OBSOLETO] desaparezca del recetario y de Evaluar.
+                    atrapados. <b>Migre</b> cada uno a su ingrediente activo para que las recetas hereden
+                    sus precios, o <b>reactívelo</b> (COM-68) si es un canónico genérico fusionado por
+                    error (ej. "Papa", "Cebolla"): se le quitará el prefijo [OBSOLETO] y volverá al
+                    catálogo activo conservando sus referencias.
+                    {soloConReferencias && obsoletos.length > obsoletosVisibles.length && (
+                        <span className="text-slate-400"> ({obsoletos.length - obsoletosVisibles.length} obsoleto(s) vacío(s) oculto(s))</span>
+                    )}
                 </p>
                 {cargandoObs ? (
                     <div className="p-6 text-center text-emerald-600"><Loader2 className="animate-spin mx-auto" size={20} /></div>
                 ) : obsoletos.length === 0 ? (
-                    <p className="text-xs text-slate-400">No hay sinónimos obsoletos con referencias pendientes. ✔</p>
+                    <p className="text-xs text-slate-400">No hay sinónimos obsoletos. ✔</p>
+                ) : obsoletosVisibles.length === 0 ? (
+                    <p className="text-xs text-slate-400">
+                        Todos los obsoletos restantes están vacíos (sin líneas ni insumos).
+                        Desactive el filtro para verlos, o purgue con el script de reparación COM-68.
+                    </p>
                 ) : (
                     <div className="overflow-x-auto rounded-lg border border-slate-200">
                         <table className="w-full text-left border-collapse whitespace-nowrap text-xs">
@@ -608,7 +662,7 @@ export const GestionIngredientesView = () => {
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-200">
-                                {obsoletos.map(obs => (
+                                {obsoletosVisibles.map(obs => (
                                     <tr key={obs.id} className="hover:bg-slate-50">
                                         <td className="p-2 font-medium text-slate-800">{obs.nombre}</td>
                                         <td className="p-2 text-center text-slate-600">{obs.n_lineas_recetas}</td>
@@ -627,13 +681,24 @@ export const GestionIngredientesView = () => {
                                             </select>
                                         </td>
                                         <td className="p-2 text-right">
-                                            <button
-                                                onClick={() => solicitarMigracion(obs)}
-                                                disabled={migrandoObs || !destinoObs[obs.id]}
-                                                className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-[11px] font-bold transition-colors disabled:opacity-50"
-                                            >
-                                                {migrandoObs ? 'Migrando…' : 'Migrar'}
-                                            </button>
+                                            <div className="flex justify-end gap-1.5">
+                                                {/* COM-68: reactivar canónico genérico */}
+                                                <button
+                                                    onClick={() => { setError(''); setConfReactivar(obs); }}
+                                                    disabled={reactivando}
+                                                    className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-bold transition-colors disabled:opacity-50 flex items-center gap-1"
+                                                    title="Quitar el prefijo [OBSOLETO] y devolverlo al catálogo activo"
+                                                >
+                                                    <RotateCcw size={11} /> Reactivar
+                                                </button>
+                                                <button
+                                                    onClick={() => solicitarMigracion(obs)}
+                                                    disabled={migrandoObs || !destinoObs[obs.id]}
+                                                    className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-[11px] font-bold transition-colors disabled:opacity-50"
+                                                >
+                                                    {migrandoObs ? 'Migrando…' : 'Migrar'}
+                                                </button>
+                                            </div>
                                         </td>
                                     </tr>
                                 ))}
@@ -642,7 +707,6 @@ export const GestionIngredientesView = () => {
                     </div>
                 )}
             </div>
-
             {/* ===== Panel del ingrediente seleccionado: secciones B, C y D ===== */}
             {ingSel && (
                 <div ref={panelRef} className="bg-white border border-emerald-300 rounded-xl p-5 space-y-6 shadow-sm">
@@ -668,13 +732,11 @@ export const GestionIngredientesView = () => {
                             </button>
                         </div>
                     </div>
-
                     {errorSeccion && (
                         <div className="p-2.5 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-center gap-2 text-xs">
                             <AlertCircle size={14} /> {errorSeccion}
                         </div>
                     )}
-
                     {/* ----- Sección B: insumos vinculados ----- */}
                     <div>
                         <p className="text-xs font-bold text-slate-700 mb-2 flex items-center gap-1"><Link2 size={13} /> Insumos vinculados (unidad de compra) y precio vigente hoy</p>
@@ -752,7 +814,6 @@ export const GestionIngredientesView = () => {
                             </div>
                         )}
                     </div>
-
                     {/* ----- Sección C: equivalencias ----- */}
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
                         <div>
@@ -836,7 +897,6 @@ export const GestionIngredientesView = () => {
                             </div>
                         </form>
                     </div>
-
                     {/* ----- Sección D: precios manuales por insumo ----- */}
                     <div>
                         <p className="text-xs font-bold text-slate-700 mb-2 flex items-center gap-1"><Coins size={13} /> Precios manuales por insumo (unidad de compra)</p>
@@ -920,7 +980,7 @@ export const GestionIngredientesView = () => {
                                         {perEditId && (
                                             <button type="button" onClick={() => { setPerEditId(null); setFormPer(FORM_PER_VACIO); }}
                                                 className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-medium transition-colors">
-                                            Cancelar
+                                                Cancelar
                                             </button>
                                         )}
                                         <button type="submit" disabled={guardandoPer}
@@ -934,7 +994,6 @@ export const GestionIngredientesView = () => {
                     </div>
                 </div>
             )}
-
             {/* ===== Modal crear/editar ingrediente ===== */}
             {modalIng && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
@@ -989,7 +1048,6 @@ export const GestionIngredientesView = () => {
                     </div>
                 </div>
             )}
-
             {/* ===== Modal buscar insumo del scraper ===== */}
             {modalBuscarInsumo && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
@@ -1035,7 +1093,6 @@ export const GestionIngredientesView = () => {
                     </div>
                 </div>
             )}
-
             {/* ===== Modal crear insumo manual ===== */}
             {modalInsumoManual && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
@@ -1094,7 +1151,6 @@ export const GestionIngredientesView = () => {
                                     onChange={(e) => setFormInsumoManual({ ...formInsumoManual, observacion: e.target.value })}
                                     className={inputCls} />
                             </div>
-
                             {/* Equivalencias opcionales */}
                             <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2">
                                 <div className="flex items-center justify-between">
@@ -1139,7 +1195,6 @@ export const GestionIngredientesView = () => {
                                     </div>
                                 ))}
                             </div>
-
                             <div className="flex gap-2 pt-1">
                                 <button type="button" onClick={() => setModalInsumoManual(false)}
                                     className="flex-1 px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-sm font-medium transition-colors">
@@ -1154,7 +1209,6 @@ export const GestionIngredientesView = () => {
                     </div>
                 </div>
             )}
-
             {/* Advertencia COM-37 ante edición de ingrediente */}
             <ModalConfirmacion
                 isOpen={!!confEdicion}
@@ -1170,6 +1224,16 @@ export const GestionIngredientesView = () => {
                 onConfirm={confirmarMigracion}
                 mensaje={confMigracion
                     ? `¿Migrar todas las líneas de receta, insumos y equivalencias de "${confMigracion.origen.nombre}" (${confMigracion.origen.n_lineas_recetas} línea(s), ${confMigracion.origen.n_insumos} insumo(s)) hacia el ingrediente activo seleccionado? Las cantidades duplicadas en el destino se sumarán. Esta acción no se puede deshacer.`
+                    : ''}
+                tipo="warning"
+            />
+            {/* COM-68: confirmación de reactivación de sinónimo obsoleto */}
+            <ModalConfirmacion
+                isOpen={!!confReactivar}
+                onClose={() => setConfReactivar(null)}
+                onConfirm={confirmarReactivacion}
+                mensaje={confReactivar
+                    ? `¿Reactivar "${confReactivar.nombre}"? Se le quitará el prefijo [OBSOLETO] y volverá al catálogo activo con sus ${confReactivar.n_lineas_recetas} línea(s) de receta y ${confReactivar.n_insumos} insumo(s) actuales. Si ya existe un ingrediente activo con el mismo nombre, el sistema rechazará la acción.`
                     : ''}
                 tipo="warning"
             />
