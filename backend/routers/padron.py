@@ -5,12 +5,24 @@ Objetivo: Endpoints para la gestión del padrón, ventas diarias (POS), predicci
 Historial:
  - Sprint 1/2: versión original (predicción, búsqueda/registro de comensales por DNI,
    CRUD de ventas y estadísticas del día).
- - COM-62 v2: atención ágil sin DNI (autocompletado por nombre, DNI opcional, edición).
- - COM-63: carga masiva de atenciones históricas desde CSV + tipo "Cocinera".
- - COM-64 (este archivo): predicción de demanda con datos reales de padron_diario
-   (pasa el cursor al motor de IA para entrenar con historial real).
-Uso: Registrado en main.py con prefijo /api/v1.
-Referencia: tickets COM-62, COM-63, COM-64.
+ - COM-62 v2: atención ágil sin DNI (autocompletado por nombre, DNI opcional, edición
+   de ficha, Cliente Genérico reservado para cargas masivas).
+ - COM-63: carga masiva de atenciones históricas desde CSV + tipo "Cocinera"
+   (menú a costo cero, comensal genérico CO000000).
+ - COM-64: predicción de demanda con datos reales de padron_diario (pasa el cursor
+   al motor de IA para entrenar con historial real ≥30 días).
+ - COM-64 v3 (este archivo): dos blindajes de lectura, sin tocar datos:
+     1) /padron/prediccion_demanda es NULL-SAFE: si el motor devuelve None (menos de
+        4 históricos del día de semana), responde 200 con sin_datos=True y valores
+        null. ANTES hacía pred[0] sobre None -> TypeError -> HTTP 500, y ese 500
+        tumbaba el Promise.all de usePOS.js dejando la vista SIN stats y SIN ventas
+        del día ("No hay ventas hoy" aunque sí existieran en BD). Ningún fix anterior
+        borró ventas: era un fallo de lectura, no de escritura.
+     2) /padron/hoy usa LEFT JOIN + COALESCE para que las filas del día sin comensal
+        vinculado (comensal_id NULL, p.ej. una carga masiva COM-63 del día) NO queden
+        ocultas por el INNER JOIN anterior (que se conserva comentado por trazabilidad).
+Uso: Registrado en main.py sin prefijo propio (rutas /padron/* y /comensales/*).
+Referencia: tickets COM-62, COM-63, COM-64 (solo trazabilidad).
 """
 from datetime import date, datetime
 from typing import Optional
@@ -56,23 +68,29 @@ class EditarComensalPOSInput(BaseModel):
 
 
 # ==========================================
-# PREDICCIÓN DE DEMANDA (COM-64: con datos reales)
+# PREDICCIÓN DE DEMANDA (COM-64 / COM-64 v3: null-safe)
 # ==========================================
 @router.get("/padron/prediccion_demanda")
 def predecir_demanda_diaria(fecha_str: str = None, db=Depends(get_db)):
     """
-    COM-64: predice la demanda diaria usando datos reales de padron_diario
-    si existen ≥30 días de historial; fallback a modelo simulado si no.
+    COM-64: predice la demanda diaria usando datos reales de padron_diario cuando
+    existen ≥30 días de historial y ≥4 del mismo día de semana; el motor entrena un
+    Random Forest en el momento con ese historial.
+    COM-64 v3: si el motor devuelve None (datos insuficientes para ESE día de la
+    semana), se responde 200 con sin_datos=True y valores null para que la UI muestre
+    el mensaje ámbar de advertencia. Nunca se responde 500: el TypeError anterior
+    (pred[0] sobre None) rompía el Promise.all de usePOS.js y vaciaba stats y ventas
+    del día en pantalla.
     """
     fecha_eval = datetime.strptime(fecha_str, "%Y-%m-%d").date() if fecha_str else date.today()
-    
+
     # 1. Leer parámetros de IA desde la BD de forma centralizada
     claves_ia = [
         'IA_MIN_SOCIAL', 'IA_MIN_AFILIADO', 'IA_MIN_NORMAL',
         'IA_FINDE_SOCIAL', 'IA_FINDE_AFILIADO', 'IA_FINDE_NORMAL'
     ]
     params = get_parametros_dict(db, claves_ia)
-    
+
     # 2. Estructurar diccionarios para el motor de IA
     limites_minimos = {
         'SOCIAL': params.get('IA_MIN_SOCIAL', 15),
@@ -84,25 +102,39 @@ def predecir_demanda_diaria(fecha_str: str = None, db=Depends(get_db)):
         'AFILIADO': params.get('IA_FINDE_AFILIADO', 20),
         'NORMAL': params.get('IA_FINDE_NORMAL', 30)
     }
-    
+
     # 3. COM-64: ejecutar predicción pasando el cursor para usar datos reales
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         pred = predecir_demanda_raciones(
-            fecha_eval.weekday(), 
-            fecha_eval.day, 
-            limites_minimos, 
+            fecha_eval.weekday(),
+            fecha_eval.day,
+            limites_minimos,
             limites_finde,
             cur=cur  # <-- COM-64: pasar cursor para datos reales
         )
     finally:
         cur.close()
-    
+
+    # COM-64 v3: sin datos suficientes -> flag explícito, nunca excepción.
+    # Trazabilidad: la versión COM-64 hacía directamente pred[0]/pred[1]/pred[2] y
+    # sum(pred), tronando con TypeError cuando el motor devolvía None.
+    if pred is None:
+        return {
+            "fecha": fecha_eval.strftime("%Y-%m-%d"),
+            "sin_datos": True,
+            "prediccion_social": None,
+            "prediccion_afiliado": None,
+            "prediccion_normal": None,
+            "total_raciones_sugeridas": None,
+        }
+
     return {
-        "fecha": fecha_eval.strftime("%Y-%m-%d"), 
-        "prediccion_social": pred[0], 
-        "prediccion_afiliado": pred[1], 
-        "prediccion_normal": pred[2], 
+        "fecha": fecha_eval.strftime("%Y-%m-%d"),
+        "sin_datos": False,
+        "prediccion_social": pred[0],
+        "prediccion_afiliado": pred[1],
+        "prediccion_normal": pred[2],
         "total_raciones_sugeridas": sum(pred)
     }
 
@@ -295,16 +327,16 @@ def registrar_venta_padron(data: RegistroVentaInput, db=Depends(get_db)):
         if data.raciones < 1:
             raise HTTPException(status_code=400, detail="Las raciones deben ser al menos 1")
         cur.execute(
-            """INSERT INTO padron_diario (comensal_id, fecha, raciones, monto_pagado, tipo_menu, tipo_comensal_venta, observacion) 
+            """INSERT INTO padron_diario (comensal_id, fecha, raciones, monto_pagado, tipo_menu, tipo_comensal_venta, observacion)
                VALUES (%s, CURRENT_DATE, %s, %s, %s, %s, %s) RETURNING *;""",
             (data.comensal_id, data.raciones, data.monto_pagado, data.tipo_menu, data.tipo_comensal_venta, data.observacion)
         )
         db.commit()
         return cur.fetchone()
-    except Exception as e: 
+    except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
-    finally: 
+    finally:
         cur.close()
 
 
@@ -340,9 +372,9 @@ def modificar_venta_padron(venta_id: int, data: ModificarVentaInput, db=Depends(
             params.insert(0, data.comensal_id)
         params.append(venta_id)
         query = f"""
-            UPDATE padron_diario 
-            SET {', '.join(update_fields)} 
-            WHERE id = %s 
+            UPDATE padron_diario
+            SET {', '.join(update_fields)}
+            WHERE id = %s
             RETURNING *;
         """
         cur.execute(query, params)
@@ -352,11 +384,11 @@ def modificar_venta_padron(venta_id: int, data: ModificarVentaInput, db=Depends(
         db.rollback()
         print(f"Error de base de datos: {e}")
         raise HTTPException(status_code=500, detail=f"Error de base de datos: {str(e)}")
-    except Exception as e: 
+    except Exception as e:
         db.rollback()
         print(f"Error general: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-    finally: 
+    finally:
         cur.close()
 
 
@@ -374,24 +406,42 @@ def eliminar_venta_padron(venta_id: int, db=Depends(get_db)):
         db.rollback()
         print(f"Error de base de datos: {e}")
         raise HTTPException(status_code=500, detail=f"Error de base de datos: {str(e)}")
-    except Exception as e: 
+    except Exception as e:
         db.rollback()
         print(f"Error general: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-    finally: 
+    finally:
         cur.close()
 
 
 @router.get("/padron/hoy")
 def obtener_ventas_hoy(db=Depends(get_db)):
+    """
+    Ventas del día para la tabla del POS.
+    COM-62 v2: incluye es_generico para el render de 'Genérico'/'Sin DNI' en la tabla.
+    COM-64 v3: LEFT JOIN + COALESCE para que las filas del día SIN comensal vinculado
+    (comensal_id NULL, p.ej. una carga masiva COM-63 hecha con fecha de hoy) NO queden
+    ocultas: el INNER JOIN anterior las descartaba silenciosamente del listado.
+    """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute(
-            """SELECT pd.*, c.nombres, c.documento_identidad, c.es_generico
+            """SELECT pd.*,
+                      COALESCE(c.nombres, 'Carga masiva (sin comensal)') AS nombres,
+                      c.documento_identidad,
+                      COALESCE(c.es_generico, FALSE) AS es_generico
                FROM padron_diario pd
-               JOIN comensales c ON pd.comensal_id = c.id
+               LEFT JOIN comensales c ON pd.comensal_id = c.id
                WHERE pd.fecha = CURRENT_DATE
-               ORDER BY pd.id DESC;"""
+               ORDER BY pd.id DESC;
+               -- COM-62 v2 / COM-64 (trazabilidad): versión anterior con INNER JOIN,
+               -- que ocultaba filas con comensal_id NULL:
+               -- SELECT pd.*, c.nombres, c.documento_identidad, c.es_generico
+               -- FROM padron_diario pd
+               -- JOIN comensales c ON pd.comensal_id = c.id
+               -- WHERE pd.fecha = CURRENT_DATE
+               -- ORDER BY pd.id DESC;
+            """
         )
         return cur.fetchall()
     finally:
@@ -400,6 +450,7 @@ def obtener_ventas_hoy(db=Depends(get_db)):
 
 @router.get("/padron/stats")
 def obtener_estadisticas_padron(db=Depends(get_db)):
+    """Totales del día por tipo de comensal (COM-63: incluye 'Cocinera')."""
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute(
@@ -435,35 +486,37 @@ async def carga_masiva_historica(
     - afiliados: int >= 0
     - publico: int >= 0 (mapeado a 'Normal')
     - sociales: int >= 0 (mapeado a 'Social')
-    - cocineras: int >= 0 (nuevo tipo, precio 0.00)
-    
-    Retorna resumen con filas procesadas, omitidas y ventas creadas.
+    - cocineras: int >= 0 (nuevo tipo, precio 0.00, comensal genérico CO000000)
+
+    Las filas históricas de Social/Afiliado/Normal se insertan con comensal_id NULL
+    (no existen fichas individuales para atenciones pasadas); las de Cocinera se
+    vinculan al comensal genérico. Retorna resumen con procesadas/omitidas/creadas.
     """
     if not file.filename.endswith('.csv'):
         raise HTTPException(status_code=400, detail="El archivo debe ser CSV")
-    
+
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         # Leer contenido del CSV
         contenido = await file.read()
         texto = contenido.decode('utf-8-sig')  # utf-8-sig maneja BOM de Excel
-        
+
         # Parsear CSV con separador ;
         reader = csv.DictReader(io.StringIO(texto), delimiter=';')
-        
+
         filas_procesadas = 0
         filas_omitidas = 0
         ventas_creadas = 0
         detalle_omitidas = []
         fechas = []
-        
+
         # Obtener comensal genérico "Cocinera"
         cur.execute("SELECT id FROM comensales WHERE documento_identidad = 'CO000000';")
         comensal_cocinera = cur.fetchone()
         if not comensal_cocinera:
             raise HTTPException(status_code=500, detail="Comensal genérico 'Cocinera' no existe")
         cocinera_id = comensal_cocinera['id']
-        
+
         for idx, fila in enumerate(reader, start=2):  # start=2 porque fila 1 es header
             try:
                 # Parsear fecha (aceptar YYYY-MM-DD o DD/MM/YYYY)
@@ -472,7 +525,7 @@ async def carga_masiva_historica(
                     detalle_omitidas.append({"fila": idx, "razon": "fecha vacía"})
                     filas_omitidas += 1
                     continue
-                
+
                 try:
                     fecha = datetime.strptime(fecha_str, "%Y-%m-%d").date()
                 except ValueError:
@@ -482,18 +535,18 @@ async def carga_masiva_historica(
                         detalle_omitidas.append({"fila": idx, "razon": f"fecha inválida: {fecha_str}"})
                         filas_omitidas += 1
                         continue
-                
+
                 # Parsear cantidades
                 afiliados = int(fila.get('afiliados', 0) or 0)
                 publico = int(fila.get('publico', 0) or 0)
                 sociales = int(fila.get('sociales', 0) or 0)
                 cocineras = int(fila.get('cocineras', 0) or 0)
-                
+
                 if afiliados + publico + sociales + cocineras == 0:
                     detalle_omitidas.append({"fila": idx, "razon": "todos los tipos en 0"})
                     filas_omitidas += 1
                     continue
-                
+
                 # Insertar ventas para cada tipo
                 tipos_venta = [
                     ('Afiliado', afiliados),
@@ -501,7 +554,7 @@ async def carga_masiva_historica(
                     ('Social', sociales),
                     ('Cocinera', cocineras),
                 ]
-                
+
                 for tipo, cantidad in tipos_venta:
                     if cantidad > 0:
                         # Determinar comensal_id y precio
@@ -509,37 +562,37 @@ async def carga_masiva_historica(
                             comensal_id = cocinera_id
                             precio = 0.00
                         else:
-                            # Para otros tipos, usar comensal_id = NULL para históricos
+                            # Históricos sin ficha individual: comensal_id NULL
                             comensal_id = None
                             precio = {'Afiliado': 3.00, 'Normal': 5.00, 'Social': 0.00}[tipo]
-                        
+
                         monto = precio * cantidad
-                        
+
                         cur.execute("""
-                            INSERT INTO padron_diario 
+                            INSERT INTO padron_diario
                             (comensal_id, fecha, tipo_comensal_venta, raciones, monto_pagado, tipo_menu, observacion)
                             VALUES (%s, %s, %s, %s, %s, 'Almuerzo regular', 'Carga histórica COM-63')
                             ON CONFLICT DO NOTHING
                             RETURNING id;
                         """, (comensal_id, fecha, tipo, cantidad, monto))
-                        
+
                         if cur.fetchone():
                             ventas_creadas += 1
-                
+
                 filas_procesadas += 1
                 fechas.append(fecha)
-                
+
             except Exception as e:
                 detalle_omitidas.append({"fila": idx, "razon": str(e)})
                 filas_omitidas += 1
-        
+
         db.commit()
-        
+
         rango = {
             "desde": min(fechas).isoformat() if fechas else None,
             "hasta": max(fechas).isoformat() if fechas else None
         }
-        
+
         return {
             "filas_procesadas": filas_procesadas,
             "filas_omitidas": filas_omitidas,
@@ -547,7 +600,7 @@ async def carga_masiva_historica(
             "detalle_omitidas": detalle_omitidas[:10],
             "rango_fechas": rango
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
