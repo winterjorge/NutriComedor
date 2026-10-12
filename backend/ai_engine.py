@@ -1,59 +1,39 @@
 """
 ai_engine.py
 Objetivo: Motor de Machine Learning para predicción de demanda de comensales.
-          COM-64: entrena Random Forest con datos REALES de padron_diario.
-          Si no hay suficientes datos reales (especialmente para el día de la semana
-          específico), devuelve None para que la UI muestre un mensaje de advertencia.
+Historial:
+ - Sprint 1/2: versión original con datos simulados hardcodeados y pisos mínimos.
+ - COM-64: entrena Random Forest con datos REALES de padron_diario (≥30 días).
+ - COM-64 v3: devuelve None cuando faltan datos del día de semana consultado
+   (≥4 históricos) para que la UI muestre "datos insuficientes".
+ - COM-64 v4 (este archivo): se RETIRAN los pisos mínimos (max(limites, predicción))
+   que disfrazaban la salida del modelo con los parámetros IA_MIN_*/IA_FINDE_*.
+   Ahora se devuelve la predicción PURA más indicadores de calidad:
+     * confianza_pct: según cuántas muestras históricas existen del día de semana.
+     * n_muestras: días históricos del día de semana usados.
+     * r2: R² por tipo (Social/Afiliado/Normal) vía cross_val_predict.
+   Política v4: "si no se puede predecir con datos reales, NO se predice".
+   Trazabilidad: el modelo simulado y los pisos v3 quedan COMENTADOS al final.
+Uso: Importado por routers/padron.py (predecir_demanda_raciones).
+Referencia: ticket COM-64 (solo trazabilidad).
 """
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import cross_val_predict
+from sklearn.metrics import r2_score
 from collections import defaultdict
-
-# ==========================================
-# DATOS DE ENTRENAMIENTO SIMULADOS (fallback interno, no se usa si hay datos reales)
-# ==========================================
-def _generar_datos_entrenamiento():
-    """Genera datos de entrenamiento simulados basados en patrones reales"""
-    X = []
-    y = []
-    for semana in range(104):
-        for dia_semana in range(7):
-            dia_mes = ((semana * 7) + dia_semana) % 31 + 1
-            if dia_semana == 0: base_social, base_afiliado, base_normal = 22, 43, 110
-            elif dia_semana == 1: base_social, base_afiliado, base_normal = 21, 44, 115
-            elif dia_semana == 2: base_social, base_afiliado, base_normal = 20, 45, 120
-            elif dia_semana == 3: base_social, base_afiliado, base_normal = 21, 44, 118
-            elif dia_semana == 4: base_social, base_afiliado, base_normal = 23, 42, 105
-            else: base_social, base_afiliado, base_normal = 8, 15, 25
-            
-            if dia_mes <= 5: factor = 0.95
-            elif 10 <= dia_mes <= 20: factor = 1.05
-            elif dia_mes >= 25: factor = 1.15
-            else: factor = 1.0
-            
-            np.random.seed(semana * 7 + dia_semana)
-            variacion = np.random.uniform(0.9, 1.1)
-            X.append([dia_semana, dia_mes])
-            y.append([
-                int(base_social * factor * variacion),
-                int(base_afiliado * factor * variacion),
-                int(base_normal * factor * variacion)
-            ])
-    return np.array(X), np.array(y)
-
-X_train_sim, y_train_sim = _generar_datos_entrenamiento()
-rf_regressor_simulado = RandomForestRegressor(
-    n_estimators=100, max_depth=5, min_samples_split=10,
-    min_samples_leaf=5, random_state=42, n_jobs=-1
-)
-rf_regressor_simulado.fit(X_train_sim, y_train_sim)
 
 
 # ==========================================
 # COM-64: CARGA DE DATOS REALES DESDE padron_diario
 # ==========================================
 def _cargar_datos_reales(cur):
-    """Extrae datos reales agrupados por fecha y tipo."""
+    """
+    Extrae datos reales agrupados por fecha y tipo (Social/Afiliado/Normal).
+    COM-64 v4: además del matriz X/y, devuelve el conteo de muestras por día de
+    la semana (muestras_por_dia_semana) para calcular la confianza de la predicción.
+    Retorna (X, y, n_dias_unicos, muestras_por_dia_semana) o (None, None, 0, {}).
+    """
     cur.execute("""
         SELECT fecha, tipo_comensal_venta, SUM(raciones) as total
         FROM padron_diario
@@ -63,91 +43,168 @@ def _cargar_datos_reales(cur):
     """)
     rows = cur.fetchall()
     if not rows:
-        return None, None, 0
+        return None, None, 0, {}
 
     datos_por_fecha = defaultdict(lambda: {'Social': 0, 'Afiliado': 0, 'Normal': 0})
     for r in rows:
         datos_por_fecha[r['fecha']][r['tipo_comensal_venta']] = int(r['total'])
 
     X, y = [], []
+    muestras_por_dia_semana = defaultdict(int)
     for fecha, tipos in datos_por_fecha.items():
         X.append([fecha.weekday(), fecha.day])
         y.append([tipos['Social'], tipos['Afiliado'], tipos['Normal']])
+        muestras_por_dia_semana[fecha.weekday()] += 1
 
-    return np.array(X), np.array(y), len(datos_por_fecha)
+    return np.array(X), np.array(y), len(datos_por_fecha), dict(muestras_por_dia_semana)
 
 
+# ==========================================
+# COM-64 v4: CONFIANZA SEGÚN MUESTRAS DEL DÍA DE SEMANA
+# ==========================================
+def _calcular_confianza(n_muestras_dia: int) -> int:
+    """
+    Nivel de confianza (0-100) de la predicción según cuántos días históricos del
+    mismo día de semana alimentan el modelo:
+      >= 12 muestras (3+ meses): 90-100% (alta)
+      8-11 muestras (2-3 meses): 70-89%  (media)
+      4-7  muestras (1-2 meses): 50-69%  (baja)
+      < 4: no se predice (el caller devuelve None antes de llegar aquí).
+    """
+    if n_muestras_dia >= 12:
+        return min(100, 90 + (n_muestras_dia - 12) * 2)
+    if n_muestras_dia >= 8:
+        return 70 + (n_muestras_dia - 8) * 5
+    if n_muestras_dia >= 4:
+        return 50 + (n_muestras_dia - 4) * 5
+    return 0
+
+
+# ==========================================
+# COM-64 v4: ENTRENAMIENTO CON DATOS REALES + MÉTRICAS
+# ==========================================
 def _entrenar_con_datos_reales(cur):
-    """Entrena un RF con datos reales si hay ≥30 días de historial."""
+    """
+    Entrena un RandomForest con datos reales si hay ≥30 días de historial.
+    COM-64 v4: además del modelo, calcula R² por tipo de comensal mediante
+    cross_val_predict (validación cruzada) para que la UI pueda mostrar la calidad
+    del ajuste. Retorna (modelo, metadata) o (None, {}) si no hay datos suficientes.
+    """
     try:
-        X_real, y_real, n_dias = _cargar_datos_reales(cur)
+        X_real, y_real, n_dias, muestras_por_dia = _cargar_datos_reales(cur)
         if X_real is None or n_dias < 30:
-            return None
+            return None, {}
+
         modelo = RandomForestRegressor(
             n_estimators=100, max_depth=5, min_samples_split=5,
             min_samples_leaf=2, random_state=42, n_jobs=-1
         )
         modelo.fit(X_real, y_real)
-        return modelo
+
+        # COM-64 v4: R² por tipo con validación cruzada (nunca falla el endpoint)
+        r2 = None
+        try:
+            cv = 5 if n_dias >= 25 else (3 if n_dias >= 12 else 2)
+            pred_cv = cross_val_predict(modelo, X_real, y_real, cv=cv)
+            r2_arr = r2_score(y_real, pred_cv, multioutput='raw_values')
+            r2 = {
+                'Social': round(float(r2_arr[0]), 3),
+                'Afiliado': round(float(r2_arr[1]), 3),
+                'Normal': round(float(r2_arr[2]), 3),
+            }
+        except Exception as e:
+            print(f"[AI_ENGINE] No se pudo calcular R² cruzado: {e}")
+            r2 = None
+
+        return modelo, {
+            'muestras_por_dia': muestras_por_dia,
+            'r2': r2,
+            'n_dias': n_dias,
+        }
     except Exception as e:
         print(f"[AI_ENGINE] Error al entrenar con datos reales: {e}")
-        return None
+        return None, {}
 
 
 # ==========================================
-# PREDICCIÓN
+# PREDICCIÓN (COM-64 v4: pura + confianza, sin pisos)
 # ==========================================
 def predecir_demanda_raciones(dia_semana: int, dia_mes: int,
-                               limites_minimos: dict = None,
-                               limites_finde: dict = None,
-                               cur=None):
+                              limites_minimos: dict = None,
+                              limites_finde: dict = None,
+                              cur=None):
     """
-    COM-64 v3: Si no hay suficientes datos reales para el día de la semana específico,
-    devuelve None para que la UI muestre un mensaje de "datos insuficientes".
-    """
-    limites_minimos = limites_minimos or {'SOCIAL': 15, 'AFILIADO': 35, 'NORMAL': 80}
-    limites_finde = limites_finde or {'SOCIAL': 10, 'AFILIADO': 20, 'NORMAL': 30}
+    COM-64 v4: predice la demanda PURA del modelo para una fecha específica.
+    Retorna un dict:
+      {'prediccion': [social, afiliado, normal],
+       'confianza_pct': int 0-100,
+       'n_muestras': int,
+       'r2': {'Social':..,'Afiliado':..,'Normal':..} o None}
+    o None si no hay datos reales suficientes (la UI muestra "datos insuficientes").
 
+    Los parámetros limites_minimos/limites_finde se mantienen en la firma por
+    compatibilidad con callers antiguos, pero YA NO se aplican como piso
+    (trazabilidad: lógica v3 comentada al final del archivo).
+    """
     try:
         if not (0 <= dia_semana <= 6) or not (1 <= dia_mes <= 31):
             return None
-
-        modelo_es_real = False
-        if cur is not None:
-            # Verificar si hay al menos 4 registros históricos para ESTE día de la semana
-            # EXTRACT(ISODOW FROM fecha): 1=Lunes ... 7=Domingo
-            # dia_semana: 0=Lunes ... 6=Domingo -> sumamos 1
-            cur.execute("""
-                SELECT COUNT(DISTINCT fecha) as total_dias
-                FROM padron_diario 
-                WHERE tipo_comensal_venta IN ('Social', 'Afiliado', 'Normal')
-                AND EXTRACT(ISODOW FROM fecha) = %s
-            """, (dia_semana + 1,))
-            count_dia = cur.fetchone()['total_dias']
-            
-            if count_dia >= 4:
-                modelo_real = _entrenar_con_datos_reales(cur)
-                if modelo_real is not None:
-                    modelo = modelo_real
-                    modelo_es_real = True
-
-        # Si no pudimos usar un modelo real, no predecimos (devolvemos None)
-        if not modelo_es_real:
+        if cur is None:
             return None
 
+        # Muestras históricas del día de semana consultado (ISODOW: 1=Lun .. 7=Dom)
+        cur.execute("""
+            SELECT COUNT(DISTINCT fecha) as total_dias
+            FROM padron_diario
+            WHERE tipo_comensal_venta IN ('Social', 'Afiliado', 'Normal')
+              AND EXTRACT(ISODOW FROM fecha) = %s
+        """, (dia_semana + 1,))
+        count_dia = cur.fetchone()['total_dias']
+        if count_dia < 4:
+            return None
+
+        modelo, metadata = _entrenar_con_datos_reales(cur)
+        if modelo is None:
+            return None
+
+        # COM-64 v4: predicción PURA del modelo, sin pisos artificiales
         prediccion = modelo.predict([[dia_semana, dia_mes]])[0]
+        social = int(round(prediccion[0]))
+        afiliado = int(round(prediccion[1]))
+        normal = int(round(prediccion[2]))
 
-        # Aplicar mínimos configurables como piso
-        if dia_semana >= 5:
-            social = max(limites_finde['SOCIAL'], int(round(prediccion[0])))
-            afiliado = max(limites_finde['AFILIADO'], int(round(prediccion[1])))
-            normal = max(limites_finde['NORMAL'], int(round(prediccion[2])))
-        else:
-            social = max(limites_minimos['SOCIAL'], int(round(prediccion[0])))
-            afiliado = max(limites_minimos['AFILIADO'], int(round(prediccion[1])))
-            normal = max(limites_minimos['NORMAL'], int(round(prediccion[2])))
-
-        return [social, afiliado, normal]
+        n_muestras = metadata.get('muestras_por_dia', {}).get(dia_semana, count_dia)
+        return {
+            'prediccion': [social, afiliado, normal],
+            'confianza_pct': _calcular_confianza(n_muestras),
+            'n_muestras': n_muestras,
+            'r2': metadata.get('r2'),
+        }
     except Exception as e:
         print(f"Error en predicción de demanda: {e}")
         return None
+
+
+# ==========================================
+# COM-64 v4 (TRAZABILIDAD): código v3 COMENTADO (pisos mínimos y modelo simulado)
+# ==========================================
+# --- Pisos mínimos v3 (distorsionaban la predicción real; RETIRADOS en v4): ---
+#     if dia_semana >= 5:
+#         social = max(limites_finde['SOCIAL'], int(round(prediccion[0])))
+#         afiliado = max(limites_finde['AFILIADO'], int(round(prediccion[1])))
+#         normal = max(limites_finde['NORMAL'], int(round(prediccion[2])))
+#     else:
+#         social = max(limites_minimos['SOCIAL'], int(round(prediccion[0])))
+#         afiliado = max(limites_minimos['AFILIADO'], int(round(prediccion[1])))
+#         normal = max(limites_minimos['NORMAL'], int(round(prediccion[2])))
+#     return [social, afiliado, normal]
+#
+# --- Modelo simulado v2/v3 (fallback que ya NO se usa; política v4: sin datos no
+#     hay predicción). Se conserva la referencia histórica: ---
+# def _generar_datos_entrenamiento():
+#     X, y = [], []
+#     for semana in range(104):
+#         for dia_semana in range(7):
+#             ... bases simuladas por día (22/43/110 ... 8/15/25) ...
+#     return np.array(X), np.array(y)
+# rf_regressor_simulado = RandomForestRegressor(...).fit(X_train_sim, y_train_sim)

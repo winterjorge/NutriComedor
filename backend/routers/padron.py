@@ -11,16 +11,13 @@ Historial:
    (menú a costo cero, comensal genérico CO000000).
  - COM-64: predicción de demanda con datos reales de padron_diario (pasa el cursor
    al motor de IA para entrenar con historial real ≥30 días).
- - COM-64 v3 (este archivo): dos blindajes de lectura, sin tocar datos:
-     1) /padron/prediccion_demanda es NULL-SAFE: si el motor devuelve None (menos de
-        4 históricos del día de semana), responde 200 con sin_datos=True y valores
-        null. ANTES hacía pred[0] sobre None -> TypeError -> HTTP 500, y ese 500
-        tumbaba el Promise.all de usePOS.js dejando la vista SIN stats y SIN ventas
-        del día ("No hay ventas hoy" aunque sí existieran en BD). Ningún fix anterior
-        borró ventas: era un fallo de lectura, no de escritura.
-     2) /padron/hoy usa LEFT JOIN + COALESCE para que las filas del día sin comensal
-        vinculado (comensal_id NULL, p.ej. una carga masiva COM-63 del día) NO queden
-        ocultas por el INNER JOIN anterior (que se conserva comentado por trazabilidad).
+ - COM-64 v3: /padron/prediccion_demanda NULL-SAFE (sin_datos=True en vez de 500) y
+   /padron/hoy con LEFT JOIN + COALESCE para no ocultar filas sin comensal vinculado.
+ - COM-64 v4 (este archivo): el endpoint de predicción transmite además los
+   indicadores de calidad del motor: confianza_pct, n_muestras y r2 por tipo.
+   La predicción expuesta es la PURA del modelo (el motor ya no aplica pisos
+   mínimos IA_MIN_*/IA_FINDE_*; esos parámetros quedan en BD sin uso activo).
+   Trazabilidad: la respuesta v3 (solo pred[0..2] y sum(pred)) queda comentada.
 Uso: Registrado en main.py sin prefijo propio (rutas /padron/* y /comensales/*).
 Referencia: tickets COM-62, COM-63, COM-64 (solo trazabilidad).
 """
@@ -68,30 +65,29 @@ class EditarComensalPOSInput(BaseModel):
 
 
 # ==========================================
-# PREDICCIÓN DE DEMANDA (COM-64 / COM-64 v3: null-safe)
+# PREDICCIÓN DE DEMANDA (COM-64 / v3 null-safe / v4 con confianza)
 # ==========================================
 @router.get("/padron/prediccion_demanda")
 def predecir_demanda_diaria(fecha_str: str = None, db=Depends(get_db)):
     """
-    COM-64: predice la demanda diaria usando datos reales de padron_diario cuando
-    existen ≥30 días de historial y ≥4 del mismo día de semana; el motor entrena un
-    Random Forest en el momento con ese historial.
-    COM-64 v3: si el motor devuelve None (datos insuficientes para ESE día de la
-    semana), se responde 200 con sin_datos=True y valores null para que la UI muestre
-    el mensaje ámbar de advertencia. Nunca se responde 500: el TypeError anterior
-    (pred[0] sobre None) rompía el Promise.all de usePOS.js y vaciaba stats y ventas
-    del día en pantalla.
+    COM-64 v4: predice la demanda diaria con datos reales de padron_diario y expone
+    la predicción PURA del modelo más sus indicadores de calidad:
+      - confianza_pct: nivel de confianza según muestras del día de semana.
+      - n_muestras: días históricos del mismo día de semana.
+      - r2: R² por tipo (Social/Afiliado/Normal) con validación cruzada.
+    Si el motor devuelve None (menos de 4 históricos del día de semana, o menos de
+    30 días totales), responde 200 con sin_datos=True y valores null: NUNCA 500
+    (el TypeError de v2 rompía el Promise.all de usePOS.js y vaciaba stats/ventas).
     """
     fecha_eval = datetime.strptime(fecha_str, "%Y-%m-%d").date() if fecha_str else date.today()
 
-    # 1. Leer parámetros de IA desde la BD de forma centralizada
+    # 1. Leer parámetros de IA desde la BD (COM-64 v4: se conservan por compatibilidad
+    #    y porque otros módulos los consultan; el motor ya NO los usa como piso).
     claves_ia = [
         'IA_MIN_SOCIAL', 'IA_MIN_AFILIADO', 'IA_MIN_NORMAL',
         'IA_FINDE_SOCIAL', 'IA_FINDE_AFILIADO', 'IA_FINDE_NORMAL'
     ]
     params = get_parametros_dict(db, claves_ia)
-
-    # 2. Estructurar diccionarios para el motor de IA
     limites_minimos = {
         'SOCIAL': params.get('IA_MIN_SOCIAL', 15),
         'AFILIADO': params.get('IA_MIN_AFILIADO', 35),
@@ -103,7 +99,7 @@ def predecir_demanda_diaria(fecha_str: str = None, db=Depends(get_db)):
         'NORMAL': params.get('IA_FINDE_NORMAL', 30)
     }
 
-    # 3. COM-64: ejecutar predicción pasando el cursor para usar datos reales
+    # 2. COM-64: ejecutar predicción pasando el cursor para usar datos reales
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         pred = predecir_demanda_raciones(
@@ -116,9 +112,7 @@ def predecir_demanda_diaria(fecha_str: str = None, db=Depends(get_db)):
     finally:
         cur.close()
 
-    # COM-64 v3: sin datos suficientes -> flag explícito, nunca excepción.
-    # Trazabilidad: la versión COM-64 hacía directamente pred[0]/pred[1]/pred[2] y
-    # sum(pred), tronando con TypeError cuando el motor devolvía None.
+    # COM-64 v3/v4: sin datos suficientes -> flag explícito, nunca excepción.
     if pred is None:
         return {
             "fecha": fecha_eval.strftime("%Y-%m-%d"),
@@ -127,15 +121,27 @@ def predecir_demanda_diaria(fecha_str: str = None, db=Depends(get_db)):
             "prediccion_afiliado": None,
             "prediccion_normal": None,
             "total_raciones_sugeridas": None,
+            # COM-64 v4: indicadores de calidad también nulos
+            "confianza_pct": None,
+            "n_muestras": 0,
+            "r2": None,
         }
 
+    # COM-64 v4: el motor devuelve dict con predicción pura + confianza + r2.
+    # Trazabilidad (respuesta v3, comentada):
+    #   return {"fecha": ..., "sin_datos": False,
+    #           "prediccion_social": pred[0], "prediccion_afiliado": pred[1],
+    #           "prediccion_normal": pred[2], "total_raciones_sugeridas": sum(pred)}
     return {
         "fecha": fecha_eval.strftime("%Y-%m-%d"),
         "sin_datos": False,
-        "prediccion_social": pred[0],
-        "prediccion_afiliado": pred[1],
-        "prediccion_normal": pred[2],
-        "total_raciones_sugeridas": sum(pred)
+        "prediccion_social": pred['prediccion'][0],
+        "prediccion_afiliado": pred['prediccion'][1],
+        "prediccion_normal": pred['prediccion'][2],
+        "total_raciones_sugeridas": sum(pred['prediccion']),
+        "confianza_pct": pred['confianza_pct'],
+        "n_muestras": pred['n_muestras'],
+        "r2": pred['r2'],
     }
 
 
