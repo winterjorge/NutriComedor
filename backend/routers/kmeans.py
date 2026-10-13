@@ -2,7 +2,7 @@
 routers/kmeans.py
 Objetivo: Endpoints del módulo de clustering nutricional del recetario (COM-5):
 entrenamiento del modelo K-means (k=4), resumen del modelo activo, recetas
-por cluster, auditoría de reglas R1-R3, diagnóstico del esquema y, desde
+por cluster, auditoría de reglas, diagnóstico del esquema y, desde
 COM-5 v4, la CONFIGURACIÓN de proteínas permitidas / ingredientes vetados.
 Historial:
 COM-5 v1: endpoints con permiso de entrenamiento para Admin de Sistemas o Directivo.
@@ -10,15 +10,19 @@ COM-5 v4: la vista de Clusters K-Means pasa a ser EXCLUSIVA del Administrador de
     Sistemas (módulo 'clusters'), por lo que TODOS los endpoints exigen
     es_admin_sistema. Se agregan GET/PUT /kmeans/proteinas. El permiso anterior
     (Directivo podía entrenar) queda COMENTADO abajo por trazabilidad.
-COM-60 (este archivo): K-means v2:
-    * GET /kmeans/resumen expone (aditivo) medianas por cluster, métricas post-hoc
-      (precio mediano, Fe/S/, Prot/S/), scaler, k_evaluados y k_recomendado desde
-      parametros del modelo; ninguna clave existente se elimina.
-    * GET /kmeans/diagnostico-k nuevo: curva silhouette/inercia k=2..8 y
-      k_recomendado sin persistir nada (criterio D5).
-    * GET /kmeans/clusters devuelve también las 6 variables del snapshot.
+COM-60: K-means v2: /resumen expone medianas por cluster, métricas post-hoc
+    (Fe/S/, Prot/S/), scaler, k_evaluados y k_recomendado; /diagnostico-k nuevo con
+    curva silhouette/inercia k=2..8; /clusters devuelve las 6 variables del snapshot.
+COM-71 (este archivo): exposición ADITIVA del flag de elegibilidad económica:
+    * /resumen agrega n_costeables / n_no_costeables globales y por cluster
+      (contados sobre recetas_clusters.costeable, migración COM-71).
+    * /clusters ya devolvía costeable vía obtener_recetas_por_cluster (Drop 1); se
+      documenta en el docstring.
+    * /candidatas ya devolvía n_costeables / n_no_costeables vía listar_candidatas
+      (Drop 1); se documenta en el docstring.
+    Ninguna clave existente se elimina ni se renombra.
 Uso: Registrado en main.py con prefijo /api/v1.
-Referencia: tickets COM-5 / COM-5 v4 / COM-60 (solo trazabilidad).
+Referencia: tickets COM-5 / COM-5 v4 / COM-60 / COM-71 (solo trazabilidad).
 """
 import json
 import unicodedata
@@ -229,11 +233,12 @@ def diagnostico_k(usuario_solicitante_id: int, db=Depends(get_db)):
 @router.post("/entrenar")
 def entrenar_modelo(usuario_solicitante_id: int, db=Depends(get_db)):
     """
-    COM-60: entrena el modelo K-means (k=KMEANS_K, default 4) con las 6 variables
-    nutricionales por ración escaladas con RobustScaler, tras aplicar las reglas
-    R1-R4; re-etiqueta centroides por medianas reales (prioridad Anemia Cero en el
-    código 1), calcula métricas post-hoc por cluster (Fe/S/, Prot/S/) y el
-    diagnóstico de k óptimo, y persiste el modelo activo. Exclusivo Admin.
+    COM-60 + COM-71: entrena el modelo K-means (k=KMEANS_K, default 4) con las 6
+    variables nutricionales por ración escaladas con RobustScaler, tras aplicar R0-R2;
+    el precio ya NO excluye (R3 informativa) y la completitud de precios es un flag
+    `costeable` (R4) que consume el greedy. Re-etiqueta centroides por medianas reales,
+    calcula métricas post-hoc por cluster (solo costeables) y el diagnóstico de k
+    óptimo, y persiste el modelo activo. Exclusivo Admin.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -260,9 +265,10 @@ def entrenar_modelo(usuario_solicitante_id: int, db=Depends(get_db)):
 def resumen_modelo(usuario_solicitante_id: int, db=Depends(get_db)):
     """
     Metadatos del modelo activo (métricas, centroides) + agregado por cluster.
-    COM-60 (aditivo): expone scaler, features, k_evaluados, k_recomendado,
-    n_imputadas, medianas y post-hoc por cluster desde parametros/centroides del
-    modelo; las claves históricas (clusters, centroides, etiquetas) se conservan.
+    COM-60 (aditivo): scaler, features, k_evaluados, k_recomendado, n_imputadas,
+    medianas y post-hoc por cluster desde parametros/centroides del modelo.
+    COM-71 (aditivo): n_costeables / n_no_costeables globales y por cluster, contados
+    sobre recetas_clusters.costeable (flag R4). Las claves históricas se conservan.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -276,6 +282,8 @@ def resumen_modelo(usuario_solicitante_id: int, db=Depends(get_db)):
             SELECT cluster_codigo,
                    cluster_etiqueta,
                    COUNT(*)                    AS n_recetas,
+                   SUM(CASE WHEN costeable THEN 1 ELSE 0 END)      AS n_costeables,
+                   SUM(CASE WHEN NOT costeable THEN 1 ELSE 0 END)  AS n_no_costeables,
                    ROUND(AVG(energia_kcal), 2) AS energia_prom,
                    ROUND(AVG(hierro_mg), 2)    AS hierro_prom,
                    ROUND(AVG(proteina_g), 2)   AS proteina_prom,
@@ -289,6 +297,14 @@ def resumen_modelo(usuario_solicitante_id: int, db=Depends(get_db)):
             ORDER BY cluster_codigo;
         """, (modelo['id'],))
         clusters = cur.fetchall()
+        # COM-71: conteo global de elegibilidad económica del modelo activo
+        cur.execute("""
+            SELECT COUNT(*) FILTER (WHERE costeable)     AS n_costeables,
+                   COUNT(*) FILTER (WHERE NOT costeable) AS n_no_costeables
+            FROM recetas_clusters
+            WHERE modelo_id = %s;
+        """, (modelo['id'],))
+        tot_cost = cur.fetchone()
         # COM-60: enriquecimiento aditivo desde parametros del modelo
         params = modelo['parametros'] or {}
         medianas = params.get('medianas_por_cluster', {}) or {}
@@ -317,6 +333,9 @@ def resumen_modelo(usuario_solicitante_id: int, db=Depends(get_db)):
             'n_imputadas': params.get('n_imputadas', 0),
             'post_hoc_por_cluster': post_hoc,
             'medianas_por_cluster': medianas,
+            # COM-71: elegibilidad económica del modelo (aditivo)
+            'n_costeables': int(tot_cost['n_costeables'] or 0),
+            'n_no_costeables': int(tot_cost['n_no_costeables'] or 0),
         }
     except HTTPException:
         raise
@@ -336,7 +355,11 @@ def recetas_por_cluster(
                                 description="Código de cluster (1-4). Si se omite, devuelve todos."),
     db=Depends(get_db),
 ):
-    """Recetas asignadas al modelo activo con su snapshot de features por ración (6 variables COM-60)."""
+    """
+    Recetas asignadas al modelo activo con su snapshot de features por ración
+    (6 variables COM-60) y, desde COM-71, el flag `costeable` que indica si la receta
+    tenía precios completos al entrenar (elegibilidad económica para el greedy).
+    """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         _validar_admin(cur, usuario_solicitante_id)
@@ -359,7 +382,11 @@ def recetas_por_cluster(
 # ==========================================
 @router.get("/candidatas")
 def recetas_candidatas(usuario_solicitante_id: int, db=Depends(get_db)):
-    """Recalcula el dataset con los parámetros vigentes sin persistir (auditoría R1-R4)."""
+    """
+    Recalcula el dataset con los parámetros vigentes sin persistir (auditoría R0-R2).
+    COM-71: incluye n_costeables / n_no_costeables y, en cada fila apta, el flag
+    `costeable` con sus ingredientes_sin_precio para dirigir la carga de precios.
+    """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         _validar_admin(cur, usuario_solicitante_id)
