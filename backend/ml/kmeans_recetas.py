@@ -2,9 +2,9 @@
 ml/kmeans_recetas.py
 Objetivo: Motor del modelo K-means del recetario (COM-5). Construye el dataset por
 ración, aplica las reglas de negocio del comedor (R0 seis nutrientes completos,
-R1 proteínas permitidas, R2 veto a res/cerdo, R3 sin recetas de precio alto,
-R4 precios completos), entrena K-means, etiqueta los centroides semánticamente
-(biyección determinista) y persiste el modelo activo con su asignación receta->cluster.
+R1 proteínas permitidas, R2 veto configurable), entrena K-means, etiqueta los
+centroides semánticamente (biyección determinista) y persiste el modelo activo con
+su asignación receta->cluster.
 Historial:
 COM-5 v1/v2/v3: reglas hardcodeadas; detección defensiva de esquema; FIX de precios
     por gramo vía insumos->historial_precios.
@@ -25,14 +25,25 @@ COM-60: K-MEANS v2: FEATURES = 6 variables NUTRICIONALES (el precio sale de la
     distancia); RobustScaler; re-etiquetado por MEDIANAS (1=Anti-Anemia alto hierro,
     2=Energético denso, 3=Proteico balanceado, 4=Ligero complementario); diagnóstico
     de k óptimo (k=2..8, informativo); métricas post-hoc por cluster (Fe/S/, Prot/S/).
-COM-60 v2.1 (este archivo): REGLA R0 pedida por la administradora: el universo del
-    modelo son SOLO recetas con los 6 nutrientes COMPLETOS (las 25 reales capturadas
-    por UI y las futuras con el mismo formato). Las 20 recetas legacy del seed
-    (vitamina_a_ug/zinc_mg/carbohidratos_g NULL) se EXCLUYEN con motivo auditable
-    'nutricion_incompleta' en lugar de imputarse; el bloque de imputación por mediana
-    de COM-60 v2 queda COMENTADO por trazabilidad y n_imputadas se reporta en 0.
+COM-60 v2.1: REGLA R0: el universo del modelo son SOLO recetas con los 6 nutrientes
+    COMPLETOS; las incompletas se excluyen con motivo auditable 'nutricion_incompleta'
+    (sin imputación; el bloque de imputación por mediana queda COMENTADO).
+COM-71 (este archivo): MODELO LIMPIO (criterio cerrado con la administradora):
+    * R3 (excluir por precio alto) SE ELIMINA del clustering: el precio ya no decide
+      qué recetas existen para el motor; `nivel_precio` queda SOLO informativo en el
+      snapshot (bajo/medio/alto/incompleto/sin_precio). Los umbrales
+      KMEANS_PRECIO_BAJO_MAX/MEDIO_MAX se conservan para ese etiquetado informativo.
+      (Bloque de exclusión anterior COMENTADO por trazabilidad.)
+    * R4 (precios completos) pasa de EXCLUSIÓN a FLAG `costeable`: una receta sin
+      precios completos ENTRA al cluster (su nutrición es válida y estable) pero queda
+      marcada costeable=False; el greedy (COM-71 Drop 2) no puede seleccionarla y la
+      audita. Cuando llegue el precio (scraper/manual) vuelve a ser seleccionable SIN
+      re-entrenar. Se persiste en recetas_clusters.costeable (migración COM-71).
+    * Las métricas post-hoc por cluster (precio mediano, Fe/S/, Prot/S/) y la mediana
+      de precio se calculan SOLO sobre miembros costeables (no sesgar con ceros).
+    * /candidatas y el resumen exponen n_costeables / n_no_costeables para auditoría.
 Uso: Importado por routers/kmeans.py y por ml/greedy_search.py (reglas R1/R2).
-Referencia: tickets COM-5 / COM-37 / COM-47 / COM-60 (solo trazabilidad).
+Referencia: tickets COM-5 / COM-37 / COM-47 / COM-60 / COM-71 (solo trazabilidad).
 """
 import re
 import json
@@ -274,7 +285,11 @@ def diagnosticar_esquema(cur):
 # CARGA DE PARÁMETROS Y CONTEXTO
 # ==========================================
 def _parametros_kmeans(cur):
-    """Lee k y los umbrales de precio por ración desde parametros_sistema."""
+    """
+    Lee k y los umbrales de precio por ración desde parametros_sistema.
+    COM-71: los umbrales YA NO excluyen recetas; solo etiquetan nivel_precio
+    (informativo) en el snapshot.
+    """
     cur.execute("""
         SELECT clave, valor FROM parametros_sistema
         WHERE clave IN ('KMEANS_K', 'KMEANS_PRECIO_BAJO_MAX', 'KMEANS_PRECIO_MEDIO_MAX');
@@ -377,18 +392,18 @@ def _cargar_unidades(cur):
 
 
 # ==========================================
-# CONSTRUCCIÓN DEL DATASET (por ración) + REGLAS R0-R4
+# CONSTRUCCIÓN DEL DATASET (por ración) + REGLAS R0-R2 + FLAGS COM-71
 # ==========================================
 def construir_dataset(cur, precio_bajo_max, precio_medio_max):
     """
-    Construye el dataset POR RACIÓN de todas las recetas y aplica las reglas:
-    R0 (COM-60 v2.1): SOLO recetas con los 6 nutrientes COMPLETOS (NOT NULL). Las
-       legacy del seed y cualquier receta incompleta se excluyen con motivo
-       auditable 'nutricion_incompleta' (ya NO se imputan).
-    R1/R2 (COM-5 v4): proteínas permitidas / veto res-cerdo, configurables.
-    R3: sin recetas de precio alto (umbrales de parametros_sistema).
-    R4 (COM-37 v2): PRECIOS COMPLETOS: si algún ingrediente no tiene NINGUNA fuente
-       de precio, la receta se excluye con motivo 'precio_incompleto'.
+    Construye el dataset POR RACIÓN de todas las recetas y aplica:
+    R0 (COM-60 v2.1): SOLO recetas con los 6 nutrientes COMPLETOS (NOT NULL); las
+       incompletas se EXCLUYEN con motivo auditable 'nutricion_incompleta'.
+    R1/R2 (COM-5 v4): proteínas permitidas / veto configurable; EXCLUYEN.
+    COM-71 (R3 eliminada): el precio YA NO excluye. nivel_precio es informativo
+       (bajo/medio/alto según umbrales; 'incompleto'/'sin_precio' si no costeable).
+    COM-71 (R4 como flag): si faltan fuentes de precio o el costo es 0, la receta
+       NO se excluye: entra al cluster con costeable=False y el greedy la audita.
     COM-47 v3: la NUTRICIÓN se toma DIRECTA de recetas_almuerzo (ya por ración).
     Retorna (filas, excluidas).
     """
@@ -517,7 +532,6 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
     excluidas = []
     for rec in recetas:
         # COM-60 v2.1 (R0): universo = recetas con los 6 nutrientes COMPLETOS.
-        # Trazabilidad: antes solo se omitía silenciosamente si energia_kcal era NULL.
         if any(rec.get(c) is None for c in
                ('energia_kcal', 'hierro_mg', 'proteina_g', 'vitamina_a_ug', 'zinc_mg', 'carbohidratos_g')):
             excluidas.append({'receta_id': rec['id'], 'nombre': rec['nombre'],
@@ -534,7 +548,7 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
             if re_permitida.search(nombre_norm):
                 tiene_proteina_permitida = True
             elif re_vetada.search(nombre_norm):
-                motivo_exclusion = motivo_exclusion or 'contiene_res_o_cerdo'
+                motivo_exclusion = motivo_exclusion or 'contiene_ingrediente_vetado'
         rac = float(rec['raciones']) if rec['raciones'] else 4.0
         costo_total = costo_acum.get(rec['id'], 0.0)
         if motivo_exclusion:
@@ -543,34 +557,34 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
         if not tiene_proteina_permitida:
             excluidas.append({'receta_id': rec['id'], 'nombre': rec['nombre'], 'motivo': 'sin_proteina_permitida'})
             continue
-        if costo_total <= 0:
-            excluidas.append({'receta_id': rec['id'], 'nombre': rec['nombre'], 'motivo': 'sin_precio'})
-            continue
+
+        # ==================================================================
+        # COM-71: R3/R4 ya NO excluyen. Se calcula el FLAG costeable y el
+        # nivel_precio INFORMATIVO. Trazabilidad del bloque excluyente anterior:
+        #   if costo_total <= 0:
+        #       excluidas.append({... 'motivo': 'sin_precio'}); continue
+        #   faltantes_precio = sin_precio_acum.get(rec['id'])
+        #   if faltantes_precio:
+        #       excluidas.append({... 'motivo': 'precio_incompleto', ...}); continue
+        #   precio_racion = costo_total / rac
+        #   if precio_racion > precio_medio_max:
+        #       excluidas.append({... 'motivo': 'precio_alto'}); continue
+        # ==================================================================
         faltantes_precio = sin_precio_acum.get(rec['id'])
-        if faltantes_precio:
-            excluidas.append({
-                'receta_id': rec['id'],
-                'nombre': rec['nombre'],
-                'motivo': 'precio_incompleto',
-                'ingredientes_sin_precio': sorted(set(faltantes_precio)),
-            })
-            continue
-        precio_racion = costo_total / rac
-        if precio_racion <= precio_bajo_max:
+        costeable = (not faltantes_precio) and costo_total > 0
+        precio_racion = (costo_total / rac) if costo_total > 0 else 0.0
+        if not costeable:
+            nivel = 'incompleto' if faltantes_precio else 'sin_precio'
+        elif precio_racion <= precio_bajo_max:
             nivel = 'bajo'
         elif precio_racion <= precio_medio_max:
             nivel = 'medio'
         else:
-            excluidas.append({'receta_id': rec['id'], 'nombre': rec['nombre'], 'motivo': 'precio_alto'})
-            continue
+            nivel = 'alto'  # COM-71: 'alto' ya NO excluye; solo informa
         filas.append({
             'receta_id': rec['id'],
             'nombre': rec['nombre'],
             # COM-47 v3: nutrición POR RACIÓN tal como se capturó (sin dividir).
-            # COM-47 v2 (trazabilidad): división entre raciones COMENTADA:
-            # 'energia_kcal': round(float(rec['energia_kcal'] or 0) / rac, 2),
-            # 'hierro_mg': round(float(rec['hierro_mg'] or 0) / rac, 2),
-            # 'proteina_g': round(float(rec['proteina_g'] or 0) / rac, 2),
             'energia_kcal': round(float(rec['energia_kcal']), 2),
             'hierro_mg': round(float(rec['hierro_mg']), 2),
             'proteina_g': round(float(rec['proteina_g']), 2),
@@ -580,19 +594,20 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
             'fibra_g': 0.0,
             'precio_soles': round(precio_racion, 2),
             'nivel_precio': nivel,
+            # COM-71: flag de elegibilidad económica (R4 como flag)
+            'costeable': bool(costeable),
+            'ingredientes_sin_precio': sorted(set(faltantes_precio or [])),
             'ingredientes': items,
             'campos_imputados': [],
         })
 
     # COM-60 v2.1 (trazabilidad): imputación por MEDIANA de COM-60 v2 RETIRADA.
-    # El universo son recetas con los 6 nutrientes completos (R0); ya no se rellenan NULL.
     # for campo in ('vitamina_a_ug', 'zinc_mg', 'carbohidratos_g'):
     #     presentes = [f[campo] for f in filas if f[campo] is not None]
     #     med = _mediana(presentes) if presentes else 0.0
     #     for f in filas:
     #         if f[campo] is None:
-    #             f[campo] = round(med, 2)
-    #             f['campos_imputados'].append(campo)
+    #             f[campo] = round(med, 2); f['campos_imputados'].append(campo)
     return filas, excluidas
 
 
@@ -611,12 +626,17 @@ def _minmax(recetas) -> dict:
 # COM-60: RE-ETIQUETADO DETERMINISTA POR MEDIANAS REALES
 # ==========================================
 def _medianas_por_indice(filas, labels):
-    """{indice_cluster: {feature: mediana}} con las 6 variables + precio."""
+    """
+    {indice_cluster: {feature: mediana}} con las 6 variables + precio.
+    COM-71: la mediana de precio se calcula SOLO sobre miembros costeables para no
+    sesgar con ceros de recetas sin precio; si el cluster no tiene costeables, 0.0.
+    """
     grupos = {}
     for f, lab in zip(filas, labels):
         grupos.setdefault(lab, []).append(f)
     out = {}
     for idx, miembros in grupos.items():
+        costeables = [m for m in miembros if m.get('costeable', True)]
         out[idx] = {
             'energia_kcal': _mediana([m['energia_kcal'] for m in miembros]),
             'hierro_mg': _mediana([m['hierro_mg'] for m in miembros]),
@@ -624,8 +644,9 @@ def _medianas_por_indice(filas, labels):
             'vitamina_a_ug': _mediana([m['vitamina_a_ug'] for m in miembros]),
             'zinc_mg': _mediana([m['zinc_mg'] for m in miembros]),
             'carbohidratos_g': _mediana([m['carbohidratos_g'] for m in miembros]),
-            'precio_soles': _mediana([m['precio_soles'] for m in miembros]),
+            'precio_soles': _mediana([m['precio_soles'] for m in costeables]) if costeables else 0.0,
             'n_recetas': len(miembros),
+            'n_costeables': len(costeables),
         }
     return out
 
@@ -656,39 +677,36 @@ def _etiquetar_por_medianas(medianas_por_indice):
 # =========================================================================
 # COM-60 (trazabilidad): etiquetado v1 SOBRE ESPACIO ESTANDARIZADO, COMENTADO.
 # =========================================================================
-# def _etiquetar_centroides(centros_estandarizados):
-#     idx = list(range(len(centros_estandarizados)))
-#     asignacion = {}
-#     i_anemia = max(idx, key=lambda i: centros_estandarizados[i][1])
-#     asignacion[i_anemia] = 1
-#     idx.remove(i_anemia)
-#     i_ligero = min(idx, key=lambda i: centros_estandarizados[i][0])
-#     asignacion[i_ligero] = 3
-#     idx.remove(i_ligero)
-#     i_fuerza = max(idx, key=lambda i: centros_estandarizados[i][2] + centros_estandarizados[i][0])
-#     asignacion[i_fuerza] = 2
-#     idx.remove(i_fuerza)
-#     asignacion[idx[0]] = 4
-#     return asignacion
+# def _etiquetar_centroides(centros_estandarizados): ... (índices fijos de columnas z)
 
 
 # ==========================================
-# COM-60: MÉTRICAS POST-HOC POR CLUSTER (precio fuera del clustering)
+# COM-60 + COM-71: MÉTRICAS POST-HOC POR CLUSTER (precio fuera del clustering)
 # ==========================================
 def _post_hoc_por_indice(filas, labels):
-    """{indice: {precio_mediano, fe_por_sol, proteina_por_sol}} con guards de división."""
+    """
+    {indice: {precio_mediano, fe_por_sol, proteina_por_sol, n_costeables}}.
+    COM-71: se calcula SOLO sobre miembros costeables (guard de división y de conjunto
+    vacío -> None), para que el indicador Fe/S/ refleje precios reales del comedor.
+    """
     grupos = {}
     for f, lab in zip(filas, labels):
         grupos.setdefault(lab, []).append(f)
     out = {}
     for idx, miembros in grupos.items():
-        precio_med = _mediana([m['precio_soles'] for m in miembros])
-        fe_med = _mediana([m['hierro_mg'] for m in miembros])
-        pro_med = _mediana([m['proteina_g'] for m in miembros])
+        costeables = [m for m in miembros if m.get('costeable', True)]
+        if not costeables:
+            out[idx] = {'precio_mediano': None, 'fe_por_sol': None,
+                        'proteina_por_sol': None, 'n_costeables': 0}
+            continue
+        precio_med = _mediana([m['precio_soles'] for m in costeables])
+        fe_med = _mediana([m['hierro_mg'] for m in costeables])
+        pro_med = _mediana([m['proteina_g'] for m in costeables])
         out[idx] = {
             'precio_mediano': round(precio_med, 2),
             'fe_por_sol': round(fe_med / precio_med, 3) if precio_med > 0 else None,
             'proteina_por_sol': round(pro_med / precio_med, 3) if precio_med > 0 else None,
+            'n_costeables': len(costeables),
         }
     return out
 
@@ -740,28 +758,27 @@ def diagnosticar_k(cur, k_max=K_DIAG_MAX):
 # ==========================================
 def entrenar_y_persistir(cur):
     """
-    COM-60 v2.1: pipeline completo: dataset (R0-R4) -> RobustScaler -> K-means(k=KMEANS_K)
-    -> re-etiquetado por medianas -> métricas post-hoc -> diagnóstico de k ->
-    persistencia del modelo activo y su asignación receta->cluster.
+    COM-71: pipeline completo: dataset (R0-R2 + flags R3/R4) -> RobustScaler ->
+    K-means(k=KMEANS_K) -> re-etiquetado por medianas -> métricas post-hoc (solo
+    costeables) -> diagnóstico de k -> persistencia del modelo activo y su asignación
+    receta->cluster (incluye costeable).
     COM-5 v6: centroides persistidos en UNIDADES REALES (inverse_transform).
     COM-37 v5-fix: silhouette solo si n_samples > n_clusters.
     Retorna el resumen del entrenamiento (dict). El caller gestiona el commit.
     """
     k, bajo_max, medio_max = _parametros_kmeans(cur)
     filas, excluidas = construir_dataset(cur, bajo_max, medio_max)
+    n_no_costeables = sum(1 for f in filas if not f.get('costeable', True))
     if len(filas) < k:
-        n_inc = sum(1 for e in excluidas if e.get('motivo') == 'precio_incompleto')
         n_nut = sum(1 for e in excluidas if e.get('motivo') == 'nutricion_incompleta')
         raise ValueError(
-            f"Solo {len(filas)} recetas aptas para k={k} ({n_inc} por precio incompleto, "
-            f"{n_nut} por nutrición incompleta). Complete los 6 nutrientes y los precios, "
-            f"o amplíe el recetario.")
+            f"Solo {len(filas)} recetas con nutrición completa para k={k} ({n_nut} "
+            f"excluidas por nutrición incompleta). Complete los 6 nutrientes o amplíe "
+            f"el recetario. (Las recetas sin precio NO se excluyen: quedan costeable=False.)")
     X = np.array([[f[c] for c in FEATURES] for f in filas], dtype=float)
     # COM-60: RobustScaler (trazabilidad: StandardScaler comentado)
     scaler = RobustScaler()
     Xs = scaler.fit_transform(X)
-    # COM-60 (trazabilidad): línea anterior con StandardScaler:
-    # scaler = StandardScaler(); Xs = scaler.fit_transform(X)
 
     # COM-60: diagnóstico de k óptimo (informativo, se persiste en parametros)
     curva_k = []
@@ -811,8 +828,10 @@ def entrenar_y_persistir(cur):
         'n_init': N_INIT,
         'precio_bajo_max': bajo_max,
         'precio_medio_max': medio_max,
+        # COM-71: R3 informativa y R4 como flag (antes excluían del dataset)
         'reglas': ['R0_seis_nutrientes_completos_COM60v2.1', 'R1_proteina_permitida',
-                   'R2_veto_res_cerdo', 'R3_sin_precio_alto', 'R4_precios_completos_COM37v2'],
+                   'R2_veto_configurable', 'R3_nivel_precio_informativo_COM71',
+                   'R4_flag_costeable_COM71'],
         # COM-60: auditoría del modelo v2
         'scaler': 'RobustScaler',
         'centroides_z': centroides_robustos,  # clave histórica conservada (ahora robusta)
@@ -822,9 +841,11 @@ def entrenar_y_persistir(cur):
         'n_imputadas': 0,  # COM-60 v2.1: ya no se imputa (R0); clave conservada en 0
         'medianas_por_cluster': medianas_por_codigo,
         'post_hoc_por_cluster': post_hoc_por_codigo,
-        'criterio': 'COM-60 v2.1: clustering solo nutricional (6 variables completas); '
-                    'precio post-hoc; prioridad Anemia Cero en cuota del greedy '
-                    '(KMEANS_CUOTA_CLUSTER_FEO) y desempate Fe/S/ (KMEANS_FE_SO_DESEMPATE).',
+        'criterio': 'COM-71: clustering SOLO nutricional (6 variables completas); el precio '
+                    'no excluye (R3 informativa) y la completitud de precios es un flag de '
+                    'elegibilidad (costeable) que aplica el greedy; prioridad Anemia Cero y '
+                    'desempate Fe/S/ en el greedy (COM-60); holgura semanal y stock remanente '
+                    'del subsidio en el greedy (COM-71).',
     }
     cur.execute("""
         INSERT INTO kmeans_modelos
@@ -842,15 +863,18 @@ def entrenar_y_persistir(cur):
                 (modelo_id, receta_id, cluster_codigo, cluster_etiqueta,
                  energia_kcal, proteina_g, hierro_mg, fibra_g,
                  vitamina_a_ug, zinc_mg, carbohidratos_g,
-                 precio_soles, nivel_precio)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 precio_soles, nivel_precio, costeable)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (modelo_id, receta_id) DO UPDATE
                 SET cluster_codigo = EXCLUDED.cluster_codigo,
-                    cluster_etiqueta = EXCLUDED.cluster_etiqueta;
+                    cluster_etiqueta = EXCLUDED.cluster_etiqueta,
+                    costeable = EXCLUDED.costeable,
+                    nivel_precio = EXCLUDED.nivel_precio,
+                    precio_soles = EXCLUDED.precio_soles;
         """, (modelo_id, f['receta_id'], codigo, CODIGO_ETIQUETA[codigo],
               f['energia_kcal'], f['proteina_g'], f['hierro_mg'], f['fibra_g'],
               f['vitamina_a_ug'], f['zinc_mg'], f['carbohidratos_g'],
-              f['precio_soles'], f['nivel_precio']))
+              f['precio_soles'], f['nivel_precio'], f['costeable']))
 
     resumen_clusters = []
     for codigo in sorted(CODIGO_ETIQUETA.keys()):
@@ -859,6 +883,7 @@ def entrenar_y_persistir(cur):
             'codigo': codigo,
             'etiqueta': CODIGO_ETIQUETA[codigo],
             'n_recetas': len(miembros),
+            'n_costeables': sum(1 for m in miembros if m.get('costeable', True)),
             'centroide': centroides[str(codigo)],
             'medianas': medianas_por_codigo[str(codigo)],
             'post_hoc': post_hoc_por_codigo[str(codigo)],
@@ -877,9 +902,11 @@ def entrenar_y_persistir(cur):
         'k_evaluados': curva_k,
         'n_imputadas': 0,
         'n_excluidas_nutricion_incompleta': sum(1 for e in excluidas if e.get('motivo') == 'nutricion_incompleta'),
+        # COM-71: auditoría de elegibilidad económica (ya no es exclusión del modelo)
+        'n_costeables': len(filas) - n_no_costeables,
+        'n_no_costeables': n_no_costeables,
         'clusters': resumen_clusters,
         'excluidas': excluidas,
-        'n_excluidas_precio_incompleto': sum(1 for e in excluidas if e.get('motivo') == 'precio_incompleto'),
     }
 
 
@@ -900,7 +927,7 @@ def obtener_modelo_activo(cur):
 
 
 def obtener_recetas_por_cluster(cur, modelo_id, cluster_codigo=None):
-    """Recetas asignadas al modelo (opcionalmente filtradas por cluster)."""
+    """Recetas asignadas al modelo (opcionalmente filtradas por cluster). COM-71: costeable."""
     tablas = _tablas_public(cur)
     puente = _detectar_puente(cur, tablas)
     recetas_tabla = _detectar_recetas(cur, tablas, puente)
@@ -910,7 +937,7 @@ def obtener_recetas_por_cluster(cur, modelo_id, cluster_codigo=None):
         SELECT rc.receta_id, rc.cluster_codigo, rc.cluster_etiqueta,
                rc.energia_kcal, rc.proteina_g, rc.hierro_mg, rc.fibra_g,
                rc.vitamina_a_ug, rc.zinc_mg, rc.carbohidratos_g,
-               rc.precio_soles, rc.nivel_precio, r.{col_r_nom} AS nombre
+               rc.precio_soles, rc.nivel_precio, rc.costeable, r.{col_r_nom} AS nombre
         FROM recetas_clusters rc
         JOIN {recetas_tabla} r ON r.id = rc.receta_id
         WHERE rc.modelo_id = %s
@@ -926,10 +953,17 @@ def obtener_recetas_por_cluster(cur, modelo_id, cluster_codigo=None):
 
 def listar_candidatas(cur):
     """
-    Transparencia del modelo: recetas aptas y excluidas con su motivo (incluye
-    'precio_incompleto' y, desde COM-60 v2.1, 'nutricion_incompleto'), recalculadas
-    con los parámetros vigentes (sin persistir nada).
+    Transparencia del modelo: recetas aptas (con flag costeable) y excluidas con su
+    motivo (R0/R1/R2), recalculadas con los parámetros vigentes (sin persistir nada).
+    COM-71: agrega n_costeables / n_no_costeables y el detalle de ingredientes sin
+    precio en cada fila apta no costeable.
     """
     k, bajo_max, medio_max = _parametros_kmeans(cur)
     filas, excluidas = construir_dataset(cur, bajo_max, medio_max)
-    return {'k': k, 'aptas': filas, 'excluidas': excluidas}
+    return {
+        'k': k,
+        'aptas': filas,
+        'excluidas': excluidas,
+        'n_costeables': sum(1 for f in filas if f.get('costeable', True)),
+        'n_no_costeables': sum(1 for f in filas if not f.get('costeable', True)),
+    }

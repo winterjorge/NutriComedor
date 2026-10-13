@@ -10,14 +10,23 @@ Objetivo: COM-59A: helpers de negocio del modelo autogestionado:
           * precio_venta_vigente(): precio único vigente por tipo de comensal
             (estabilidad de precio; el historial queda en precios_venta).
           * margen_semanal_objetivo(): parámetro MARGEN_SEMANAL_OBJETIVO (default 0.15).
-Supuestos documentados (COM-59A v1):
-          - No se lleva aún un ledger de consumo del subsidio: el stock del mes se
-            considera disponible completo para planificar cualquier semana del mes.
-            El reporte mostrará 'subvencionado vs comprado' para auditoría mensual.
-          - El descuento aplica por ingrediente (no por insumo): todos los insumos de un
-            ingrediente subvencionado se consideran cubiertos.
-Uso: Importado por routers/subsidio.py y (Parte 3) por ml/greedy_search.py y reportes.
-Referencia: tickets COM-59 (solo trazabilidad).
+Historial:
+COM-59A v1: versión original. Supuestos documentados: sin ledger de consumo (el stock
+    del mes se considera completo para cualquier semana) y descuento por ingrediente.
+COM-71 (este archivo):
+    * costo_con_subsidio() acepta `stock_inicial: dict = None`: si se provee, usa ese
+      stock (gramos por ingrediente) en lugar de leer el mes completo. Cambio ADITIVO:
+      sin el argumento el comportamiento es idéntico a COM-59A (COM-69 intacto).
+    * Nuevos helpers de stock remanente (criterio COM-71 D5):
+        - consumo_planes_vigentes_mes(): gramos comprometidos por planificaciones
+          VIGENTES del mismo mes/comedor (enlace defensivo presupuesto->comedor y
+          filtro de estado si existe), opcionalmente solo semanas ANTES de una fecha.
+        - stock_remanente_mes(): max(0, stock_mes - consumo_vigente), el stock que el
+          greedy debe asumir disponible al costear una semana nueva.
+      La matemática de gramos por línea replica la del reporte COM-69 (equivalencias
+      uso->gramos con fallback estándar) para que costo y reporte coincidan.
+Uso: Importado por routers/subsidio.py, ml/greedy_search.py y reportes.
+Referencia: tickets COM-59 / COM-71 (solo trazabilidad).
 """
 from datetime import date
 
@@ -52,9 +61,142 @@ def subsidio_gramos_del_mes(cur, comedor_id: int, anio: int, mes: int) -> dict:
 
 
 # ==========================================
+# COM-71: CONSUMO COMPROMETIDO Y STOCK REMANENTE
+# ==========================================
+def _columnas(cur, tabla: str) -> set:
+    cur.execute("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = %s;
+    """, (tabla,))
+    return {r['column_name'] for r in cur.fetchall()}
+
+
+def _link_comedor_de_plan(cur):
+    """
+    COM-71: resuelve defensivamente cómo se vincula un presupuesto_semanal (alias ps)
+    con su comedor y, si existe, dónde vive el estado de la planificación.
+    Retorna (expr_comedor, join_sql, expr_estado_o_None) o (None, '', None) si el
+    esquema no ofrece enlace (el caller operará sin filtro de comedor/estado).
+    """
+    cols_ps = _columnas(cur, 'presupuesto_semanal')
+    if 'comedor_id' in cols_ps:
+        # Enlace directo; el estado (si existe) también estaría en presupuesto_semanal
+        expr_estado = 'ps.estado' if 'estado' in cols_ps else None
+        return 'ps.comedor_id', '', expr_estado
+    if 'candidata_id' in cols_ps:
+        cols_pc = _columnas(cur, 'planificaciones_candidatas')
+        if 'comedor_id' in cols_pc:
+            join_sql = ' JOIN planificaciones_candidatas pc ON pc.id = ps.candidata_id'
+            expr_estado = 'pc.estado' if 'estado' in cols_pc else None
+            return 'pc.comedor_id', join_sql, expr_estado
+    return None, '', None
+
+
+def _gramos_linea_simple(cur, eq_map, ing_id, insumo_id, unidad_uso_id,
+                         unidad_abrev, tipo_magnitud, factor_a_base,
+                         peso_estimado_g, cantidad):
+    """COM-71: gramos de una línea con equivalencia activa o conversión estándar."""
+    g = eq_map.get((ing_id, insumo_id, unidad_uso_id))
+    if g is None:
+        g = gramos_por_unidad_estandar(unidad_abrev, tipo_magnitud,
+                                       float(factor_a_base or 1.0), float(peso_estimado_g or 100.0))
+    return g * float(cantidad)
+
+
+def consumo_planes_vigentes_mes(cur, comedor_id: int, anio: int, mes: int,
+                                antes_de=None) -> dict:
+    """
+    COM-71 (criterio D5): gramos por ingrediente ya comprometidos por planificaciones
+    VIGENTES del mismo mes/comedor. Si `antes_de` (date) se provee, solo cuenta semanas
+    con fecha_referencia < antes_de (para costear una semana nueva sin contarse a sí
+    misma). Replica la matemática de gramos del reporte COM-69 para coincidir.
+    Sin enlace comedor->plan en el esquema, retorna {} (el caller usará stock completo).
+    """
+    expr_comedor, join_sql, expr_estado = _link_comedor_de_plan(cur)
+    if expr_comedor is None:
+        return {}
+    where = ["EXTRACT(YEAR FROM ps.fecha_referencia) = %s",
+             "EXTRACT(MONTH FROM ps.fecha_referencia) = %s",
+             f"{expr_comedor} = %s"]
+    params = [anio, mes, comedor_id]
+    if expr_estado:
+        where.append(f"{expr_estado} = 'VIGENTE'")
+    if antes_de is not None:
+        where.append("ps.fecha_referencia < %s")
+        params.append(antes_de)
+    cur.execute(f"""
+        SELECT ps.id
+        FROM presupuesto_semanal ps{join_sql}
+        WHERE {' AND '.join(where)}
+        ORDER BY ps.id;
+    """, params)
+    plan_ids = [r['id'] for r in cur.fetchall()]
+    if not plan_ids:
+        return {}
+
+    # Equivalencias activas uso->gramos (misma fuente que greedy y reporte)
+    cur.execute("""
+        SELECT ingrediente_id, insumo_id, unidad_uso_id, gramos_por_unidad_uso
+        FROM ingredientes_equivalencias
+        WHERE estado_activo = TRUE;
+    """)
+    eq_map = {(r['ingrediente_id'], r['insumo_id'], r['unidad_uso_id']):
+              float(r['gramos_por_unidad_uso']) for r in cur.fetchall()}
+
+    cur.execute("""
+        SELECT pd.presupuesto_semanal_id, pd.receta_id, pd.total_comensales,
+               COALESCE(NULLIF(ra.raciones, 0), 4) AS raciones,
+               ri.ingrediente_id, ri.cantidad_requerida,
+               ri.unidad_medida_id AS unidad_uso_id,
+               um.abreviatura, um.tipo_magnitud, um.factor_a_base,
+               ing.peso_estimado_g
+        FROM planificacion_dia pd
+        JOIN recetas_almuerzo ra ON ra.id = pd.receta_id
+        JOIN receta_ingrediente ri ON ri.receta_id = pd.receta_id
+        JOIN unidades_medida um ON um.id = ri.unidad_medida_id
+        JOIN ingredientes ing ON ing.id = ri.ingrediente_id
+        WHERE pd.presupuesto_semanal_id = ANY(%s);
+    """, (plan_ids,))
+    consumo = {}
+    for r in cur.fetchall():
+        # El insumo elegido para la equivalencia no se persiste en planificacion_dia;
+        # se usa cualquier equivalencia activa del ingrediente con esa unidad de uso
+        # (regla del reporte COM-69) o la conversión estándar.
+        g = None
+        for (ing_id, ins_id, uu_id), gramos_eq in eq_map.items():
+            if ing_id == r['ingrediente_id'] and uu_id == r['unidad_uso_id']:
+                g = gramos_eq
+                break
+        if g is None:
+            g = gramos_por_unidad_estandar(
+                r['abreviatura'], r['tipo_magnitud'],
+                float(r['factor_a_base'] or 1.0), float(r['peso_estimado_g'] or 100.0))
+        gramos_linea = g * float(r['cantidad_requerida'])
+        gramos_racion_total = gramos_linea * (float(r['total_comensales']) / float(r['raciones']))
+        consumo[r['ingrediente_id']] = consumo.get(r['ingrediente_id'], 0.0) + gramos_racion_total
+    return consumo
+
+
+def stock_remanente_mes(cur, comedor_id: int, anio: int, mes: int,
+                        antes_de=None) -> dict:
+    """
+    COM-71 (criterio D5): stock subvencionado REALMENTE disponible para una semana
+    nueva: max(0, stock_mes - consumo de planificaciones VIGENTES anteriores del mes).
+    Si no hay enlace comedor->plan en el esquema, devuelve el stock completo
+    (comportamiento COM-59A, documentado como supuesto).
+    """
+    stock = subsidio_gramos_del_mes(cur, comedor_id, anio, mes)
+    if not stock:
+        return {}
+    consumo = consumo_planes_vigentes_mes(cur, comedor_id, anio, mes, antes_de=antes_de)
+    return {k: max(0.0, v - consumo.get(k, 0.0)) for k, v in stock.items()}
+
+
+# ==========================================
 # COSTEO CON DESCUENTO DE SUBSIDIO
 # ==========================================
-def costo_con_subsidio(cur, comedor_id: int, fecha, detalle_insumos: list) -> dict:
+def costo_con_subsidio(cur, comedor_id: int, fecha, detalle_insumos: list,
+                       stock_inicial: dict = None) -> dict:
     """
     COM-59A: recibe el detalle de líneas de costeo (formato del optimizador: dicts con
     'ingrediente_id', 'gramos_totales' o 'peso_usado_g', y 'costo_parcial') y devuelve:
@@ -68,10 +210,15 @@ def costo_con_subsidio(cur, comedor_id: int, fecha, detalle_insumos: list) -> di
       }
     Regla: los gramos de un ingrediente subvencionado se cubren con el stock del mes en
     orden de aparición; el excedente (si el stock se agota) se paga a precio de mercado.
+    COM-71 (ADITIVO): si `stock_inicial` se provee (dict {ingrediente_id: gramos}),
+    se usa ese stock en lugar del mes completo; es el mecanismo con el que el greedy
+    costea contra el STOCK REMANENTE (stock_remanente_mes). Sin el argumento, el
+    comportamiento es idéntico a COM-59A.
     """
     if isinstance(fecha, str):
         fecha = date.fromisoformat(fecha)
-    stock = subsidio_gramos_del_mes(cur, comedor_id, fecha.year, fecha.month)
+    stock = dict(stock_inicial) if stock_inicial is not None \
+        else subsidio_gramos_del_mes(cur, comedor_id, fecha.year, fecha.month)
     restante = dict(stock)
 
     detalle_out = []
