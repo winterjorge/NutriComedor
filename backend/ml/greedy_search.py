@@ -1,32 +1,41 @@
 """
 ml/greedy_search.py
 Objetivo: Motor de búsqueda heurística (Greedy Search) del ticket COM-8. Genera 3
-          propuestas de menú semanal (NutriMax, EconoMax, BalanceMax) combinando valor
-          nutricional y precio, respetando la rotación de clusters K-means (COM-5),
-          la variedad de platos y el presupuesto del comedor.
+propuestas de menú semanal (NutriMax, EconoMax, BalanceMax) combinando valor
+nutricional y precio, respetando la rotación de clusters K-means (COM-5),
+la variedad de platos y el presupuesto del comedor.
 Historial:
- - COM-8 v1/v2/v3: días seleccionables, top-3 por categorías, FIX de formatos legacy.
- - COM-37 v2: regla de PRECIOS COMPLETOS para el flujo del comedor.
- - COM-37 v4/v5: validación de reglas de proteína VIGENTES (R1/R2 de K-means); costeo
-   sobre precios_insumos.py con equivalencias uso->gramos.
- - COM-37 v7: la predicción RF cuenta como fuente de precio válida para completitud;
-   fallback_ultima_fecha para días sin corrida del scraper.
- - COM-47 v3: la nutrición de recetas_almuerzo YA ESTÁ POR RACIÓN; se usa SIN dividir.
-   La división entre raciones aplica SOLO a cantidades de ingredientes y al costo.
- - COM-50 v3: costeo sin fallback legacy (fuentes modernas) y aislamiento por receta.
- - COM-59A (este archivo): modelo de negocio autogestionado:
-     * Precios de venta de la recolección proyectada vía subsidio_motor.precio_venta_vigente
-       (precio único vigente con historial); los parámetros PRECIO_* quedan solo como
-       fallback interno del helper.
-     * _costear_recetas conserva el detalle de líneas y aplica costo_con_subsidio():
-       costo_racion = costo REAL post-subsidio; costo_racion_bruto y
-       ahorro_subsidio_racion quedan para auditoría y UI.
-     * Por variante: auditoría SEMANAL del subsidio (consumo proyectado vs stock del
-       mes -> subsidio_agotado_semana) y validación del MARGEN SEMANAL OBJETIVO
-       (margen_semanal_pct / cumple_margen_semanal / alerta_margen en el resumen).
-Uso: Importado por routers/propuestas_menu.py. Todas las funciones reciben un cursor
-     psycopg2 (RealDictCursor); el caller gestiona la transacción.
-Referencia: tickets COM-8 / COM-37 / COM-47 / COM-50 / COM-59 (solo trazabilidad).
+COM-8 v1/v2/v3: días seleccionables, top-3 por categorías, FIX de formatos legacy.
+COM-37 v2: regla de PRECIOS COMPLETOS para el flujo del comedor.
+COM-37 v4/v5: validación de reglas de proteína VIGENTES (R1/R2 de K-means); costeo
+    sobre precios_insumos.py con equivalencias uso->gramos.
+COM-37 v7: la predicción RF cuenta como fuente de precio válida para completitud;
+    fallback_ultima_fecha para días sin corrida del scraper.
+COM-47 v3: la nutrición de recetas_almuerzo YA ESTÁ POR RACIÓN; se usa SIN dividir.
+    La división entre raciones aplica SOLO a cantidades de ingredientes y al costo.
+COM-50 v3: costeo sin fallback legacy (fuentes modernas) y aislamiento por receta.
+COM-59A: modelo de negocio autogestionado: recolección vía precio_venta_vigente;
+    costo_racion = costo REAL post-subsidio (costo_con_subsidio); auditoría semanal
+    del subsidio (subsidio_agotado_semana) y del MARGEN SEMANAL OBJETIVO
+    (margen_semanal_pct / cumple_margen_semanal / alerta_margen en el resumen).
+COM-60 (este archivo): PRIORIDAD ANEMIA CERO + DESEMPATE Fe/S/ (criterio D3 cerrado):
+    * Cuota semanal mínima de días del cluster "Anti-Anemia (alto hierro)":
+      parámetro KMEANS_CUOTA_CLUSTER_FEO (default 2). Se aplica con regla de
+      deadline: cuando los días restantes igualan la cuota faltante, el día se
+      fuerza a candidatas del cluster anti-anemia (con fallback a la rotación).
+    * Desempate Fe/S/: si KMEANS_FE_SO_DESEMPATE='true', entre candidatas con IGUAL
+      score se prefiere la de mayor hierro por sol (hierro_mg / costo_racion real
+      post-subsidio, campo fe_por_sol calculado en _costear_recetas). El score base
+      NO se modifica: el precio sigue viviendo solo en el peso 'precio' de cada
+      variante (coherente con "K-means puro, economía en el greedy").
+    * Auditoría por variante: dias_anti_anemia / cuota_anti_anemia /
+      cumple_cuota_anemia en el resumen, y es_anti_anemia / fe_por_sol por día.
+    * Trazabilidad: la línea de ordenamiento anterior (score, sin_usar) queda
+      COMENTADA junto a la firma previa de _generar_menu_variante (2-tupla).
+Uso: Importado por routers/propuestas_menu.py (generar_tres_propuestas,
+     obtener_candidatas_sesion, obtener_candidata). Todas las funciones reciben un
+     cursor psycopg2 (RealDictCursor); el caller gestiona la transacción.
+Referencia: tickets COM-8 / COM-37 / COM-47 / COM-50 / COM-59 / COM-60 (trazabilidad).
 """
 import json
 import hashlib
@@ -49,7 +58,6 @@ from subsidio_motor import (
     margen_semanal_objetivo,
     subsidio_gramos_del_mes,
 )
-
 # COM-37 v4/v5: reglas de proteína VIGENTES y normalizador, compartidos con K-means
 try:
     from ml.kmeans_recetas import cargar_reglas_proteinas, _normalizar
@@ -83,13 +91,13 @@ VARIANTES = {
 DIAS_NOMBRE = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
 CLAVES_PESOS = ['hierro', 'proteina', 'energia', 'precio', 'variedad']
 TOLERANCIA_PRESUPUESTO = 1.05   # margen del 5% sobre el presupuesto semanal
-
 # COM-8 v2: el top de ingredientes solo considera estas categorías (nunca especias,
 # cereales, grasas ni lácteos), según requerimiento de la administradora.
 CATEGORIAS_TOP_INGREDIENTE = ('Vegetales y Hortalizas', 'Frutas', 'Proteinas')
-
 # COM-8 v2: días de cocina por defecto (Lun-Vie); el comedor puede ampliar/reducir.
 DIAS_DEFAULT = [1, 2, 3, 4, 5]
+# COM-60: prefijo de etiqueta del cluster prioritario (re-etiquetado COM-60 D4)
+PREFIJO_CLUSTER_ANEMIA = 'Anti-Anemia'
 
 
 # ==========================================
@@ -126,16 +134,19 @@ def _jitter_weights(base: dict, seed: int, idx_variante: int) -> dict:
 # ==========================================
 # CARGA DE PARÁMETROS Y CONTEXTO
 # ==========================================
-def _cargar_parametros(cur) -> dict:
+def cargar_parametros(cur) -> dict:
     """
     Lee los parámetros COM-8 y los comensales por tipo.
     COM-59A: los PRECIOS DE VENTA ya no se leen de los parámetros fijos PRECIO_*:
     se resuelven con precio_venta_vigente() (tabla precios_venta, precio único
     vigente con historial; los parámetros quedan como fallback interno del helper).
+    COM-60: lee además KMEANS_CUOTA_CLUSTER_FEO (días mínimos/semana del cluster
+    anti-anemia) y KMEANS_FE_SO_DESEMPATE (desempate por hierro por sol).
     """
     cur.execute("""
         SELECT clave, valor FROM parametros_sistema
-        WHERE clave LIKE 'PLANIFICACION_%';
+        WHERE clave LIKE 'PLANIFICACION_%'
+           OR clave IN ('KMEANS_CUOTA_CLUSTER_FEO', 'KMEANS_FE_SO_DESEMPATE');
     """)
     p = {r['clave']: r['valor'] for r in cur.fetchall()}
     ponderaciones = {}
@@ -156,6 +167,12 @@ def _cargar_parametros(cur) -> dict:
             rotacion = [int(x) for x in parsed_rot]
     except Exception:
         pass
+    # COM-60: cuota anti-anemia y flag de desempate (con defaults del criterio D3)
+    try:
+        cuota_feo = int(float(p.get('KMEANS_CUOTA_CLUSTER_FEO', 2)))
+    except Exception:
+        cuota_feo = 2
+    desempate_fe_so = str(p.get('KMEANS_FE_SO_DESEMPATE', 'true')).strip().lower() in ('true', '1', 'si', 'sí')
     return {
         'dias': int(float(p.get('PLANIFICACION_DIAS_SEMANA', 7))),
         'rotacion': rotacion,
@@ -170,6 +187,9 @@ def _cargar_parametros(cur) -> dict:
         'precio_social': precio_venta_vigente(cur, 'Social'),
         'precio_afiliado': precio_venta_vigente(cur, 'Afiliado'),
         'precio_normal': precio_venta_vigente(cur, 'Normal'),
+        # COM-60: prioridad Anemia Cero y desempate Fe/S/
+        'cuota_feo': cuota_feo,
+        'desempate_fe_so': desempate_fe_so,
     }
 
 
@@ -270,6 +290,7 @@ def _cargar_recetas_cluster(cur):
             'costo_racion': 0.0,            # se completa en _costear_recetas (REAL post-subsidio)
             'costo_racion_bruto': 0.0,      # COM-59A: costo sin subsidio (auditoría)
             'ahorro_subsidio_racion': 0.0,  # COM-59A: ahorro por ración por subsidio
+            'fe_por_sol': 0.0,              # COM-60: hierro por sol (desempate); se completa en _costear
             'precio_completo': False,       # COM-37 v2: se completa en _costear_recetas
             'ingredientes_sin_precio': [],  # COM-37 v2: auditoría de faltantes
             'ingredientes': [],             # lista de dicts {nombre, categoria}
@@ -285,10 +306,11 @@ def _costear_recetas(cur, recetas, fecha: date, comedor_id=None):
     completa y dividido entre raciones (única división permitida).
     COM-59A: conserva el detalle de líneas (gramos y costo) y, si se indica
     comedor_id, aplica costo_con_subsidio(): `costo_racion` queda como el costo REAL
-    post-subsidio (los víveres del mes ya los pagó el municipio), `costo_racion_bruto`
-    es el costo de mercado y `ahorro_subsidio_racion` la diferencia. También expone
-    `detalle_gramos_racion` (gramos por ración por ingrediente) para la auditoría
-    semanal del stock subvencionado.
+    post-subsidio, `costo_racion_bruto` es el costo de mercado y
+    `ahorro_subsidio_racion` la diferencia. También expone `detalle_gramos_racion`
+    (gramos por ración por ingrediente) para la auditoría semanal del stock.
+    COM-60: agrega `fe_por_sol` = hierro_mg / costo_racion real (guard de división),
+    usado como desempate del scoring cuando KMEANS_FE_SO_DESEMPATE=true.
     """
     ids = [r['receta_id'] for r in recetas]
     if not ids:
@@ -315,7 +337,6 @@ def _costear_recetas(cur, recetas, fecha: date, comedor_id=None):
         LEFT JOIN categorias_alimentos ca ON ca.id = ing.categoria_id
         WHERE ri.receta_id = ANY(%s);
     """, (ids,))
-
     costo_acum = {}
     nombres_acum = {}
     lineas_tot = {}
@@ -347,7 +368,6 @@ def _costear_recetas(cur, recetas, fecha: date, comedor_id=None):
             'nombre': fila['ing_nombre'],
             'categoria': fila['categoria'] or '',
         })
-
     for r in recetas:
         rid = r['receta_id']
         raciones = r['raciones'] or 4.0
@@ -367,6 +387,8 @@ def _costear_recetas(cur, recetas, fecha: date, comedor_id=None):
         r['costo_racion'] = round(real_racion, 2)   # REAL post-subsidio (uso downstream)
         r['ahorro_subsidio_racion'] = round(ahorro_racion, 2)
         r['lineas_subvencionadas'] = n_subv
+        # COM-60: hierro por sol sobre el costo REAL post-subsidio (desempate)
+        r['fe_por_sol'] = round(r['hierro_mg'] / real_racion, 4) if real_racion and real_racion > 0 else 0.0
         # COM-59A: gramos por ración por ingrediente (auditoría semanal del stock)
         r['detalle_gramos_racion'] = {
             l['ingrediente_id']: (l['gramos_totales'] / raciones) for l in lineas
@@ -393,7 +415,7 @@ def _validar_reglas_proteinas_vigentes(cur, recetas):
     for r in recetas:
         tiene_permitida = False
         tiene_vetada = False
-        for ing in r['ingredientes']:
+        for ing in r['ingredients'] if 'ingredients' in r else r['ingredientes']:
             nombre = ing.get('nombre') if isinstance(ing, dict) else ing
             nn = _normalizar(nombre)
             if not nn:
@@ -432,6 +454,15 @@ def _minmax(recetas) -> dict:
 
 
 # ==========================================
+# COM-60: HELPERS DE PRIORIDAD ANEMIA CERO
+# ==========================================
+def _codigos_anti_anemia(recetas_por_cluster) -> set:
+    """Códigos de cluster cuya etiqueta empieza por 'Anti-Anemia' (re-etiquetado COM-60)."""
+    return {codigo for codigo, filas in recetas_por_cluster.items()
+            if filas and str(filas[0].get('cluster_etiqueta') or '').startswith(PREFIJO_CLUSTER_ANEMIA)}
+
+
+# ==========================================
 # SCORING GREEDY
 # ==========================================
 def _score(rec, pesos, mm, usada: bool) -> float:
@@ -439,6 +470,7 @@ def _score(rec, pesos, mm, usada: bool) -> float:
     Score lineal ponderado POR RACIÓN: hierro/proteína/energía suman, precio resta.
     El peso 'variedad' bonifica recetas aún no usadas en la semana.
     COM-59A: el precio que usa es el costo REAL post-subsidio (campo costo_racion).
+    COM-60: el score NO incluye Fe/S/; ese indicador solo desempata (ver _generar_menu_variante).
     """
     s = (pesos.get('hierro', 0) * _z(rec['hierro_mg'], *mm['hierro']) +
          pesos.get('proteina', 0) * _z(rec['proteina_g'], *mm['proteina']) +
@@ -457,25 +489,45 @@ def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
     alternativas y respetando el presupuesto acumulado (con tolerancia del 5%).
     COM-59A: los costos diarios usan el costo REAL post-subsidio y la recolección
     proyectada usa los precios de venta vigentes (precio_venta_vigente).
+    COM-60: (a) regla de deadline para la cuota anti-anemia (KMEANS_CUOTA_CLUSTER_FEO):
+    cuando los días restantes igualan la cuota faltante, las candidatas se limitan al
+    cluster Anti-Anemia (fallback a la rotación si estuviera vacío); (b) desempate por
+    fe_por_sol cuando KMEANS_FE_SO_DESEMPATE=true.
+    COM-60 (trazabilidad): antes retornaba (menu, sobrepaso); ahora retorna
+    (menu, sobrepaso, conteo_anemia). Línea de ordenamiento anterior comentada abajo.
     """
     mm = _minmax(todas)
     usadas = set()
     menu = []
     acumulado = 0.0
     sobrepaso = False
+    conteo_anemia = 0                      # COM-60: días asignados al cluster anti-anemia
+    anemia_codes = _codigos_anti_anemia(recetas_por_cluster)   # COM-60
+    cuota = int(params.get('cuota_feo', 2))                    # COM-60
+    desempate = bool(params.get('desempate_fe_so', True))      # COM-60
     total_comensales = params['com_social'] + params['com_afiliado'] + params['com_normal']
     recoleccion_dia = (params['com_social'] * params['precio_social'] +
                        params['com_afiliado'] * params['precio_afiliado'] +
                        params['com_normal'] * params['precio_normal'])
     limite = presupuesto_semanal * TOLERANCIA_PRESUPUESTO
-
-    for d in dias:
+    for i, d in enumerate(dias):
+        # COM-60: regla de deadline para garantizar la cuota anti-anemia
+        restantes = len(dias) - i
+        faltante = cuota - conteo_anemia
+        forzar_anemia = (faltante > 0 and restantes == faltante and bool(anemia_codes))
         cluster_obj = params['rotacion'][(d - 1) % len(params['rotacion'])]
+        if forzar_anemia:
+            cluster_forzado = next((c for c in params['rotacion'] if c in anemia_codes), None)
+            if cluster_forzado is not None and recetas_por_cluster.get(cluster_forzado):
+                cluster_obj = cluster_forzado
         candidatas = list(recetas_por_cluster.get(cluster_obj, [])) or list(todas)
-
-        candidatas.sort(key=lambda r: (_score(r, pesos, mm, r['receta_id'] in usadas),
-                                       r['receta_id'] not in usadas), reverse=True)
-
+        # COM-60: orden por (score, Fe/S/ si desempate, sin_usar). Trazabilidad v anterior:
+        # candidatas.sort(key=lambda r: (_score(r, pesos, mm, r['receta_id'] in usadas),
+        #                                r['receta_id'] not in usadas), reverse=True)
+        candidatas.sort(key=lambda r: (
+            _score(r, pesos, mm, r['receta_id'] in usadas),
+            (r.get('fe_por_sol') or 0.0) if desempate else 0.0,
+            r['receta_id'] not in usadas), reverse=True)
         elegida = None
         for r in candidatas:
             if r['receta_id'] in usadas and any(
@@ -489,10 +541,12 @@ def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
             elegida = min(candidatas, key=lambda r: r['costo_racion'])
             if acumulado + elegida['costo_racion'] * total_comensales > limite:
                 sobrepaso = True
-
         costo_dia = round(elegida['costo_racion'] * total_comensales, 2)
         acumulado += costo_dia
         usadas.add(elegida['receta_id'])
+        es_anemia = elegida['cluster_codigo'] in anemia_codes   # COM-60
+        if es_anemia:
+            conteo_anemia += 1
         menu.append({
             'dia_semana': d,
             'dia_nombre': DIAS_NOMBRE[(d - 1) % 7],
@@ -505,13 +559,16 @@ def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
             # COM-59A: auditoría del subsidio por día
             'costo_racion_bruto': elegida.get('costo_racion_bruto', elegida['costo_racion']),
             'ahorro_subsidio': elegida.get('ahorro_subsidio_racion', 0.0),
+            # COM-60: auditoría de prioridad anti-anemia y eficiencia Fe/S/ por día
+            'es_anti_anemia': es_anemia,
+            'fe_por_sol': elegida.get('fe_por_sol', 0.0),
             'costo_total_dia': costo_dia,
             'energia_kcal': round(elegida['energia_kcal'], 2),
             'proteina_g': round(elegida['proteina_g'], 2),
             'hierro_mg': round(elegida['hierro_mg'], 2),
             'recoleccion_proyectada': round(recoleccion_dia, 2),
         })
-    return menu, sobrepaso
+    return menu, sobrepaso, conteo_anemia
 
 
 def _top_ingredientes(menu, ingredientes_por_id, n=3):
@@ -541,38 +598,33 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
                             creado_por_id: int, fecha_referencia: date = None,
                             seed: int = 0, dias_semana: list = None):
     """
-    COM-8 v2/v3 + COM-37 + COM-47 v3 + COM-50 v3 + COM-59A: Genera y persiste las 3
-    propuestas de menú semanal para los DÍAS DE COCINA indicados, usando SOLO recetas
-    con precios completos y reglas de proteína vigentes.
+    COM-8 v2/v3 + COM-37 + COM-47 v3 + COM-50 v3 + COM-59A + COM-60: Genera y persiste
+    las 3 propuestas de menú semanal para los DÍAS DE COCINA indicados, usando SOLO
+    recetas con precios completos y reglas de proteína vigentes.
     COM-59A: el costeo es con costo REAL post-subsidio del mes calendario del comedor;
     cada propuesta incluye en su resumen la auditoría semanal del subsidio (consumo
-    proyectado vs stock del mes) y la validación del MARGEN SEMANAL OBJETIVO
-    (recolección a precios vigentes vs costo real), con alerta si no se cumple.
+    proyectado vs stock del mes) y la validación del MARGEN SEMANAL OBJETIVO.
+    COM-60: cada propuesta incluye la auditoría de la cuota anti-anemia
+    (dias_anti_anemia / cuota_anti_anemia / cumple_cuota_anemia).
     """
     if presupuesto_semanal is None or float(presupuesto_semanal) <= 0:
         raise ValueError("El presupuesto semanal debe ser mayor a cero.")
     presupuesto_semanal = float(presupuesto_semanal)
     fecha_referencia = fecha_referencia or date.today()
-
     dias = sorted(set(int(d) for d in (dias_semana or DIAS_DEFAULT)))
     if not dias or any(d < 1 or d > 7 for d in dias):
         raise ValueError("Los días de cocina deben estar entre 1 (Lunes) y 7 (Domingo).")
-
-    params = _cargar_parametros(cur)
+    params = cargar_parametros(cur)
     recetas, modelo_id = _cargar_recetas_cluster(cur)
     if not recetas:
         raise ValueError(
             "No hay un modelo K-means activo con recetas aptas. Entrene el modelo en "
             "la pestaña 'Clusters K-Means' antes de generar propuestas de menú.")
-
     # COM-59A: costeo con costo real post-subsidio del comedor solicitante
     _costear_recetas(cur, recetas, fecha_referencia, comedor_id)
-
     excluidas_incompletas = [r for r in recetas if not r.get('precio_completo', False)]
     recetas = [r for r in recetas if r.get('precio_completo', False) and r['costo_racion'] > 0]
-
     recetas, excluidas_reglas = _validar_reglas_proteinas_vigentes(cur, recetas)
-
     if len(recetas) < len(dias):
         detalle_precios = "; ".join(
             f"{r['nombre']} (sin precio: {', '.join(r['ingredientes_sin_precio'][:4])})"
@@ -588,32 +640,26 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
             f"Excluidas por reglas de proteína vigentes: {detalle_reglas or 'ninguna'}. "
             f"Cargue precios manuales en Gestión de Ingredientes (COM-37), revise "
             f"las listas R1/R2 en Clusters K-Means o espere la corrida del scraper.")
-
     recetas_por_cluster = {}
     for r in recetas:
         recetas_por_cluster.setdefault(r['cluster_codigo'], []).append(r)
     recetas_por_id = {r['receta_id']: r for r in recetas}
-
     fecha_inicio = _lunes_de(fecha_referencia)
     marca = f"{comedor_id}|{fecha_inicio.isoformat()}|{creado_por_id}|{seed}|{'-'.join(map(str, dias))}"
     sesion_id = hashlib.sha256(marca.encode()).hexdigest()[:32]
-
     total_comensales = params['com_social'] + params['com_afiliado'] + params['com_normal']
-
     # COM-59A: stock subvencionado del mes y margen objetivo (una lectura por corrida)
     stock_mes = subsidio_gramos_del_mes(cur, comedor_id, fecha_referencia.year, fecha_referencia.month)
     margen_objetivo = margen_semanal_objetivo(cur)
-
     propuestas = []
     for idx, (codigo, meta) in enumerate(VARIANTES.items()):
         pesos = _jitter_weights(params['ponderaciones'].get(codigo, {}), seed, idx)
-        menu, sobrepaso = _generar_menu_variante(
+        # COM-60 (trazabilidad): antes: menu, sobrepaso = _generar_menu_variante(...)
+        menu, sobrepaso, conteo_anemia = _generar_menu_variante(
             recetas_por_cluster, recetas, pesos, params,
             presupuesto_semanal, fecha_inicio, dias)
-
         costo_total = round(sum(d['costo_total_dia'] for d in menu), 2)
         recoleccion_total = round(sum(d['recoleccion_proyectada'] for d in menu), 2)
-
         # ---- COM-59A: auditoría semanal del subsidio y del margen objetivo ----
         consumo_semana = {}
         for d in menu:
@@ -634,7 +680,6 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
             if costo_total else None
         cumple_margen = bool(margen_semana_pct is not None and
                              margen_semana_pct >= margen_objetivo * 100)
-
         resumen = {
             'costo_total_semana': costo_total,
             'costo_racion_promedio': round(costo_total / max(total_comensales * len(menu), 1), 2),
@@ -660,8 +705,11 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
                 f"El margen semanal proyectado ({margen_semana_pct}%) está por debajo del "
                 f"objetivo ({margen_objetivo * 100:.0f}%). Revise precios de venta, el subsidio "
                 f"del mes o aplique las sugerencias de ahorro del reporte."),
+            # COM-60: auditoría de prioridad Anemia Cero
+            'dias_anti_anemia': conteo_anemia,
+            'cuota_anti_anemia': params['cuota_feo'],
+            'cumple_cuota_anemia': bool(conteo_anemia >= params['cuota_feo']),
         }
-
         cur.execute("""
             INSERT INTO planificaciones_candidatas
                 (comedor_id, sesion_id, variante, etiqueta, descripcion,
@@ -671,7 +719,6 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
         """, (comedor_id, sesion_id, codigo, meta['etiqueta'], meta['descripcion'],
               json.dumps(pesos), json.dumps(resumen), json.dumps(menu), creado_por_id))
         candidata_id = cur.fetchone()['id']
-
         propuestas.append({
             'candidata_id': candidata_id,
             'variante': codigo,
@@ -681,7 +728,6 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
             'resumen': resumen,
             'menu': menu,
         })
-
     return {
         'sesion_id': sesion_id,
         'comedor_id': comedor_id,
