@@ -1,27 +1,31 @@
 """
 routers/kmeans.py
 Objetivo: Endpoints del módulo de clustering nutricional del recetario (COM-5):
-          entrenamiento del modelo K-means (k=4), resumen del modelo activo, recetas
-          por cluster, auditoría de reglas R1-R3, diagnóstico del esquema y, desde
-          COM-5 v4, la CONFIGURACIÓN de proteínas permitidas / ingredientes vetados.
+entrenamiento del modelo K-means (k=4), resumen del modelo activo, recetas
+por cluster, auditoría de reglas R1-R3, diagnóstico del esquema y, desde
+COM-5 v4, la CONFIGURACIÓN de proteínas permitidas / ingredientes vetados.
 Historial:
- - COM-5 v1: endpoints con permiso de entrenamiento para Admin de Sistemas o Directivo.
- - COM-5 v4 (este archivo): la vista de Clusters K-Means pasa a ser EXCLUSIVA del
-   Administrador de Sistemas (módulo 'clusters'), por lo que TODOS los endpoints exigen
-   es_admin_sistema. Se agregan GET/PUT /kmeans/proteinas para editar las listas sin
-   tocar código. El permiso anterior (Directivo podía entrenar) queda COMENTADO abajo
-   por trazabilidad, no eliminado.
+COM-5 v1: endpoints con permiso de entrenamiento para Admin de Sistemas o Directivo.
+COM-5 v4: la vista de Clusters K-Means pasa a ser EXCLUSIVA del Administrador de
+    Sistemas (módulo 'clusters'), por lo que TODOS los endpoints exigen
+    es_admin_sistema. Se agregan GET/PUT /kmeans/proteinas. El permiso anterior
+    (Directivo podía entrenar) queda COMENTADO abajo por trazabilidad.
+COM-60 (este archivo): K-means v2:
+    * GET /kmeans/resumen expone (aditivo) medianas por cluster, métricas post-hoc
+      (precio mediano, Fe/S/, Prot/S/), scaler, k_evaluados y k_recomendado desde
+      parametros del modelo; ninguna clave existente se elimina.
+    * GET /kmeans/diagnostico-k nuevo: curva silhouette/inercia k=2..8 y
+      k_recomendado sin persistir nada (criterio D5).
+    * GET /kmeans/clusters devuelve también las 6 variables del snapshot.
 Uso: Registrado en main.py con prefijo /api/v1.
-Referencia: tickets COM-5 / COM-5 v4 (solo trazabilidad; los nombres obedecen a la funcionalidad).
+Referencia: tickets COM-5 / COM-5 v4 / COM-60 (solo trazabilidad).
 """
 import json
 import unicodedata
 from typing import List
-
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
-
 from database import get_db
 from permisos import es_admin_sistema
 from ml.kmeans_recetas import (
@@ -30,6 +34,7 @@ from ml.kmeans_recetas import (
     obtener_recetas_por_cluster,
     listar_candidatas,
     diagnosticar_esquema,
+    diagnosticar_k,
     PROTEINAS_PERMITIDAS_DEFAULT,
     INGREDIENTES_VETADOS_DEFAULT,
 )
@@ -71,7 +76,6 @@ def _validar_admin(cur, usuario_id: int) -> None:
 #     perfil = obtener_perfil_usuario(cur, usuario_id)
 #     return perfil in (PERFIL_ADMIN_SISTEMA, PERFIL_DIRECTIVO)
 
-
 def _token(t: str) -> str:
     """Normaliza un token de ingrediente: minúsculas, sin tildes ni espacios extra."""
     if not t:
@@ -106,8 +110,8 @@ def _guardar_lista(cur, clave: str, descripcion: str, valores: List[str]) -> Non
         INSERT INTO parametros_sistema (clave, valor, descripcion, categoria, tipo_dato)
         VALUES (%s, %s, %s, 'IA', 'JSON')
         ON CONFLICT (clave) DO UPDATE
-            SET valor = EXCLUDED.valor,
-                fecha_actualizacion = CURRENT_TIMESTAMP - INTERVAL '5 hours';
+        SET valor = EXCLUDED.valor,
+            fecha_actualizacion = CURRENT_TIMESTAMP - INTERVAL '5 hours';
     """, (clave, json.dumps(valores), descripcion))
 
 
@@ -146,7 +150,6 @@ def actualizar_proteinas(data: ProteinasConfigInput, db=Depends(get_db)):
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         _validar_admin(cur, data.usuario_solicitante_id)
-
         permitidas = sorted({t for t in (_token(x) for x in data.permitidas) if t})
         vetadas = sorted({t for t in (_token(x) for x in data.vetadas) if t})
         if not permitidas:
@@ -156,7 +159,6 @@ def actualizar_proteinas(data: ProteinasConfigInput, db=Depends(get_db)):
             if len(t) < 2 or len(t) > 40:
                 raise HTTPException(status_code=400,
                                 detail=f"Token inválido: '{t}' (use entre 2 y 40 caracteres).")
-
         _guardar_lista(cur, CLAVE_PROTEINAS,
                        'COM-5 v4: listado configurable de proteínas permitidas para el clustering K-means',
                        permitidas)
@@ -197,15 +199,41 @@ def diagnostico(usuario_solicitante_id: int, db=Depends(get_db)):
 
 
 # ==========================================
+# COM-60: DIAGNÓSTICO DE K ÓPTIMO (curva silhouette/inercia)
+# ==========================================
+@router.get("/diagnostico-k")
+def diagnostico_k(usuario_solicitante_id: int, db=Depends(get_db)):
+    """
+    COM-60 (criterio D5): curva de silhouette e inercia para k=2..8 sobre el dataset
+    apto (RobustScaler, 6 features nutricionales) y k_recomendado por mejor
+    silhouette. Es INFORMATIVO: no persiste modelos ni cambia el k operativo
+    (KMEANS_K). Útil para el panel ML y para la sección de validación de la tesis.
+    """
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        _validar_admin(cur, usuario_solicitante_id)
+        return diagnosticar_k(cur)
+    except HTTPException:
+        raise
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al diagnosticar k: {e}")
+    finally:
+        cur.close()
+
+
+# ==========================================
 # ENTRENAMIENTO DEL MODELO
 # ==========================================
 @router.post("/entrenar")
 def entrenar_modelo(usuario_solicitante_id: int, db=Depends(get_db)):
     """
-    Entrena el modelo K-means (k=4) con las recetas aptas tras aplicar las reglas
-    R1 (proteína permitida, configurable), R2 (veto res/cerdo, configurable) y
-    R3 (sin precio alto); etiqueta centroides y persiste el modelo activo.
-    COM-5 v4: exclusivo Admin de Sistemas.
+    COM-60: entrena el modelo K-means (k=KMEANS_K, default 4) con las 6 variables
+    nutricionales por ración escaladas con RobustScaler, tras aplicar las reglas
+    R1-R4; re-etiqueta centroides por medianas reales (prioridad Anemia Cero en el
+    código 1), calcula métricas post-hoc por cluster (Fe/S/, Prot/S/) y el
+    diagnóstico de k óptimo, y persiste el modelo activo. Exclusivo Admin.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -230,7 +258,12 @@ def entrenar_modelo(usuario_solicitante_id: int, db=Depends(get_db)):
 # ==========================================
 @router.get("/resumen")
 def resumen_modelo(usuario_solicitante_id: int, db=Depends(get_db)):
-    """Metadatos del modelo activo (métricas, centroides) + agregado por cluster."""
+    """
+    Metadatos del modelo activo (métricas, centroides) + agregado por cluster.
+    COM-60 (aditivo): expone scaler, features, k_evaluados, k_recomendado,
+    n_imputadas, medianas y post-hoc por cluster desde parametros/centroides del
+    modelo; las claves históricas (clusters, centroides, etiquetas) se conservan.
+    """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         _validar_admin(cur, usuario_solicitante_id)
@@ -239,7 +272,6 @@ def resumen_modelo(usuario_solicitante_id: int, db=Depends(get_db)):
             raise HTTPException(
                 status_code=404,
                 detail="Aún no hay un modelo K-means entrenado. Ejecute POST /kmeans/entrenar.")
-
         cur.execute("""
             SELECT cluster_codigo,
                    cluster_etiqueta,
@@ -257,7 +289,14 @@ def resumen_modelo(usuario_solicitante_id: int, db=Depends(get_db)):
             ORDER BY cluster_codigo;
         """, (modelo['id'],))
         clusters = cur.fetchall()
-
+        # COM-60: enriquecimiento aditivo desde parametros del modelo
+        params = modelo['parametros'] or {}
+        medianas = params.get('medianas_por_cluster', {}) or {}
+        post_hoc = params.get('post_hoc_por_cluster', {}) or {}
+        for c in clusters:
+            codigo_str = str(c['cluster_codigo'])
+            c['medianas'] = medianas.get(codigo_str)
+            c['post_hoc'] = post_hoc.get(codigo_str)
         return {
             'modelo_id': modelo['id'],
             'fecha_entrenamiento': modelo['fecha_entrenamiento'],
@@ -270,6 +309,14 @@ def resumen_modelo(usuario_solicitante_id: int, db=Depends(get_db)):
             'etiquetas': modelo['etiquetas'],
             'parametros': modelo['parametros'],
             'clusters': clusters,
+            # COM-60: campos nuevos de auditoría v2 (aditivos)
+            'scaler': params.get('scaler', 'StandardScaler'),
+            'features': params.get('features'),
+            'k_evaluados': params.get('k_evaluados', []),
+            'k_recomendado': params.get('k_recomendado'),
+            'n_imputadas': params.get('n_imputadas', 0),
+            'post_hoc_por_cluster': post_hoc,
+            'medianas_por_cluster': medianas,
         }
     except HTTPException:
         raise
@@ -289,7 +336,7 @@ def recetas_por_cluster(
                                 description="Código de cluster (1-4). Si se omite, devuelve todos."),
     db=Depends(get_db),
 ):
-    """Recetas asignadas al modelo activo con su snapshot de features por ración."""
+    """Recetas asignadas al modelo activo con su snapshot de features por ración (6 variables COM-60)."""
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         _validar_admin(cur, usuario_solicitante_id)
@@ -312,7 +359,7 @@ def recetas_por_cluster(
 # ==========================================
 @router.get("/candidatas")
 def recetas_candidatas(usuario_solicitante_id: int, db=Depends(get_db)):
-    """Recalcula el dataset con los parámetros vigentes sin persistir (auditoría R1-R3)."""
+    """Recalcula el dataset con los parámetros vigentes sin persistir (auditoría R1-R4)."""
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         _validar_admin(cur, usuario_solicitante_id)
