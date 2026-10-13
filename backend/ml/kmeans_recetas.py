@@ -1,10 +1,10 @@
 """
 ml/kmeans_recetas.py
 Objetivo: Motor del modelo K-means del recetario (COM-5). Construye el dataset por
-ración, aplica las reglas de negocio del comedor (R1 proteínas permitidas, R2 veto a
-res/cerdo, R3 sin recetas de precio alto, R4 precios completos), entrena K-means,
-etiqueta los centroides semánticamente (biyección determinista) y persiste el modelo
-activo con su asignación receta->cluster.
+ración, aplica las reglas de negocio del comedor (R0 seis nutrientes completos,
+R1 proteínas permitidas, R2 veto a res/cerdo, R3 sin recetas de precio alto,
+R4 precios completos), entrena K-means, etiqueta los centroides semánticamente
+(biyección determinista) y persiste el modelo activo con su asignación receta->cluster.
 Historial:
 COM-5 v1/v2/v3: reglas hardcodeadas; detección defensiva de esquema; FIX de precios
     por gramo vía insumos->historial_precios.
@@ -21,28 +21,16 @@ COM-37 v7: la predicción Random Forest cuenta como fuente de precio válida par
 COM-47 v2: se dividió la nutrición de tabla entre raciones (interpretación errónea).
 COM-47 v3: FIX definitivo: los valores nutricionales de recetas_almuerzo YA SON POR
     RACIÓN tal como se capturan; se usan SIN dividir (la división v2 queda COMENTADA).
-COM-60 (este archivo): K-MEANS v2 según criterio cerrado con la administradora:
-    * FEATURES = 6 variables NUTRICIONALES por ración (energia_kcal, hierro_mg,
-      proteina_g, vitamina_a_ug, zinc_mg, carbohidratos_g). El PRECIO SALE de la
-      distancia: solo se usa para R3/R4, el snapshot y las métricas post-hoc.
-    * Escalado RobustScaler (mediana/IQR) en lugar de StandardScaler (trazabilidad
-      comentada abajo).
-    * Re-etiquetado determinista por MEDIANAS reales de los miembros de cada cluster:
-      1=mayor hierro ("Anti-Anemia (alto hierro)"), 2=mayor energía restante
-      ("Energético denso"), 3=mayor proteína restante ("Proteico balanceado"),
-      4=restante ("Ligero complementario"). Reemplaza a _etiquetar_centroides v1
-      (sobre espacio estandarizado), que queda COMENTADO.
-    * Diagnóstico de k óptimo: diagnosticar_k() calcula silhouette/inercia para
-      k=2..8 y devuelve k_recomendado (informativo; el k operativo sigue siendo
-      KMEANS_K). La curva se persiste en parametros.k_evaluados del modelo.
-    * Métricas post-hoc POR CLUSTER (nunca entran a la distancia): costo mediano,
-      hierro por sol (Fe/S/) y proteína por sol, en parametros.post_hoc_por_cluster
-      y en el resumen de entrenamiento. El greedy las usa como desempate (Drop 2).
-    * Imputación por MEDIANA de micronutrientes NULL (vitamina_a_ug, zinc_mg,
-      carbohidratos_g) para no perder recetas legacy del seed; se audita con
-      n_imputadas en el resumen y en parametros.
-    * K-means queda PURO: sin peso de hierro en la distancia (criterio D3): la
-      prioridad Anemia Cero vive en la cuota semanal del greedy.
+COM-60: K-MEANS v2: FEATURES = 6 variables NUTRICIONALES (el precio sale de la
+    distancia); RobustScaler; re-etiquetado por MEDIANAS (1=Anti-Anemia alto hierro,
+    2=Energético denso, 3=Proteico balanceado, 4=Ligero complementario); diagnóstico
+    de k óptimo (k=2..8, informativo); métricas post-hoc por cluster (Fe/S/, Prot/S/).
+COM-60 v2.1 (este archivo): REGLA R0 pedida por la administradora: el universo del
+    modelo son SOLO recetas con los 6 nutrientes COMPLETOS (las 25 reales capturadas
+    por UI y las futuras con el mismo formato). Las 20 recetas legacy del seed
+    (vitamina_a_ug/zinc_mg/carbohidratos_g NULL) se EXCLUYEN con motivo auditable
+    'nutricion_incompleta' en lugar de imputarse; el bloque de imputación por mediana
+    de COM-60 v2 queda COMENTADO por trazabilidad y n_imputadas se reporta en 0.
 Uso: Importado por routers/kmeans.py y por ml/greedy_search.py (reglas R1/R2).
 Referencia: tickets COM-5 / COM-37 / COM-47 / COM-60 (solo trazabilidad).
 """
@@ -58,12 +46,14 @@ from sklearn.preprocessing import RobustScaler
 # COM-60 (trazabilidad): escalador anterior comentado:
 # from sklearn.preprocessing import StandardScaler
 
+# COM-37 v5: resolución unificada de precios y conversión estándar de unidades
 from precios_insumos import (
     precios_por_gramo_por_insumo,
     mejor_opcion_ingrediente,
     gramos_por_unidad_estandar,
     gramos_por_unidad_compra,
 )
+# COM-37 v7: predicción RF compartida con el optimizador (misma fuente de verdad)
 from optimizador import predecir_precio_con_confianza
 
 # ==========================================
@@ -75,7 +65,7 @@ from optimizador import predecir_precio_con_confianza
 FEATURES = ['energia_kcal', 'hierro_mg', 'proteina_g',
             'vitamina_a_ug', 'zinc_mg', 'carbohidratos_g']
 
-# COM-60: etiquetas re-definidas por el re-etiquetado por medianas (criterio D4).
+# COM-60: etiquetas del re-etiquetado por medianas (criterio D4).
 # COM-60 (trazabilidad): etiquetas anteriores comentadas:
 # CODIGO_ETIQUETA = {1: 'Anti-Anemia Premium', 2: 'Fortalecimiento Balanceado',
 #                    3: 'Ligero y Saludable', 4: 'All-Rounder Económico'}
@@ -96,11 +86,19 @@ K_DIAG_MAX = 8
 PROTEINAS_PERMITIDAS_DEFAULT = [
     'pollo', 'gallina', 'huevo', 'higado', 'pescado',
     'atun', 'bonito', 'jurel', 'caballa', 'trucha', 'sangrecita',
+    'bofe', 'mondongo', 'lengua', 'res', 'chancho', 'cerdo', 'chicharron'
 ]
 INGREDIENTES_VETADOS_DEFAULT = [
-    'res', 'vaca', 'vacuno', 'cerdo', 'chancho', 'porcino', 'chorizo',
-    'salchicha', 'bistec', 'bisteck', 'lomo', 'panceta', 'tocino', 'chicharron',
+    'jamonada',
 ]
+
+# COM-5 v4 (trazabilidad): expresiones regulares FIJAS de COM-5 v1-v3, comentadas.
+# La configuración operativa ahora vive en parametros_sistema y se compila en
+# cargar_reglas_proteinas(); estos patrones quedan solo como documentación del default.
+# RE_PROTEINA_PERMITIDA = re.compile(
+#     r'\b(pollo|gallina|huevo|higado|pescado|atun|bonito|jurel|caballa|trucha|sangrecita)\b')
+# RE_PROHIBIDO = re.compile(
+#     r'\b(res|vaca|vacuno|cerdo|chancho|porcino|chorizo|salchicha|bistec|bisteck|lomo|panceta|tocino|chicharron)\b')
 
 
 # ==========================================
@@ -135,8 +133,6 @@ def cargar_reglas_proteinas(cur):
     vetadas = INGREDIENTES_VETADOS_DEFAULT
     try:
         parsed = json.loads(p.get('KMEANS_INGREDIENTES_VETADOS') or 'null')
-        if vetadas is None:
-            vetadas = INGREDIENTES_VETADOS_DEFAULT
         if isinstance(parsed, list) and parsed:
             vetadas = [str(x).lower() for x in parsed]
     except Exception:
@@ -381,19 +377,19 @@ def _cargar_unidades(cur):
 
 
 # ==========================================
-# CONSTRUCCIÓN DEL DATASET (por ración) + REGLAS R1-R4
+# CONSTRUCCIÓN DEL DATASET (por ración) + REGLAS R0-R4
 # ==========================================
 def construir_dataset(cur, precio_bajo_max, precio_medio_max):
     """
     Construye el dataset POR RACIÓN de todas las recetas y aplica las reglas:
+    R0 (COM-60 v2.1): SOLO recetas con los 6 nutrientes COMPLETOS (NOT NULL). Las
+       legacy del seed y cualquier receta incompleta se excluyen con motivo
+       auditable 'nutricion_incompleta' (ya NO se imputan).
     R1/R2 (COM-5 v4): proteínas permitidas / veto res-cerdo, configurables.
     R3: sin recetas de precio alto (umbrales de parametros_sistema).
     R4 (COM-37 v2): PRECIOS COMPLETOS: si algún ingrediente no tiene NINGUNA fuente
-    de precio, la receta se excluye con motivo 'precio_incompleto'.
+       de precio, la receta se excluye con motivo 'precio_incompleto'.
     COM-47 v3: la NUTRICIÓN se toma DIRECTA de recetas_almuerzo (ya por ración).
-    COM-60: se leen las 6 variables nutricionales; los micronutrientes NULL se
-    imputan por MEDIANA del dataset apto (dos pasadas) y se audita con
-    'campos_imputados' por fila y n_imputadas en el resumen de entrenamiento.
     Retorna (filas, excluidas).
     """
     re_permitida, re_vetada, _, _ = cargar_reglas_proteinas(cur)
@@ -460,7 +456,7 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
         raise ValueError(
             f"La tabla de recetas '{recetas_tabla}' no tiene columnas nutricionales "
             f"(hierro_mg / proteina_g / energia_kcal). Columnas detectadas: {cols_r}")
-    # COM-60: columnas de micronutrientes para las 6 features (opcionales: se imputan)
+    # COM-60: columnas de micronutrientes para las 6 features (R0 exige NOT NULL)
     col_r_vita = _col(cols_r, ['vitamina_a_ug', 'vitamina_a'], contiene='vitamina_a')
     col_r_zinc = _col(cols_r, ['zinc_mg', 'zinc'], contiene='zinc')
     col_r_carb = _col(cols_r, ['carbohidratos_g', 'carbohidratos'], contiene='carbohidr')
@@ -469,7 +465,6 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
                f", {col_r_zinc if col_r_zinc else 'NULL'} AS zinc_mg"
                f", {col_r_carb if col_r_carb else 'NULL'} AS carbohidratos_g")
     sel_rac = f"{col_r_rac} AS raciones" if col_r_rac else "NULL AS raciones"
-
     cur.execute(f"SELECT id, {col_r_nom} AS nombre, {sel_rac}{sel_nut} FROM {recetas_tabla}{filtro_estado};")
     recetas = cur.fetchall()
 
@@ -521,7 +516,12 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
     filas = []
     excluidas = []
     for rec in recetas:
-        if rec.get('energia_kcal') is None:
+        # COM-60 v2.1 (R0): universo = recetas con los 6 nutrientes COMPLETOS.
+        # Trazabilidad: antes solo se omitía silenciosamente si energia_kcal era NULL.
+        if any(rec.get(c) is None for c in
+               ('energia_kcal', 'hierro_mg', 'proteina_g', 'vitamina_a_ug', 'zinc_mg', 'carbohidratos_g')):
+            excluidas.append({'receta_id': rec['id'], 'nombre': rec['nombre'],
+                              'motivo': 'nutricion_incompleta'})
             continue
         items = nombres_acum.get(rec['id'], [])
         if not items:
@@ -567,13 +567,16 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
             'receta_id': rec['id'],
             'nombre': rec['nombre'],
             # COM-47 v3: nutrición POR RACIÓN tal como se capturó (sin dividir).
-            'energia_kcal': round(float(rec['energia_kcal'] or 0), 2),
-            'hierro_mg': round(float(rec['hierro_mg'] or 0), 2),
-            'proteina_g': round(float(rec['proteina_g'] or 0), 2),
-            # COM-60: micronutrientes crudos (pueden venir NULL; se imputan después)
-            'vitamina_a_ug': float(rec['vitamina_a_ug']) if rec.get('vitamina_a_ug') is not None else None,
-            'zinc_mg': float(rec['zinc_mg']) if rec.get('zinc_mg') is not None else None,
-            'carbohidratos_g': float(rec['carbohidratos_g']) if rec.get('carbohidratos_g') is not None else None,
+            # COM-47 v2 (trazabilidad): división entre raciones COMENTADA:
+            # 'energia_kcal': round(float(rec['energia_kcal'] or 0) / rac, 2),
+            # 'hierro_mg': round(float(rec['hierro_mg'] or 0) / rac, 2),
+            # 'proteina_g': round(float(rec['proteina_g'] or 0) / rac, 2),
+            'energia_kcal': round(float(rec['energia_kcal']), 2),
+            'hierro_mg': round(float(rec['hierro_mg']), 2),
+            'proteina_g': round(float(rec['proteina_g']), 2),
+            'vitamina_a_ug': round(float(rec['vitamina_a_ug']), 2),
+            'zinc_mg': round(float(rec['zinc_mg']), 2),
+            'carbohidratos_g': round(float(rec['carbohidratos_g']), 2),
             'fibra_g': 0.0,
             'precio_soles': round(precio_racion, 2),
             'nivel_precio': nivel,
@@ -581,14 +584,15 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
             'campos_imputados': [],
         })
 
-    # COM-60: imputación por MEDIANA de micronutrientes NULL (dos pasadas)
-    for campo in ('vitamina_a_ug', 'zinc_mg', 'carbohidratos_g'):
-        presentes = [f[campo] for f in filas if f[campo] is not None]
-        med = _mediana(presentes) if presentes else 0.0
-        for f in filas:
-            if f[campo] is None:
-                f[campo] = round(med, 2)
-                f['campos_imputados'].append(campo)
+    # COM-60 v2.1 (trazabilidad): imputación por MEDIANA de COM-60 v2 RETIRADA.
+    # El universo son recetas con los 6 nutrientes completos (R0); ya no se rellenan NULL.
+    # for campo in ('vitamina_a_ug', 'zinc_mg', 'carbohidratos_g'):
+    #     presentes = [f[campo] for f in filas if f[campo] is not None]
+    #     med = _mediana(presentes) if presentes else 0.0
+    #     for f in filas:
+    #         if f[campo] is None:
+    #             f[campo] = round(med, 2)
+    #             f['campos_imputados'].append(campo)
     return filas, excluidas
 
 
@@ -651,8 +655,6 @@ def _etiquetar_por_medianas(medianas_por_indice):
 
 # =========================================================================
 # COM-60 (trazabilidad): etiquetado v1 SOBRE ESPACIO ESTANDARIZADO, COMENTADO.
-# Usaba índices fijos de columnas z (0=energía, 1=hierro, 2=proteína) y etiquetas
-# antiguas; se reemplaza por _etiquetar_por_medianas sobre unidades reales.
 # =========================================================================
 # def _etiquetar_centroides(centros_estandarizados):
 #     idx = list(range(len(centros_estandarizados)))
@@ -738,9 +740,9 @@ def diagnosticar_k(cur, k_max=K_DIAG_MAX):
 # ==========================================
 def entrenar_y_persistir(cur):
     """
-    COM-60: pipeline v2 completo: dataset -> reglas -> imputación -> RobustScaler ->
-    K-means(k=KMEANS_K) -> re-etiquetado por medianas -> métricas post-hoc ->
-    diagnóstico de k -> persistencia del modelo activo y su asignación receta->cluster.
+    COM-60 v2.1: pipeline completo: dataset (R0-R4) -> RobustScaler -> K-means(k=KMEANS_K)
+    -> re-etiquetado por medianas -> métricas post-hoc -> diagnóstico de k ->
+    persistencia del modelo activo y su asignación receta->cluster.
     COM-5 v6: centroides persistidos en UNIDADES REALES (inverse_transform).
     COM-37 v5-fix: silhouette solo si n_samples > n_clusters.
     Retorna el resumen del entrenamiento (dict). El caller gestiona el commit.
@@ -749,10 +751,11 @@ def entrenar_y_persistir(cur):
     filas, excluidas = construir_dataset(cur, bajo_max, medio_max)
     if len(filas) < k:
         n_inc = sum(1 for e in excluidas if e.get('motivo') == 'precio_incompleto')
+        n_nut = sum(1 for e in excluidas if e.get('motivo') == 'nutricion_incompleta')
         raise ValueError(
-            f"Solo {len(filas)} recetas aptas para k={k} ({n_inc} excluidas por precio "
-            f"incompleto). Cargue precios manuales en Gestión de Ingredientes, espere la "
-            f"corrida del scraper o amplíe el recetario.")
+            f"Solo {len(filas)} recetas aptas para k={k} ({n_inc} por precio incompleto, "
+            f"{n_nut} por nutrición incompleta). Complete los 6 nutrientes y los precios, "
+            f"o amplíe el recetario.")
     X = np.array([[f[c] for c in FEATURES] for f in filas], dtype=float)
     # COM-60: RobustScaler (trazabilidad: StandardScaler comentado)
     scaler = RobustScaler()
@@ -779,7 +782,6 @@ def entrenar_y_persistir(cur):
     else:
         silhouette = 0.0
 
-    # COM-60: re-etiquetado por medianas reales de los miembros
     medianas_idx = _medianas_por_indice(filas, labels)
     asignacion = _etiquetar_por_medianas(medianas_idx)
     post_hoc_idx = _post_hoc_por_indice(filas, labels)
@@ -796,14 +798,11 @@ def entrenar_y_persistir(cur):
         }
     etiquetas = {str(c): CODIGO_ETIQUETA[c] for c in asignacion.values()}
 
-    # COM-60: medianas y post-hoc por CÓDIGO (para UI/auditoría/greedy)
     medianas_por_codigo = {}
     post_hoc_por_codigo = {}
     for idx, codigo in asignacion.items():
         medianas_por_codigo[str(codigo)] = medianas_idx[idx]
         post_hoc_por_codigo[str(codigo)] = post_hoc_idx[idx]
-
-    n_imputadas = sum(1 for f in filas if f['campos_imputados'])
 
     cur.execute("UPDATE kmeans_modelos SET activo = FALSE WHERE activo = TRUE;")
     parametros = {
@@ -812,19 +811,20 @@ def entrenar_y_persistir(cur):
         'n_init': N_INIT,
         'precio_bajo_max': bajo_max,
         'precio_medio_max': medio_max,
-        'reglas': ['R1_proteina_permitida', 'R2_veto_res_cerdo', 'R3_sin_precio_alto',
-                   'R4_precios_completos_COM37v2'],
+        'reglas': ['R0_seis_nutrientes_completos_COM60v2.1', 'R1_proteina_permitida',
+                   'R2_veto_res_cerdo', 'R3_sin_precio_alto', 'R4_precios_completos_COM37v2'],
         # COM-60: auditoría del modelo v2
         'scaler': 'RobustScaler',
         'centroides_z': centroides_robustos,  # clave histórica conservada (ahora robusta)
         'centroides_robustos': centroides_robustos,
         'k_evaluados': curva_k,
         'k_recomendado': k_recomendado,
-        'n_imputadas': n_imputadas,
+        'n_imputadas': 0,  # COM-60 v2.1: ya no se imputa (R0); clave conservada en 0
         'medianas_por_cluster': medianas_por_codigo,
         'post_hoc_por_cluster': post_hoc_por_codigo,
-        'criterio': 'COM-60: clustering solo nutricional (6 variables); precio post-hoc; '
-                    'prioridad Anemia Cero en cuota del greedy (KMEANS_CUOTA_CLUSTER_FEO).',
+        'criterio': 'COM-60 v2.1: clustering solo nutricional (6 variables completas); '
+                    'precio post-hoc; prioridad Anemia Cero en cuota del greedy '
+                    '(KMEANS_CUOTA_CLUSTER_FEO) y desempate Fe/S/ (KMEANS_FE_SO_DESEMPATE).',
     }
     cur.execute("""
         INSERT INTO kmeans_modelos
@@ -875,7 +875,8 @@ def entrenar_y_persistir(cur):
         'features': FEATURES,
         'k_recomendado': k_recomendado,
         'k_evaluados': curva_k,
-        'n_imputadas': n_imputadas,
+        'n_imputadas': 0,
+        'n_excluidas_nutricion_incompleta': sum(1 for e in excluidas if e.get('motivo') == 'nutricion_incompleta'),
         'clusters': resumen_clusters,
         'excluidas': excluidas,
         'n_excluidas_precio_incompleto': sum(1 for e in excluidas if e.get('motivo') == 'precio_incompleto'),
@@ -926,8 +927,8 @@ def obtener_recetas_por_cluster(cur, modelo_id, cluster_codigo=None):
 def listar_candidatas(cur):
     """
     Transparencia del modelo: recetas aptas y excluidas con su motivo (incluye
-    'precio_incompleto' con la lista de ingredientes sin precio, COM-37 v2),
-    recalculadas con los parámetros vigentes (sin persistir nada).
+    'precio_incompleto' y, desde COM-60 v2.1, 'nutricion_incompleto'), recalculadas
+    con los parámetros vigentes (sin persistir nada).
     """
     k, bajo_max, medio_max = _parametros_kmeans(cur)
     filas, excluidas = construir_dataset(cur, bajo_max, medio_max)
