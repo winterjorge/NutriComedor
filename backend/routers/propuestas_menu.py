@@ -1,32 +1,35 @@
 """
 routers/propuestas_menu.py
 Objetivo: Endpoints del flujo COM-8 "Mostrar 3 propuestas de menú semanal":
-          - POST /propuestas/generar: ejecuta el motor greedy con los DÍAS DE COCINA
-            seleccionados (COM-8 v2) y persiste las 3 candidatas.
-          - GET  /propuestas/sesion/{sesion_id}: recupera las 3 tarjetas de una sesión.
-          - POST /propuestas/{candidata_id}/seleccionar: fija el menú definitivo en
-            presupuesto_semanal + planificacion_dia (solo Directivo), persistiendo
-            también la nutrición por ración de cada día (COM-8 v4).
-          - GET  /propuestas/historial y /historial/{id}/dias: historial y detalle
-            diario con comensales por tipo, recolección y nutrición por ración.
+- POST /propuestas/generar: ejecuta el motor greedy con los DÍAS DE COCINA
+  seleccionados (COM-8 v2) y persiste las 3 candidatas.
+- GET  /propuestas/sesion/{sesion_id}: recupera las 3 tarjetas de una sesión.
+- POST /propuestas/{candidata_id}/seleccionar: fija el menú definitivo en
+  presupuesto_semanal + planificacion_dia (solo Directivo), persistiendo
+  también la nutrición por ración de cada día (COM-8 v4).
+- GET  /propuestas/historial y /historial/{id}/dias: historial y detalle
+  diario con comensales por tipo, recolección y nutrición por ración.
 Historial:
- - COM-8 v1: generación de semana completa (7 días).
- - COM-8 v2: parámetro dias_semana en /generar (por defecto Lun-Vie).
- - COM-8 v4: persistencia y exposición de energia_kcal_racion, hierro_mg_racion y
-   proteina_g_racion en planificacion_dia.
+COM-8 v1: generación de semana completa (7 días).
+COM-8 v2: parámetro dias_semana en /generar (por defecto Lun-Vie).
+COM-8 v4: persistencia y exposición de energia_kcal_racion, hierro_mg_racion y
+    proteina_g_racion en planificacion_dia.
+COM-61 / HU-11 (este archivo): /generar acepta `permitir_repetidos` (bool, default
+    False) y lo propaga al motor greedy: es la vía voluntaria (checkbox + prompt de
+    confirmación en la UI) para levantar la restricción de variedad entre semanas.
+    Sin el flag, el motor excluye los platos del menú VIGENTE de la semana anterior
+    salvo repetición inevitable. Ningún otro endpoint ni permiso se modifica.
 Permisos (regla del ticket):
-          - Generar/ver: Directivo u Operativo del comedor (admin de sistemas por soporte).
-          - Seleccionar o cambiar el menú: SOLO Directivo del comedor.
+- Generar/ver: Directivo u Operativo del comedor (admin de sistemas por soporte).
+- Seleccionar o cambiar el menú: SOLO Directivo del comedor.
 Uso: Registrado en main.py con prefijo /api/v1.
-Referencia: ticket COM-8 / HU-08 (solo trazabilidad; los nombres obedecen a la funcionalidad).
+Referencia: ticket COM-8 / HU-08 / COM-61 / HU-11 (solo trazabilidad).
 """
 from datetime import date, timedelta
 from typing import List, Optional
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
-
 from database import get_db
 from permisos import (
     es_admin_sistema,
@@ -56,6 +59,9 @@ class GenerarPropuestasInput(BaseModel):
     seed: int = 0                            # jitter del botón "Regenerar"
     # COM-8 v2: días de cocina (1=Lunes .. 7=Domingo). Por defecto Lun-Vie.
     dias_semana: Optional[List[int]] = None
+    # COM-61 (HU-11): vía voluntaria para levantar la restricción de variedad entre
+    # semanas. La UI solo lo envía en true tras checkbox + prompt de confirmación.
+    permitir_repetidos: bool = False
     usuario_solicitante_id: int
 
 
@@ -120,32 +126,30 @@ def generar_propuestas(data: GenerarPropuestasInput, db=Depends(get_db)):
     Ejecuta el motor greedy para los días de cocina indicados y persiste las 3
     propuestas candidatas agrupadas por sesion_id. El frontend re-llama este endpoint
     con otro `seed` cuando el usuario confirma regenerar (COM-8 v4: sin botón aparte).
+    COM-61 (HU-11): propaga `permitir_repetidos` al motor para la variedad entre
+    semanas (default False: se evitan los platos del menú VIGENTE anterior salvo
+    repetición inevitable; la UI muestra el indicador de variedad y las repeticiones).
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         _validar_puede_generar(cur, data.usuario_solicitante_id, data.comedor_id)
-
         if data.presupuesto_semanal is None or data.presupuesto_semanal <= 0:
             raise HTTPException(status_code=400, detail="El presupuesto no puede ser negativo.")
         if data.presupuesto_semanal > PRESUPUESTO_MAXIMO:
             raise HTTPException(status_code=400,
                             detail="El presupuesto no puede superar los 10,000 soles.")
-
         # COM-8 v2: validación de días de cocina
         dias = sorted(set(data.dias_semana or [1, 2, 3, 4, 5]))
         if not dias or any(d < 1 or d > 7 for d in dias):
             raise HTTPException(status_code=400,
                             detail="Los días de cocina deben estar entre 1 (Lunes) y 7 (Domingo).")
-
         fecha = date.fromisoformat(data.fecha_referencia) if data.fecha_referencia else date.today()
-
         # Limpieza de candidatas PENDIENTE antiguas (>7 días) para no acumular sesiones
         cur.execute("""
             DELETE FROM planificaciones_candidatas
             WHERE estado = 'PENDIENTE'
               AND fecha < CURRENT_TIMESTAMP - INTERVAL '7 days';
         """)
-
         resultado = generar_tres_propuestas(
             cur,
             comedor_id=data.comedor_id,
@@ -154,11 +158,12 @@ def generar_propuestas(data: GenerarPropuestasInput, db=Depends(get_db)):
             fecha_referencia=fecha,
             seed=data.seed,
             dias_semana=dias,
+            # COM-61 (HU-11): flag de variedad entre semanas venido de la UI
+            permitir_repetidos=bool(data.permitir_repetidos),
         )
         # Flag para que la UI muestre/oculte el botón "Seleccionar esta opción"
         resultado['puede_seleccionar'] = es_directivo_de_comedor(
             cur, data.usuario_solicitante_id, data.comedor_id)
-
         db.commit()
         return resultado
     except HTTPException:
@@ -222,6 +227,8 @@ def seleccionar_propuesta(candidata_id: int, data: SeleccionarPropuestaInput,
     y una fila en planificacion_dia POR CADA DÍA DE COCINA, incluyendo la nutrición
     por ración (COM-8 v4). Marca la candidata como SELECCIONADA y sus hermanas
     DESCARTADAS; la planificación VIGENTE previa de la misma semana pasa a REEMPLAZADA.
+    COM-61: al fijar un menú, este se convierte automáticamente en la "semana anterior"
+    de la próxima generación (criterio D1: se lee el VIGENTE más reciente previo).
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -230,19 +237,15 @@ def seleccionar_propuesta(candidata_id: int, data: SeleccionarPropuestaInput,
             raise HTTPException(status_code=404, detail="La propuesta seleccionada no existe.")
         if cand['estado'] == 'SELECCIONADA':
             raise HTTPException(status_code=400, detail="Esta propuesta ya fue seleccionada.")
-
         comedor_id = cand['comedor_id']
         _validar_puede_seleccionar(cur, data.usuario_solicitante_id, comedor_id)
-
         menu = cand['menu'] if isinstance(cand['menu'], list) else cand['menu']
         resumen = cand['resumen'] if isinstance(cand['resumen'], dict) else cand['resumen']
         if not menu:
             raise HTTPException(status_code=400, detail="La propuesta no tiene menú cargado.")
-
         fecha_inicio = _lunes_de(date.fromisoformat(menu[0]['fecha']))
         social, afiliado, normal = _comensales_por_tipo(cur)
         total_comensales = social + afiliado + normal
-
         # Planificación VIGENTE previa de la misma semana pasa a REEMPLAZADA
         cur.execute("""
             UPDATE presupuesto_semanal
@@ -257,7 +260,6 @@ def seleccionar_propuesta(candidata_id: int, data: SeleccionarPropuestaInput,
                     SET estado = 'REEMPLAZADA'
                     WHERE id = %s AND estado = 'SELECCIONADA';
                 """, (fila['candidata_id'],))
-
         # Maestro de planificación semanal
         cur.execute("""
             INSERT INTO presupuesto_semanal
@@ -280,7 +282,6 @@ def seleccionar_propuesta(candidata_id: int, data: SeleccionarPropuestaInput,
             data.usuario_solicitante_id,
         ))
         presupuesto_id = cur.fetchone()['id']
-
         # Detalle diario (solo los días de cocina seleccionados), con nutrición por ración
         for dia in menu:
             cur.execute("""
@@ -305,7 +306,6 @@ def seleccionar_propuesta(candidata_id: int, data: SeleccionarPropuestaInput,
                 dia.get('hierro_mg'),      # COM-8 v4: hierro por ración
                 dia.get('proteina_g'),     # COM-8 v4: proteína por ración
             ))
-
         # Estados de las candidatas de la sesión
         cur.execute("""
             UPDATE planificaciones_candidatas SET estado = 'SELECCIONADA'
@@ -315,7 +315,6 @@ def seleccionar_propuesta(candidata_id: int, data: SeleccionarPropuestaInput,
             UPDATE planificaciones_candidatas SET estado = 'DESCARTADA'
             WHERE sesion_id = %s AND id <> %s AND estado = 'PENDIENTE';
         """, (cand['sesion_id'], candidata_id))
-
         db.commit()
         return {
             'presupuesto_semanal_id': presupuesto_id,
@@ -400,4 +399,4 @@ def historial_dias(presupuesto_id: int, usuario_solicitante_id: int, db=Depends(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al obtener el detalle: {e}")
     finally:
-        cur.close() 
+        cur.close()
