@@ -290,7 +290,9 @@ def _comensales_por_dia(cur, params, fecha_inicio, dias) -> dict:
             print(f"[COM-74] Predicción de comensales falló para {fd}: {e}")
             pred = None
         if pred:
-            soc, afi, nor = int(pred[0]), int(pred[1]), int(pred[2])
+            # COM-74: pred es un dict {'prediccion': [social, afiliado, normal], ...}
+            prediccion = pred['prediccion']
+            soc, afi, nor = int(prediccion[0]), int(prediccion[1]), int(prediccion[2])
             fuente = 'prediccion_ia'
         else:
             soc, afi, nor = params['com_social'], params['com_afiliado'], params['com_normal']
