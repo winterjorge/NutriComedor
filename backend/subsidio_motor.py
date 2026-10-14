@@ -37,10 +37,8 @@ COM-74 (este archivo):
 Uso: Importado por routers/subsidio.py, ml/greedy_search.py y reportes.
 Referencia: tickets COM-59 / COM-71 / COM-74 (solo trazabilidad).
 """
-from datetime import date
-
+from datetime import date, timedelta   # COM-74: timedelta para consumo_subsidio_a_la_fecha
 from precios_insumos import gramos_por_unidad_estandar
-
 
 # ==========================================
 # SUBSIDIO DEL MES EN GRAMOS
