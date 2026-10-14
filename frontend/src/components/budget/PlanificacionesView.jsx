@@ -9,20 +9,28 @@ Objetivo: Vista de Planificaciones semanales (menús definitivos del comedor). L
       (3) la lista de compras consolidada (semanal o por día) con exportación
           a PDF para imprimir o llevar al mercado.
 Historial:
-Sprint 2: versión original (api.getPlanificaciones / getPlanificacionDetalle /
-        eliminarPlanificacion / getListaCompras).
-COM-8 v2: reconstruida sobre /propuestas/historial y /propuestas/historial/{id}/dias.
-COM-8 v4: comensales por día en columnas separadas; tarjetas de hierro y proteína.
-COM-8 v5: trazabilidad recuperada. Todo lo reemplazado se conserva COMENTADO.
-COM-65: FIX del bug "Sin ítems de compra registrados" (el frontend
-        leía data.items/data.grupos pero el backend devuelve data.lista_compras).
-        Se agrega filtro por día y exportación a PDF de la lista de compras.
-COM-66: Rediseño responsive para móviles/tablets (tooltips, modal de detalles,
-        scroll horizontal controlado).
-COM-69: la lista de compras se solicita CON comedor_id para que el backend aplique
-        la cobertura del subsidio del mes (Solución B).
-COM-74 (este archivo): muestra tarjeta Cocineras + badge de fuente (IA/parámetro)
-        + desglose costo mercado vs post-subsidio y ahorro en el modal de detalles.
+  Sprint 2: versión original (api.getPlanificaciones / getPlanificacionDetalle /
+            eliminarPlanificacion / getListaCompras).
+  COM-8 v2: reconstruida sobre /propuestas/historial y /propuestas/historial/{id}/dias.
+  COM-8 v4: comensales por día en columnas separadas; tarjetas de hierro y proteína.
+  COM-8 v5: trazabilidad recuperada. Todo lo reemplazado se conserva COMENTADO.
+  COM-65: FIX del bug "Sin ítems de compra registrados" (el frontend
+            leía data.items/data.grupos pero el backend devuelve data.lista_compras).
+            Se agrega filtro por día y exportación a PDF de la lista de compras.
+  COM-66: Rediseño responsive para móviles/tablets (tooltips, modal de detalles,
+            scroll horizontal controlado).
+  COM-69 (este archivo): la lista de compras se solicita CON comedor_id para que el
+            backend aplique la cobertura del subsidio del mes (Solución B):
+            * Nuevas columnas "Subsidio cubre" y "Costo": cuando el ítem queda 100%
+              cubierto por el subsidio, el costo se reemplaza por el badge ROJO
+              "SUBSIDIADO"; cobertura parcial muestra "SUBS. PARCIAL" + el costo del
+              restante que sí se compra.
+            * Franja resumen del subsidio del mes (ítems subsidiados, ahorro
+              estimado y costo de compra estimado).
+            * El PDF incluye las mismas columnas y el texto SUBSIDIADO en rojo.
+            Trazabilidad: la tabla anterior de 5 columnas queda comentada al final.
+  COM-74 (este archivo): muestra tarjeta Cocineras + badge de fuente (IA/parámetro)
+            + desglose costo mercado vs post-subsidio y ahorro en el modal de detalles.
 Permisos: módulo 'planificaciones' (Directivo y Operativo del comedor, COM-25/COM-8).
 Uso: Montada por App.jsx en la pestaña "Planificaciones".
 */
@@ -30,7 +38,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
     ClipboardList, Loader2, AlertCircle, ChevronDown, ChevronUp,
     Wallet, Coins, TrendingUp, Flame, Users, ShoppingCart, History,
-    Droplet, Trash2, FileDown, Calendar, Printer, Info, X, Gift, Sparkles
+    Droplet, Trash2, FileDown, Calendar, Printer, Info, X, Gift
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
@@ -434,6 +442,14 @@ export const PlanificacionesView = () => {
         );
     };
 
+    // COM-74: badge de fuente de comensales
+    const badgeFuente = (fuente) => {
+        if (fuente === 'prediccion_ia') {
+            return <span className="ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-100 text-emerald-700">IA</span>;
+        }
+        return <span className="ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold bg-slate-100 text-slate-600">Par.</span>;
+    };
+
     return (
         <div className="animate-in fade-in duration-300">
             {/* Encabezado */}
@@ -587,9 +603,7 @@ export const PlanificacionesView = () => {
                                                                         </td>
                                                                         <td className="p-2 text-center font-bold text-slate-800">
                                                                             {d.total_comensales}
-                                                                            <span className={`ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold ${fuenteBadge.color}`}>
-                                                                                {fuenteBadge.texto}
-                                                                            </span>
+                                                                            {badgeFuente(d.fuente_comensales)}
                                                                         </td>
                                                                         <td className="p-2 text-slate-600">S/ {d.costo_racion}</td>
                                                                         <td className="p-2 text-slate-600">{d.energia_kcal_racion ?? '—'}</td>
@@ -756,3 +770,15 @@ export const PlanificacionesView = () => {
         </div>
     );
 };
+
+/*
+COM-69 (trazabilidad): tabla de lista de compras ANTERIOR (5 columnas, sin subsidio),
+COMENTADA. Las columnas "Cantidad/Unidad" mostraban el requerimiento total sin
+distinguir lo cubierto por el subsidio municipal:
+    <th>#</th><th>Ingrediente</th><th>Cantidad</th><th>Unidad</th><th>Días de uso</th>
+    ...
+    <td>{row.cantidad}</td><td>{row.unidad}</td>
+Desde COM-69 la lista solicita comedor_id y muestra "Comprar" (solo lo que se
+compra), "Subsidio cubre" y "Costo" con badge SUBSIDIADO en rojo cuando el ítem
+queda 100% cubierto por el subsidio del mes.
+*/
