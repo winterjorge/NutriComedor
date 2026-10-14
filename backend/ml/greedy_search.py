@@ -30,20 +30,27 @@ COM-71: ECONOMÍA SEMANAL CON HOLGURA Y SUBSIDIO REAL:
     * D4 HOLGURA DIARIA (FLEX): tope por día = PLANIFICACION_FLEX_DIA ×
       ((límite − acumulado) / días restantes); excedente marcado flex_excedido.
     * _costear_recetas queda como wrapper de trazabilidad (stock completo, 1 fecha).
-COM-72 (este archivo): dos correcciones ADITIVAS sobre COM-71:
-    * HOTFIX KeyError 'propuestas': el mapa de costos del primer día (que rellena
-      `ingredientes`/`precio_completo`) se calcula ANTES de validar R1/R2. En COM-71
-      la validación corría con `ingredientes=[]` y TODAS las recetas caían en
-      'sin_proteina_permitida' -> ValueError -> HTTP 400 sin clave 'propuestas'.
-      (Orden anterior COMENTADO abajo por trazabilidad.)
-    * Guarda anti-repetición en día forzado anti-anemia: si el cluster forzado es
-      singleton y ya no tiene recetas sin usar, se relaja la cuota ESE día (se amplía
-      a elegibles sin usar) en lugar de repetir el mismo plato en la semana.
-    Ningún helper, clave de payload ni bloque de trazabilidad de COM-71 se elimina.
+COM-72: HOTFIX KeyError 'propuestas' (primer_mapa ANTES de validar R1/R2) y guarda
+    anti-repetición intra-semana en día forzado anti-anemia (cluster singleton).
+COM-61 / HU-11 (este archivo): VARIEDAD ENTRE SEMANAS:
+    * _recetas_semana_anterior(): receta_ids del menú VIGENTE más reciente del comedor
+      con fecha_referencia < lunes de la semana a generar (criterio D1).
+    * generar_tres_propuestas(..., permitir_repetidos=False): con False, los platos de
+      la semana pasada se EXCLUYEN del pool diario y solo entran si el pool del cluster
+      objetivo se queda sin alternativas frescas (repetición INEVITABLE, auditada por
+      día y en el resumen). Con True, no se excluye nada pero toda coincidencia con la
+      semana pasada se audita (criterio D5: la única vía voluntaria es el checkbox UI).
+    * Comparación por receta_id completo (criterio D2).
+    * Auditoría aditiva POR DÍA: repite_semana_anterior / repeticion_inevitable.
+      POR VARIANTE (resumen): semana_anterior_fecha, n_recetas_semana_anterior,
+      repeticiones_semana_anterior, variedad_pct (% de días con plato nuevo) y
+      permitir_repetidos. Todo viaja en el JSONB resumen/menu (criterio D7: sin DDL).
+    * La guarda anti-repetición COM-72 del día forzado ahora prefiere frescas.
 Uso: Importado por routers/propuestas_menu.py (generar_tres_propuestas,
-     obtener_candidatas_sesion, obtener_candidata). Todas las funciones reciben un
-     cursor psycopg2 (RealDictCursor); el caller gestiona la transacción.
-Referencia: tickets COM-8 / COM-37 / COM-47 / COM-50 / COM-59 / COM-60 / COM-71 / COM-72.
+obtener_candidatas_sesion, obtener_candidata). Todas las funciones reciben un cursor
+psycopg2 (RealDictCursor); el caller gestiona la transacción.
+Referencia: tickets COM-8 / COM-37 / COM-47 / COM-50 / COM-59 / COM-60 / COM-71 /
+COM-72 / COM-61 (HU-11) (solo trazabilidad).
 """
 import json
 import hashlib
@@ -321,8 +328,42 @@ def _cargar_recetas_cluster(cur):
             'precio_completo': False,       # COM-37 v2: se completa en el mapeo
             'ingredientes_sin_precio': [],  # COM-37 v2: auditoría de faltantes
             'ingredientes': [],             # lista de dicts {nombre, categoria}
+            # COM-61: se marca en generar_tres_propuestas contra el menú anterior
+            'repetida_semana_previa': False,
         })
     return recetas, modelo_id
+
+
+# ==========================================
+# COM-61 (HU-11): MENÚ DE LA SEMANA ANTERIOR
+# ==========================================
+def _recetas_semana_anterior(cur, comedor_id: int, fecha_inicio: date):
+    """
+    COM-61 (criterio D1): receta_ids del "menú de la semana pasada": la planificación
+    VIGENTE más reciente del comedor con fecha_referencia ESTRICTAMENTE ANTERIOR al
+    lunes de la semana que se va a generar. Compara por receta_id completo (D2).
+    Retorna (set_de_receta_ids, fecha_referencia_o_None). Si el comedor no tiene
+    historial VIGENTE previo (primera semana), devuelve (set(), None) y la variedad
+    se reporta al 100% sin restricción.
+    """
+    cur.execute("""
+        SELECT ps.id, ps.fecha_referencia
+        FROM presupuesto_semanal ps
+        WHERE ps.comedor_id = %s
+          AND ps.estado = 'VIGENTE'
+          AND ps.fecha_referencia < %s
+        ORDER BY ps.fecha_referencia DESC, ps.id DESC
+        LIMIT 1;
+    """, (comedor_id, fecha_inicio))
+    fila = cur.fetchone()
+    if not fila:
+        return set(), None
+    cur.execute("""
+        SELECT DISTINCT pd.receta_id
+        FROM planificacion_dia pd
+        WHERE pd.presupuesto_semanal_id = %s AND pd.receta_id IS NOT NULL;
+    """, (fila['id'],))
+    return {r['receta_id'] for r in cur.fetchall()}, fila['fecha_referencia']
 
 
 # ==========================================
@@ -530,20 +571,22 @@ def _score(rec, pesos, mm, usada: bool) -> float:
 
 def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
                            presupuesto_semanal, fecha_inicio, dias,
-                           costos_por_dia):
+                           costos_por_dia, permitir_repetidos=False):
     """
-    COM-8 v2 + COM-60 + COM-71 + COM-72: Greedy por DÍA SELECCIONADO.
+    COM-8 v2 + COM-60 + COM-71 + COM-72 + COM-61: Greedy por DÍA SELECCIONADO.
     * COM-60: cuota anti-anemia por deadline y desempate Fe/S/.
     * COM-71 (D2): solo candidatas costeables y con precio completo ese día.
     * COM-71 (D3): scoring y presupuesto con el costo del día (costos_por_dia[d]).
     * COM-71 (D4): tope diario = flex × ((límite − acumulado) / días restantes); si no
       cabe en el tope pero sí en el límite semanal, se permite con flex_excedido=True.
     * COM-71 (D5): el costo del día ya viene descontado contra stock REMANENTE.
-    * COM-72: guarda anti-repetición en día forzado: si el cluster anti-anemia forzado
-      es singleton y ya no tiene recetas sin usar (y hay elegibles sin usar), se relaja
-      la cuota ESE día en lugar de repetir el mismo plato en la semana.
+    * COM-72: guarda anti-repetición en día forzado (cluster singleton agotado).
+    * COM-61 (HU-11): con permitir_repetidos=False, el pool diario prefiere recetas
+      FRESCAS (no cocinadas la semana VIGENTE anterior); las repetidas solo entran si
+      el pool del cluster objetivo se queda sin frescas (repetición INEVITABLE,
+      marcada por día). Con permitir_repetidos=True no se filtra, pero se audita.
     Retorna (menu, sobrepaso, conteo_anemia).
-    Trazabilidad: firma anterior sin costos_por_dia comentada al final.
+    Trazabilidad: firma anterior sin costos_por_dia/permitir_repetidos comentada abajo.
     """
     usadas = set()
     menu = []
@@ -594,11 +637,21 @@ def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
         if not candidatas:
             continue  # sin elegibles ese día (ej. todo sin precio): se omite el día
 
-        # COM-72: guarda anti-repetición en día forzado (cluster singleton agotado):
-        # si TODAS las candidatas del cluster forzado ya se usaron y existen elegibles
-        # sin usar, se relaja la cuota este día ampliando a esas elegibles.
+        # COM-61 (HU-11, D5): pool de frescas primero; repetidas solo si no hay
+        # alternativas frescas en este pool (repetición inevitable, auditada).
+        # Trazabilidad: antes de COM-61 el pool era directamente `candidatas`.
+        if not permitir_repetidos:
+            frescas = [c for c in candidatas if not c.get('repetida_semana_previa')]
+            candidatas = frescas if frescas else candidatas
+
+        # COM-72 + COM-61: guarda anti-repetición intra-semana en día forzado;
+        # al relajar la cuota se prefieren frescas sin usar antes que repetidas.
         if forzar_anemia and all(c['receta_id'] in usadas for c in candidatas):
-            sin_usar = [e for e in elegibles if e['receta_id'] not in usadas]
+            sin_usar = [e for e in elegibles
+                        if e['receta_id'] not in usadas
+                        and (permitir_repetidos or not e.get('repetida_semana_previa'))]
+            if not sin_usar:
+                sin_usar = [e for e in elegibles if e['receta_id'] not in usadas]
             if sin_usar:
                 candidatas = sin_usar
 
@@ -667,6 +720,9 @@ def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
             'flex_excedido': flex_excedido_dia,
             'stock_remanente_aplicado': stock_rem_aplicado,
             'costeable': True,
+            # COM-61 (HU-11): auditoría de variedad entre semanas por día
+            'repite_semana_anterior': bool(elegida.get('repetida_semana_previa', False)),
+            'repeticion_inevitable': bool(elegida.get('repetida_semana_previa', False)) and not permitir_repetidos,
             'costo_total_dia': costo_dia,
             'energia_kcal': round(elegida['energia_kcal'], 2),
             'proteina_g': round(elegida['proteina_g'], 2),
@@ -677,8 +733,10 @@ def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
 
 # COM-71 (trazabilidad): firma anterior de _generar_menu_variante (sin costos_por_dia),
 # comentada: el costo venía mutado en `recetas` por _costear_recetas de una sola fecha.
+# COM-72 (trazabilidad): firma intermedia con costos_por_dia pero sin permitir_repetidos.
 # def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
-#                            presupuesto_semanal, fecha_inicio, dias): ...
+#                            presupuesto_semanal, fecha_inicio, dias,
+#                            costos_por_dia): ...
 
 
 def _top_ingredientes(menu, ingredientes_por_id, n=3):
@@ -706,16 +764,21 @@ def _top_ingredientes(menu, ingredientes_por_id, n=3):
 # ==========================================
 def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
                             creado_por_id: int, fecha_referencia: date = None,
-                            seed: int = 0, dias_semana: list = None):
+                            seed: int = 0, dias_semana: list = None,
+                            permitir_repetidos: bool = False):
     """
-    COM-8 v2/v3 + COM-37 + COM-47 v3 + COM-50 v3 + COM-59A + COM-60 + COM-71 + COM-72:
-    Genera y persiste las 3 propuestas de menú semanal para los DÍAS DE COCINA indicados.
-    COM-71: (D2) filtra no costeables y las audita; (D3) costeo por día con fecha real;
-    (D5) subsidio contra stock REMANENTE; (D4) tope diario FLEX.
+    COM-8 v2/v3 + COM-37 + COM-47 v3 + COM-50 v3 + COM-59A + COM-60 + COM-71 +
+    COM-72 + COM-61: Genera y persiste las 3 propuestas de menú semanal para los
+    DÍAS DE COCINA indicados.
+    COM-71: (D2) filtra no costeables y las audita; (D3) costeo por día con fecha
+    real; (D5) subsidio contra stock REMANENTE; (D4) tope diario FLEX.
     COM-72 (HOTFIX): el mapa de costos del primer día (que rellena `ingredientes` y
-    `precio_completo`) se aplica ANTES de la validación R1/R2; el orden de COM-71
-    (validar primero) dejaba `ingredientes=[]` y excluía TODAS las recetas con
-    'sin_proteina_permitida', produciendo HTTP 400 sin clave 'propuestas'.
+    `precio_completo`) se aplica ANTES de la validación R1/R2.
+    COM-61 (HU-11): `permitir_repetidos` (default False, lo pone el checkbox de la UI
+    tras confirmación) controla la exclusión de los platos del menú VIGENTE de la
+    semana anterior (_recetas_semana_anterior, criterio D1/D2). Cada variante audita
+    en su resumen: semana_anterior_fecha, repeticiones_semana_anterior, variedad_pct
+    y permitir_repetidos (criterio D7: todo en JSONB, sin cambios de esquema).
     COM-60: auditoría de cuota anti-anemia por variante.
     COM-59A: recolección con precios vigentes y validación del margen semanal objetivo.
     """
@@ -783,6 +846,12 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
             f"corrida del scraper; al completarse el precio la receta vuelve a ser "
             f"seleccionable SIN re-entrenar el modelo.")
 
+    # COM-61 (HU-11, D1/D2): marca las recetas que ya se cocinaron la semana VIGENTE
+    # anterior para que el greedy las evite (salvo permitir_repetidos o inevitabilidad).
+    recetas_previas, fecha_previa = _recetas_semana_anterior(cur, comedor_id, fecha_inicio)
+    for r in seleccionables:
+        r['repetida_semana_previa'] = r['receta_id'] in recetas_previas
+
     recetas_por_cluster = {}
     for r in seleccionables:
         recetas_por_cluster.setdefault(r['cluster_codigo'], []).append(r)
@@ -796,7 +865,8 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
         pesos = _jitter_weights(params['ponderaciones'].get(codigo, {}), seed, idx)
         menu, sobrepaso, conteo_anemia = _generar_menu_variante(
             recetas_por_cluster, seleccionables, pesos, params,
-            presupuesto_semanal, fecha_inicio, dias, costos_por_dia)
+            presupuesto_semanal, fecha_inicio, dias, costos_por_dia,
+            permitir_repetidos=permitir_repetidos)
         costo_total = round(sum(d['costo_total_dia'] for d in menu), 2)
         recoleccion_total = round(sum(d['recoleccion_proyectada'] for d in menu), 2)
         # ---- COM-59A + COM-71(D5): auditoría semanal contra STOCK REMANENTE por mes ----
@@ -830,6 +900,17 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
         # COM-71 (D4): auditoría de holgura diaria
         dias_flex_excedido = sum(1 for d in menu if d.get('flex_excedido'))
         stock_rem_usado = any(bool(costos_por_dia[d].get('stock_remanente_aplicado')) for d in dias)
+        # COM-61 (HU-11): auditoría de variedad entre semanas de la variante
+        repeticiones = [
+            {
+                'dia_nombre': d['dia_nombre'],
+                'receta_id': d['receta_id'],
+                'receta_nombre': d['receta_nombre'],
+                'inevitable': bool(d.get('repeticion_inevitable', False)),
+            }
+            for d in menu if d.get('repite_semana_anterior')
+        ]
+        variedad_pct = round(100.0 * (len(menu) - len(repeticiones)) / len(menu), 1) if menu else 100.0
         resumen = {
             'costo_total_semana': costo_total,
             'costo_racion_promedio': round(costo_total / max(total_comensales * len(menu), 1), 2),
@@ -864,6 +945,12 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
             'dias_con_flex_excedido': dias_flex_excedido,
             'stock_remanente_usado': stock_rem_usado,
             'recetas_no_costeables_omitidas': len(no_costeables),
+            # COM-61 (HU-11): indicador de variedad entre semanas (criterio D7: JSONB)
+            'semana_anterior_fecha': fecha_previa.isoformat() if fecha_previa else None,
+            'n_recetas_semana_anterior': len(recetas_previas),
+            'repeticiones_semana_anterior': repeticiones,
+            'variedad_pct': variedad_pct,
+            'permitir_repetidos': bool(permitir_repetidos),
         }
         cur.execute("""
             INSERT INTO planificaciones_candidatas
@@ -904,6 +991,12 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
         'recetas_no_costeables': detalle_no_costeables,
         'recetas_excluidas_precio_incompleto': detalle_no_costeables,
         'recetas_excluidas_reglas_proteina': excluidas_reglas,
+        # COM-61 (HU-11): contexto de variedad para la UI (checkbox y badges)
+        'semana_anterior': {
+            'fecha_referencia': fecha_previa.isoformat() if fecha_previa else None,
+            'receta_ids': sorted(recetas_previas),
+        },
+        'permitir_repetidos': bool(permitir_repetidos),
     }
 
 
