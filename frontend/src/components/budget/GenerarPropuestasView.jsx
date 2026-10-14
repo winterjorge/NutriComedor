@@ -28,10 +28,12 @@ COM-61 / HU-11 (este archivo): VARIEDAD ENTRE SEMANAS en la UI:
          * Chips de contexto en el encabezado de sesión: semana anterior detectada
            y aviso de "repetición permitida" si la generación usó el opt-in.
          Nada existente de COM-8 v1-v5 se elimina; los bloques comentados se conservan.
+COM-74 (este archivo): muestra por día los comensales proyectados (IA + cocineras)
+         con badge de fuente (IA/parámetro) en cada tarjeta de propuesta.
 Permisos: vista para Directivo y Operativo (módulo 'propuestas', COM-25). El botón de
       selección solo aparece si el backend responde puede_seleccionar=true.
 Uso: Montada por App.jsx en la pestaña "Propuestas de Menú".
-Referencia: ticket COM-8 / HU-08 / COM-61 / HU-11 (solo trazabilidad).
+Referencia: ticket COM-8 / HU-08 / COM-61 / COM-74 (solo trazabilidad).
 */
 import React, { useState, useEffect, useCallback } from 'react';
 import {
@@ -39,7 +41,7 @@ import {
     // RefreshCw, // COM-8 v5 (trazabilidad): icono del botón "Regenerar" retirado en COM-8 v4; se conserva comentado.
     Loader2, AlertCircle, AlertTriangle, Wallet, Flame,
     ShoppingBasket, CalendarDays, History, ChevronDown, ChevronUp, Lock,
-    CheckCircle2, TrendingUp, Coins
+    CheckCircle2, TrendingUp, Coins, Users
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
@@ -66,6 +68,14 @@ const DIAS_OPCIONES = [
 
 // COM-8 v2: por defecto se cocina de lunes a viernes
 const DIAS_DEFAULT = [1, 2, 3, 4, 5];
+
+// COM-74: badge de fuente de comensales (IA vs parámetro)
+const badgeFuente = (fuente) => {
+    if (fuente === 'prediccion_ia') {
+        return <span className="ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-100 text-emerald-700">IA</span>;
+    }
+    return <span className="ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold bg-slate-100 text-slate-600">Par.</span>;
+};
 
 export const GenerarPropuestasView = () => {
     const { usuario, seleccion } = useAuth();
@@ -419,6 +429,24 @@ export const GenerarPropuestasView = () => {
                                             ? `Dentro del presupuesto de S/ ${r.presupuesto_semanal}`
                                             : `Excede el presupuesto de S/ ${r.presupuesto_semanal}`}
                                     </p>
+                                    {/* COM-74: comensales proyectados por día */}
+                                    {sesion.comensales_por_dia && (
+                                        <div className="mb-3 p-2 bg-blue-50 border border-blue-200 rounded-lg">
+                                            <p className="text-[11px] font-bold text-blue-800 mb-1 flex items-center gap-1">
+                                                <Users size={11} /> Comensales proyectados por día
+                                            </p>
+                                            <div className="grid grid-cols-5 gap-1 text-[10px]">
+                                                {Object.entries(sesion.comensales_por_dia).map(([dia, cd]) => (
+                                                    <div key={dia} className="text-center">
+                                                        <p className="font-bold text-slate-700">{DIAS_OPCIONES[dia - 1]?.label}</p>
+                                                        <p className="text-slate-600">{cd.social}/{cd.afiliado}/{cd.normal}+{cd.cocineras}</p>
+                                                        <p className="font-bold text-blue-700">Total: {cd.total}</p>
+                                                        {badgeFuente(cd.fuente)}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
                                     {/* Menú resumido por día (solo días de cocina) */}
                                     <div className="space-y-1 mb-4 flex-1">
                                         {(p.menu || []).map(d => (
