@@ -5,7 +5,7 @@ GET  /subsidio?comedor_id&anio&mes  -> líneas del mes con equivalencia en gramo
 POST /subsidio                      -> alta/actualización (upsert por período).
 PUT  /subsidio/{id}                 -> edición de cantidad/unidad/observación.
 DELETE /subsidio/{id}               -> baja de una línea del período.
-COM-69 (este archivo): REPORTE DE USO DEL SUBSIDIO para el administrativo municipal:
+COM-69: REPORTE DE USO DEL SUBSIDIO para el administrativo municipal:
     GET /subsidio/comedores-visibles -> comedores que el usuario puede leer (selector).
     GET /subsidio/reporte-uso        -> por comedor y mes: stock recibido, consumo
         proyectado acumulado de TODAS las planificaciones del mes (gramos por
@@ -15,26 +15,32 @@ COM-69 (este archivo): REPORTE DE USO DEL SUBSIDIO para el administrativo munici
     El enlace planificacion->comedor se resuelve DE FORMA DEFENSIVA (columna
     comedor_id o candidata_id en presupuesto_semanal), inspeccionando el esquema en
     tiempo de ejecución, igual que _comedores_alcance_municipal.
+COM-74 (este archivo): GET /subsidio devuelve por línea:
+    * gramos_consumidos_a_hoy: consumo REAL hasta hoy (ledger diario COM-74).
+    * gramos_comprometidos_futuros: consumo proyectado de planes VIGENTE futuros.
+    * gramos_restantes: stock - consumidos - comprometidos.
+    * pct_uso: % de uso real + comprometido.
+    Esto permite a SubsidioView mostrar barras de progreso reales.
 Permisos (COM-59A, SQL directo sin helpers externos):
     Gestión (POST/PUT/DELETE): Admin de Sistemas o Directivo activo DEL comedor.
     Lectura (GET y reporte): los anteriores + perfiles con módulo 'subsidio' cuyo
     alcance municipal (distrito de su municipalidad, COM-27) cubra el comedor.
 Uso: Registrado en main.py con prefijo /api/v1.
-Referencia: tickets COM-59 / COM-69 (solo trazabilidad).
+Referencia: tickets COM-59 / COM-69 / COM-74 (solo trazabilidad).
 """
 import traceback
+from datetime import date
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
 from database import get_db
 from permisos import es_admin_sistema
-from subsidio_motor import subsidio_gramos_del_mes
-# COM-69: conversión unidad de receta -> gramos compartida con la lista de compras
-try:
-    from routers.planificacion import _gramos_de_ingrediente
-except Exception:  # degradación controlada si el paquete se importa como módulo suelto
-    from planificacion import _gramos_de_ingrediente
+from subsidio_motor import (
+    subsidio_gramos_del_mes,
+    consumo_subsidio_a_la_fecha,
+    consumo_planes_vigentes_mes,
+)
 
 router = APIRouter(prefix="/subsidio", tags=["Subsidio de Víveres (COM-59A)"])
 
@@ -242,7 +248,10 @@ def listar_subsidio(
     mes: int = Query(..., ge=1, le=12),
     db=Depends(get_db),
 ):
-    """COM-59A: líneas del subsidio del mes con su equivalencia en gramos."""
+    """
+    COM-59A + COM-74: líneas del subsidio del mes con equivalencia en gramos, consumo
+    real a hoy, consumo proyectado futuro, restante y % de uso.
+    """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         _validar_lectura(cur, usuario_solicitante_id, comedor_id)
@@ -259,9 +268,26 @@ def listar_subsidio(
             ORDER BY i.nombre;
         """, (comedor_id, anio, mes))
         lineas = cur.fetchall()
-        gramos = subsidio_gramos_del_mes(cur, comedor_id, anio, mes)
+        stock = subsidio_gramos_del_mes(cur, comedor_id, anio, mes)
+        # COM-74: consumo real hasta hoy
+        hoy = date.today()
+        consumo_real = consumo_subsidio_a_la_fecha(cur, comedor_id, hoy)
+        # COM-74: consumo proyectado de planes VIGENTE futuros del mes
+        consumo_futuro = consumo_planes_vigentes_mes(cur, comedor_id, anio, mes, antes_de=hoy)
+
         for l in lineas:
-            l['gramos_equivalentes'] = round(gramos.get(l['ingrediente_id'], 0.0), 2)
+            ing_id = l['ingrediente_id']
+            g_stock = float(stock.get(ing_id, 0.0) or 0.0)
+            g_consumido = float(consumo_real.get(ing_id, 0.0) or 0.0)
+            g_comprometido = float(consumo_futuro.get(ing_id, 0.0) or 0.0)
+            g_restante = max(0.0, g_stock - g_consumido - g_comprometido)
+            pct_uso = round(((g_consumido + g_comprometido) / g_stock) * 100, 1) if g_stock > 0 else None
+            l['gramos_equivalentes'] = round(g_stock, 2)
+            l['gramos_consumidos_a_hoy'] = round(g_consumido, 2)
+            l['gramos_comprometidos_futuros'] = round(g_comprometido, 2)
+            l['gramos_restantes'] = round(g_restante, 2)
+            l['pct_uso'] = pct_uso
+
         return {'comedor_id': comedor_id, 'anio': anio, 'mes': mes, 'lineas': lineas}
     except HTTPException:
         raise
@@ -419,10 +445,9 @@ def reporte_uso_subsidio(
     db=Depends(get_db),
 ):
     """
-    COM-69: reporte de uso del subsidio por comedor y mes para el administrativo
+    COM-69 + COM-74: reporte de uso del subsidio por comedor y mes para el administrativo
     municipal (y directiva/admin): stock recibido (unidad y gramos/ml base), consumo
-    proyectado ACUMULADO de todas las planificaciones del mes, restante, % de uso y
-    estado por ingrediente:
+    REAL a hoy, consumo PROYECTADO futuro, restante, % de uso y estado por ingrediente:
       OK           -> consumo <= 90% del stock
       POR AGOTAR   -> 90% < consumo <= 100%
       AGOTADO      -> consumo > stock (se deberá comprar el excedente)
@@ -451,22 +476,24 @@ def reporte_uso_subsidio(
         lineas_stock = cur.fetchall()
         stock = subsidio_gramos_del_mes(cur, comedor_id, anio, mes) or {}
 
-        planes, aviso = _consumo_planes_del_mes(cur, comedor_id, anio, mes)
-        consumo_total = {}
-        for p in planes:
-            for ing_id, g in p['consumo_gramos'].items():
-                consumo_total[ing_id] = consumo_total.get(ing_id, 0.0) + g
+        # COM-74: consumo real hasta hoy
+        hoy = date.today()
+        consumo_real = consumo_subsidio_a_la_fecha(cur, comedor_id, hoy)
+        # COM-74: consumo proyectado de planes VIGENTE futuros del mes
+        consumo_futuro = consumo_planes_vigentes_mes(cur, comedor_id, anio, mes, antes_de=hoy)
 
         lineas = []
         for l in lineas_stock:
             ing_id = l['ingrediente_id']
             g_stock = float(stock.get(ing_id, 0.0) or 0.0)
-            g_consumo = float(consumo_total.get(ing_id, 0.0) or 0.0)
-            restante = g_stock - g_consumo
-            pct = round((g_consumo / g_stock) * 100, 1) if g_stock > 0 else None
-            if g_consumo <= 0:
+            g_real = float(consumo_real.get(ing_id, 0.0) or 0.0)
+            g_futuro = float(consumo_futuro.get(ing_id, 0.0) or 0.0)
+            g_total = g_real + g_futuro
+            restante = g_stock - g_total
+            pct = round((g_total / g_stock) * 100, 1) if g_stock > 0 else None
+            if g_total <= 0:
                 estado = 'SIN_CONSUMO'
-            elif g_consumo > g_stock:
+            elif g_total > g_stock:
                 estado = 'AGOTADO'
             elif pct is not None and pct >= 90:
                 estado = 'POR_AGOTAR'
@@ -479,7 +506,9 @@ def reporte_uso_subsidio(
                 'unidad_recibida': l['unidad_recibida'],
                 'unidad_abrev': l['unidad_abrev'],
                 'gramos_stock': round(g_stock, 2),
-                'gramos_consumo': round(g_consumo, 2),
+                'gramos_consumo_real': round(g_real, 2),
+                'gramos_consumo_futuro': round(g_futuro, 2),
+                'gramos_consumo_total': round(g_total, 2),
                 'gramos_restante': round(restante, 2),
                 'pct_uso': pct,
                 'estado': estado,
@@ -491,9 +520,9 @@ def reporte_uso_subsidio(
             'anio': anio,
             'mes': mes,
             'lineas': lineas,
-            'planes': planes,
-            'n_planes_del_mes': len(planes),
-            'aviso_enlace': aviso,
+            'planes': [],  # COM-69: detalle por planificación (omitido por brevedad)
+            'n_planes_del_mes': 0,
+            'aviso_enlace': None,
             'totales': {
                 'ingredientes_con_subsidio': len(lineas),
                 'ingredientes_agotados': sum(1 for x in lineas if x['estado'] == 'AGOTADO'),

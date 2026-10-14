@@ -6,7 +6,8 @@ Objetivo: Endpoints del flujo COM-8 "Mostrar 3 propuestas de menú semanal":
 - GET  /propuestas/sesion/{sesion_id}: recupera las 3 tarjetas de una sesión.
 - POST /propuestas/{candidata_id}/seleccionar: fija el menú definitivo en
   presupuesto_semanal + planificacion_dia (solo Directivo), persistiendo
-  también la nutrición por ración de cada día (COM-8 v4).
+  también la nutrición por ración de cada día (COM-8 v4) y los comensales
+  proyectados por día (COM-74).
 - GET  /propuestas/historial y /historial/{id}/dias: historial y detalle
   diario con comensales por tipo, recolección y nutrición por ración.
 Historial:
@@ -14,16 +15,21 @@ COM-8 v1: generación de semana completa (7 días).
 COM-8 v2: parámetro dias_semana en /generar (por defecto Lun-Vie).
 COM-8 v4: persistencia y exposición de energia_kcal_racion, hierro_mg_racion y
     proteina_g_racion en planificacion_dia.
-COM-61 / HU-11 (este archivo): /generar acepta `permitir_repetidos` (bool, default
-    False) y lo propaga al motor greedy: es la vía voluntaria (checkbox + prompt de
-    confirmación en la UI) para levantar la restricción de variedad entre semanas.
-    Sin el flag, el motor excluye los platos del menú VIGENTE de la semana anterior
-    salvo repetición inevitable. Ningún otro endpoint ni permiso se modifica.
+COM-61 / HU-11: /generar acepta `permitir_repetidos` (bool, default False) y lo
+    propaga al motor greedy: es la vía voluntaria (checkbox + prompt de confirmación
+    en la UI) para levantar la restricción de variedad entre semanas. Sin el flag,
+    el motor excluye los platos del menú VIGENTE de la semana anterior salvo
+    repetición inevitable. Ningún otro endpoint ni permiso se modifica.
+COM-74 (este archivo): al SELECCIONAR una propuesta, los comensales por día se toman
+    del MENÚ GENERADO (predicción IA + cocineras + fuente) y no de los parámetros
+    estáticos; se persisten comensales_cocinera y fuente_comensales (columnas de la
+    migración COM-74 en esquema_planificaciones.py). Fallback seguro a los estáticos
+    para menús generados antes de COM-74 (sin esos campos en el JSON).
 Permisos (regla del ticket):
 - Generar/ver: Directivo u Operativo del comedor (admin de sistemas por soporte).
 - Seleccionar o cambiar el menú: SOLO Directivo del comedor.
 Uso: Registrado en main.py con prefijo /api/v1.
-Referencia: ticket COM-8 / HU-08 / COM-61 / HU-11 (solo trazabilidad).
+Referencia: tickets COM-8 / HU-08 / COM-61 / COM-74 (solo trazabilidad).
 """
 from datetime import date, timedelta
 from typing import List, Optional
@@ -98,18 +104,21 @@ def _validar_puede_seleccionar(cur, usuario_id: int, comedor_id: int) -> None:
 
 
 def _comensales_por_tipo(cur):
-    """Comensales proyectados por tipo desde parametros_sistema (seed COM-8)."""
+    """Comensales proyectados por tipo desde parametros_sistema (seed COM-8).
+    COM-74: solo como FALLBACK para menús generados antes de COM-74."""
     cur.execute("""
         SELECT clave, valor FROM parametros_sistema
         WHERE clave IN ('PLANIFICACION_COMENSALES_SOCIAL',
                         'PLANIFICACION_COMENSALES_AFILIADO',
-                        'PLANIFICACION_COMENSALES_NORMAL');
+                        'PLANIFICACION_COMENSALES_NORMAL',
+                        'PLANIFICACION_COCINERAS');
     """)
     p = {r['clave']: int(float(r['valor'])) for r in cur.fetchall()}
     social = p.get('PLANIFICACION_COMENSALES_SOCIAL', 22)
     afiliado = p.get('PLANIFICACION_COMENSALES_AFILIADO', 48)
     normal = p.get('PLANIFICACION_COMENSALES_NORMAL', 50)
-    return social, afiliado, normal
+    cocinera = p.get('PLANIFICACION_COCINERAS', 20)
+    return social, afiliado, normal, cocinera
 
 
 def _lunes_de(fecha: date) -> date:
@@ -129,6 +138,8 @@ def generar_propuestas(data: GenerarPropuestasInput, db=Depends(get_db)):
     COM-61 (HU-11): propaga `permitir_repetidos` al motor para la variedad entre
     semanas (default False: se evitan los platos del menú VIGENTE anterior salvo
     repetición inevitable; la UI muestra el indicador de variedad y las repeticiones).
+    COM-74: el motor devuelve además comensales_por_dia (predicción IA + cocineras)
+    para transparencia de la UI.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -225,10 +236,11 @@ def seleccionar_propuesta(candidata_id: int, data: SeleccionarPropuestaInput,
     """
     Fija la propuesta como menú definitivo: escribe el maestro presupuesto_semanal
     y una fila en planificacion_dia POR CADA DÍA DE COCINA, incluyendo la nutrición
-    por ración (COM-8 v4). Marca la candidata como SELECCIONADA y sus hermanas
-    DESCARTADAS; la planificación VIGENTE previa de la misma semana pasa a REEMPLAZADA.
-    COM-61: al fijar un menú, este se convierte automáticamente en la "semana anterior"
-    de la próxima generación (criterio D1: se lee el VIGENTE más reciente previo).
+    por ración (COM-8 v4) y, desde COM-74, los COMENSALES PROYECTADOS DEL DÍA
+    (predicción IA + cocineras + fuente) tomados del menú generado, con fallback a
+    los parámetros estáticos para menús anteriores a COM-74.
+    Marca la candidata como SELECCIONADA y sus hermanas DESCARTADAS; la planificación
+    VIGENTE previa de la misma semana pasa a REEMPLAZADA.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -244,8 +256,7 @@ def seleccionar_propuesta(candidata_id: int, data: SeleccionarPropuestaInput,
         if not menu:
             raise HTTPException(status_code=400, detail="La propuesta no tiene menú cargado.")
         fecha_inicio = _lunes_de(date.fromisoformat(menu[0]['fecha']))
-        social, afiliado, normal = _comensales_por_tipo(cur)
-        total_comensales = social + afiliado + normal
+        social_fb, afiliado_fb, normal_fb, cocinera_fb = _comensales_por_tipo(cur)
         # Planificación VIGENTE previa de la misma semana pasa a REEMPLAZADA
         cur.execute("""
             UPDATE presupuesto_semanal
@@ -282,21 +293,31 @@ def seleccionar_propuesta(candidata_id: int, data: SeleccionarPropuestaInput,
             data.usuario_solicitante_id,
         ))
         presupuesto_id = cur.fetchone()['id']
-        # Detalle diario (solo los días de cocina seleccionados), con nutrición por ración
+        # Detalle diario (solo los días de cocina seleccionados), con nutrición por
+        # ración y comensales proyectados del día (COM-74)
         for dia in menu:
+            # COM-74: comensales del día desde el menú generado; fallback estático
+            soc = int(dia.get('comensales_social') or social_fb)
+            afi = int(dia.get('comensales_afiliado') or afiliado_fb)
+            nor = int(dia.get('comensales_normal') or normal_fb)
+            coc = int(dia.get('comensales_cocinera') or 0)
+            tot = int(dia.get('comensales_total') or (soc + afi + nor + coc))
+            fuente = dia.get('fuente_comensales') or 'parametro'
             cur.execute("""
                 INSERT INTO planificacion_dia
                     (presupuesto_semanal_id, dia, dia_nombre,
                      comensales_social, comensales_afiliado, comensales_normal,
-                     total_comensales, receta_id, nombre_receta,
+                     comensales_cocinera, fuente_comensales, total_comensales,
+                     receta_id, nombre_receta,
                      costo_racion, costo_total, recoleccion_proyectada,
                      energia_kcal_racion, hierro_mg_racion, proteina_g_racion)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
             """, (
                 presupuesto_id,
                 dia['dia_semana'],
                 dia['dia_nombre'],
-                social, afiliado, normal, total_comensales,
+                soc, afi, nor,
+                coc, fuente, tot,
                 dia['receta_id'],
                 dia['receta_nombre'],
                 dia['costo_racion'],
@@ -373,8 +394,9 @@ def historial_propuestas(comedor_id: int, usuario_solicitante_id: int,
 @router.get("/historial/{presupuesto_id}/dias")
 def historial_dias(presupuesto_id: int, usuario_solicitante_id: int, db=Depends(get_db)):
     """
-    Detalle diario (planificacion_dia) de un menú seleccionado: comensales por tipo,
-    costo, recolección proyectada y nutrición por ración (COM-8 v4).
+    Detalle diario (planificacion_dia) de un menú seleccionado: comensales por tipo
+    (incluye cocineras y fuente desde COM-74), costo, recolección proyectada y
+    nutrición por ración (COM-8 v4).
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -386,7 +408,8 @@ def historial_dias(presupuesto_id: int, usuario_solicitante_id: int, db=Depends(
         _validar_puede_generar(cur, usuario_solicitante_id, maestro['comedor_id'])
         cur.execute("""
             SELECT id, dia, dia_nombre, comensales_social, comensales_afiliado,
-                   comensales_normal, total_comensales, receta_id, nombre_receta,
+                   comensales_normal, comensales_cocinera, fuente_comensales,
+                   total_comensales, receta_id, nombre_receta,
                    costo_racion, costo_total, recoleccion_proyectada,
                    energia_kcal_racion, hierro_mg_racion, proteina_g_racion
             FROM planificacion_dia
