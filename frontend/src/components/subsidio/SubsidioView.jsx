@@ -1,18 +1,22 @@
 /**
- * components/subsidio/SubsidioView.jsx
- * Objetivo: COM-59A: pestaña "Subsidio de Víveres": gestión del subsidio mensual de
- *           víveres que el comedor recibe del municipio (mes calendario), con
- *           equivalencia en gramos para auditoría del motor de costos.
- * Permisos (reflejando al backend): gestión (crear/editar/borrar) para Admin de
- *           Sistemas (cualquier comedor) y Directivos del comedor de la sesión;
- *           perfiles municipales/auditoría ven solo lectura (el backend re-valida).
- * Historial:
- *  - COM-59A: versión original.
- * Uso: Montada por App.jsx en la pestaña "Subsidio" (módulo 'subsidio').
- */
+components/subsidio/SubsidioView.jsx
+Objetivo: COM-59A: pestaña "Subsidio de Víveres": gestión del subsidio mensual de
+          víveres que el comedor recibe del municipio (mes calendario), con
+          equivalencia en gramos para auditoría del motor de costos.
+COM-74 (este archivo): muestra barras de progreso con consumo real, comprometido y
+          restante por ingrediente.
+Permisos (reflejando al backend): gestión (crear/editar/borrar) para Admin de
+          Sistemas (cualquier comedor) y Directivos del comedor de la sesión;
+          perfiles municipales/auditoría ven solo lectura (el backend re-valida).
+Historial:
+  - COM-59A: versión original.
+  - COM-74: barras de progreso con consumo real/comprometido/restante.
+Uso: Montada por App.jsx en la pestaña "Subsidio" (módulo 'subsidio').
+*/
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-    Package, Plus, Edit3, Trash2, Loader2, AlertCircle, RefreshCw, Scale, CheckCircle2
+    Package, Plus, Edit3, Trash2, Loader2, AlertCircle, RefreshCw, Scale, CheckCircle2,
+    TrendingDown, TrendingUp
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
@@ -160,6 +164,14 @@ export const SubsidioView = () => {
     const inputCls = "w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500";
     const labelCls = "text-xs font-semibold text-slate-600 block mb-1";
 
+    // COM-74: color de barra según % de uso
+    const colorBarra = (pct) => {
+        if (pct >= 100) return 'bg-red-500';
+        if (pct >= 90) return 'bg-amber-500';
+        if (pct >= 70) return 'bg-yellow-500';
+        return 'bg-emerald-500';
+    };
+
     return (
         <div className="animate-in fade-in duration-300 space-y-5">
             {/* Encabezado */}
@@ -230,40 +242,69 @@ export const SubsidioView = () => {
                             <thead>
                                 <tr className="bg-slate-100 text-slate-600">
                                     <th className="p-3 font-semibold">Ingrediente</th>
-                                    <th className="p-3 font-semibold text-right">Cantidad recibida</th>
-                                    <th className="p-3 font-semibold text-right">Equivalencia</th>
-                                    <th className="p-3 font-semibold">Observación</th>
+                                    <th className="p-3 font-semibold text-right">Recibido</th>
+                                    <th className="p-3 font-semibold text-right">Consumido</th>
+                                    <th className="p-3 font-semibold text-right">Comprometido</th>
+                                    <th className="p-3 font-semibold text-right">Restante</th>
+                                    <th className="p-3 font-semibold">% Uso</th>
+                                    <th className="p-3 font-semibold">Estado</th>
                                     {puedeGestionar && <th className="p-3 font-semibold text-right">Acciones</th>}
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-200">
-                                {lineas.map(l => (
-                                    <tr key={l.id} className="hover:bg-slate-50">
-                                        <td className="p-3 font-medium text-slate-800">{l.ingrediente_nombre}</td>
-                                        <td className="p-3 text-right text-slate-700">
-                                            {Number(l.cantidad_recibida).toLocaleString('es-PE')} {l.unidad_abrev}
-                                        </td>
-                                        <td className="p-3 text-right text-slate-600 flex items-center justify-end gap-1">
-                                            <Scale size={12} className="text-slate-400" />
-                                            {Number(l.gramos_equivalentes || 0).toLocaleString('es-PE')} g
-                                        </td>
-                                        <td className="p-3 text-slate-500 text-xs">{l.observacion || '—'}</td>
-                                        {puedeGestionar && (
-                                            <td className="p-3">
-                                                <div className="flex justify-end gap-1">
-                                                    <button onClick={() => abrirEdicion(l)} title="Editar"
-                                                        className="p-1.5 bg-slate-100 hover:bg-slate-200 rounded-lg text-slate-700 transition-colors">
-                                                        <Edit3 size={14} />
-                                                    </button>
-                                                    <button onClick={() => setConfBorrado(l.id)} title="Eliminar"
-                                                        className="p-1.5 bg-red-50 hover:bg-red-100 rounded-lg text-red-600 transition-colors">
-                                                        <Trash2 size={14} />
-                                                    </button>
+                                {lineas.map(l => {
+                                    const pct = l.pct_uso || 0;
+                                    const estadoColor = l.estado === 'AGOTADO' ? 'text-red-700 bg-red-100' :
+                                                       l.estado === 'POR_AGOTAR' ? 'text-amber-700 bg-amber-100' :
+                                                       l.estado === 'SIN_CONSUMO' ? 'text-slate-600 bg-slate-100' :
+                                                       'text-emerald-700 bg-emerald-100';
+                                    return (
+                                        <tr key={l.id} className="hover:bg-slate-50">
+                                            <td className="p-3 font-medium text-slate-800">{l.ingrediente_nombre}</td>
+                                            <td className="p-3 text-right text-slate-700">
+                                                {Number(l.cantidad_recibida).toLocaleString('es-PE')} {l.unidad_abrev}
+                                            </td>
+                                            <td className="p-3 text-right text-red-700 font-semibold">
+                                                {(l.gramos_consumidos_a_hoy / 1000).toFixed(1)} kg
+                                            </td>
+                                            <td className="p-3 text-right text-amber-700 font-semibold">
+                                                {(l.gramos_comprometidos_futuros / 1000).toFixed(1)} kg
+                                            </td>
+                                            <td className="p-3 text-right text-emerald-700 font-bold">
+                                                {(l.gramos_restantes / 1000).toFixed(1)} kg
+                                            </td>
+                                            <td className="p-3 min-w-[140px]">
+                                                <div className="flex items-center gap-2">
+                                                    <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
+                                                        <div
+                                                            className={`h-full ${colorBarra(pct)}`}
+                                                            style={{ width: `${Math.min(100, pct)}%` }}></div>
+                                                    </div>
+                                                    <span className="text-xs font-bold text-slate-600">{pct}%</span>
                                                 </div>
                                             </td>
-                                        )}
-                                    </tr>
-                                ))}
+                                            <td className="p-3">
+                                                <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${estadoColor}`}>
+                                                    {l.estado}
+                                                </span>
+                                            </td>
+                                            {puedeGestionar && (
+                                                <td className="p-3">
+                                                    <div className="flex justify-end gap-1">
+                                                        <button onClick={() => abrirEdicion(l)} title="Editar"
+                                                            className="p-1.5 bg-slate-100 hover:bg-slate-200 rounded-lg text-slate-700 transition-colors">
+                                                            <Edit3 size={14} />
+                                                        </button>
+                                                        <button onClick={() => setConfBorrado(l.id)} title="Eliminar"
+                                                            className="p-1.5 bg-red-50 hover:bg-red-100 rounded-lg text-red-600 transition-colors">
+                                                            <Trash2 size={14} />
+                                                        </button>
+                                                    </div>
+                                                </td>
+                                            )}
+                                        </tr>
+                                    );
+                                })}
                             </tbody>
                         </table>
                     </div>

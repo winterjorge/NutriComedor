@@ -13,7 +13,7 @@ Objetivo: COM-59A: helpers de negocio del modelo autogestionado:
 Historial:
 COM-59A v1: versión original. Supuestos documentados: sin ledger de consumo (el stock
     del mes se considera completo para cualquier semana) y descuento por ingrediente.
-COM-71 (este archivo):
+COM-71:
     * costo_con_subsidio() acepta `stock_inicial: dict = None`: si se provee, usa ese
       stock (gramos por ingrediente) en lugar de leer el mes completo. Cambio ADITIVO:
       sin el argumento el comportamiento es idéntico a COM-59A (COM-69 intacto).
@@ -25,8 +25,17 @@ COM-71 (este archivo):
           greedy debe asumir disponible al costear una semana nueva.
       La matemática de gramos por línea replica la del reporte COM-69 (equivalencias
       uso->gramos con fallback estándar) para que costo y reporte coincidan.
+COM-74 (este archivo):
+    * consumo_subsidio_a_la_fecha(): consumo REAL de subsidio hasta una fecha de corte
+      (días de planes VIGENTE/REEMPLAZADA con (fecha_referencia + dia − 1) < corte),
+      deduplicando por día calendario (si una semana fue reemplazada a mitad de semana,
+      ese día cuenta una sola vez: prioriza el plan VIGENTE). Usa los comensales
+      guardados por día (comensales_cocinera, fuente_comensales) con fallback a
+      total_comensales para planes antiguos.
+    * stock_remanente_a_la_fecha(): max(0, stock_mes - consumo_a_la_fecha), para que
+      el costeo del día *d* use el stock disponible ese día *d*.
 Uso: Importado por routers/subsidio.py, ml/greedy_search.py y reportes.
-Referencia: tickets COM-59 / COM-71 (solo trazabilidad).
+Referencia: tickets COM-59 / COM-71 / COM-74 (solo trazabilidad).
 """
 from datetime import date
 
@@ -189,6 +198,120 @@ def stock_remanente_mes(cur, comedor_id: int, anio: int, mes: int,
     if not stock:
         return {}
     consumo = consumo_planes_vigentes_mes(cur, comedor_id, anio, mes, antes_de=antes_de)
+    return {k: max(0.0, v - consumo.get(k, 0.0)) for k, v in stock.items()}
+
+
+# ==========================================
+# COM-74: CONSUMO REAL A LA FECHA (ledger diario)
+# ==========================================
+def consumo_subsidio_a_la_fecha(cur, comedor_id: int, fecha_corte: date) -> dict:
+    """
+    COM-74: consumo REAL de subsidio hasta `fecha_corte` (exclusive) para el comedor.
+    Suma los gramos de todos los días de planes VIGENTE/REEMPLAZADA cuyo
+    (fecha_referencia + dia − 1) < fecha_corte, deduplicando por día calendario
+    (si una semana fue reemplazada a mitad de semana, ese día cuenta una sola vez:
+    prioriza el plan VIGENTE).
+    Usa los comensales guardados por día (comensales_cocinera, fuente_comensales)
+    con fallback a total_comensales para planes antiguos.
+    Retorna {ingrediente_id: gramos_consumidos}.
+    """
+    # 1) Obtener todos los días de planes VIGENTE/REEMPLAZADA del comedor
+    cur.execute("""
+        SELECT ps.id, ps.fecha_referencia, ps.estado
+        FROM presupuesto_semanal ps
+        WHERE ps.comedor_id = %s
+          AND ps.estado IN ('VIGENTE', 'REEMPLAZADA')
+        ORDER BY ps.fecha_referencia DESC, ps.id DESC;
+    """, (comedor_id,))
+    planes = cur.fetchall()
+
+    # 2) Para cada plan, obtener sus días y calcular fecha_dia = fecha_referencia + dia - 1
+    dias_consumo = {}  # {fecha_dia: {plan_id, receta_id, total_comensales, raciones}}
+    for plan in planes:
+        cur.execute("""
+            SELECT pd.dia, pd.receta_id,
+                   COALESCE(pd.comensales_cocinera, 0) AS cocineras,
+                   COALESCE(pd.comensales_social, 0) AS social,
+                   COALESCE(pd.comensales_afiliado, 0) AS afiliado,
+                   COALESCE(pd.comensales_normal, 0) AS normal,
+                   pd.total_comensales,
+                   COALESCE(NULLIF(ra.raciones, 0), 4) AS raciones
+            FROM planificacion_dia pd
+            JOIN recetas_almuerzo ra ON ra.id = pd.receta_id
+            WHERE pd.presupuesto_semanal_id = %s;
+        """, (plan['id'],))
+        for d in cur.fetchall():
+            fecha_dia = plan['fecha_referencia'] + timedelta(days=d['dia'] - 1)
+            if fecha_dia >= fecha_corte:
+                continue
+            # Deduplicación: si ya existe este día, priorizar el plan VIGENTE
+            if fecha_dia in dias_consumo:
+                if dias_consumo[fecha_dia]['estado'] == 'VIGENTE':
+                    continue  # ya tenemos uno VIGENTE, ignorar este
+            # Calcular total_comensales: si tiene comensales_cocinera, usar la suma
+            if d['cocineras'] > 0:
+                total = d['social'] + d['afiliado'] + d['normal'] + d['cocineras']
+            else:
+                total = d['total_comensales'] or (d['social'] + d['afiliado'] + d['normal'] + 20)
+            dias_consumo[fecha_dia] = {
+                'plan_id': plan['id'],
+                'estado': plan['estado'],
+                'receta_id': d['receta_id'],
+                'total_comensales': total,
+                'raciones': d['raciones'],
+            }
+
+    if not dias_consumo:
+        return {}
+
+    # 3) Calcular consumo de subsidio para cada día
+    cur.execute("""
+        SELECT ingrediente_id, insumo_id, unidad_uso_id, gramos_por_unidad_uso
+        FROM ingredientes_equivalencias
+        WHERE estado_activo = TRUE;
+    """)
+    eq_map = {(r['ingrediente_id'], r['insumo_id'], r['unidad_uso_id']):
+              float(r['gramos_por_unidad_uso']) for r in cur.fetchall()}
+
+    consumo = {}
+    for fecha_dia, info in dias_consumo.items():
+        cur.execute("""
+            SELECT ri.ingrediente_id, ri.cantidad_requerida,
+                   ri.unidad_medida_id AS unidad_uso_id,
+                   um.abreviatura, um.tipo_magnitud, um.factor_a_base,
+                   ing.peso_estimado_g
+            FROM receta_ingrediente ri
+            JOIN unidades_medida um ON um.id = ri.unidad_medida_id
+            JOIN ingredientes ing ON ing.id = ri.ingrediente_id
+            WHERE ri.receta_id = %s;
+        """, (info['receta_id'],))
+        for linea in cur.fetchall():
+            g = None
+            for (ing_id, ins_id, uu_id), gramos_eq in eq_map.items():
+                if ing_id == linea['ingrediente_id'] and uu_id == linea['unidad_uso_id']:
+                    g = gramos_eq
+                    break
+            if g is None:
+                g = gramos_por_unidad_estandar(
+                    linea['abreviatura'], linea['tipo_magnitud'],
+                    float(linea['factor_a_base'] or 1.0), float(linea['peso_estimado_g'] or 100.0))
+            gramos_linea = g * float(linea['cantidad_requerida'])
+            gramos_racion_total = gramos_linea * (float(info['total_comensales']) / float(info['raciones']))
+            consumo[linea['ingrediente_id']] = consumo.get(linea['ingrediente_id'], 0.0) + gramos_racion_total
+
+    return consumo
+
+
+def stock_remanente_a_la_fecha(cur, comedor_id: int, anio: int, mes: int,
+                               fecha_corte: date) -> dict:
+    """
+    COM-74: stock subvencionado disponible hasta `fecha_corte`:
+    max(0, stock_mes - consumo_real_a_la_fecha).
+    """
+    stock = subsidio_gramos_del_mes(cur, comedor_id, anio, mes)
+    if not stock:
+        return {}
+    consumo = consumo_subsidio_a_la_fecha(cur, comedor_id, fecha_corte)
     return {k: max(0.0, v - consumo.get(k, 0.0)) for k, v in stock.items()}
 
 

@@ -32,7 +32,7 @@ COM-71: ECONOMÍA SEMANAL CON HOLGURA Y SUBSIDIO REAL:
     * _costear_recetas queda como wrapper de trazabilidad (stock completo, 1 fecha).
 COM-72: HOTFIX KeyError 'propuestas' (primer_mapa ANTES de validar R1/R2) y guarda
     anti-repetición intra-semana en día forzado anti-anemia (cluster singleton).
-COM-61 / HU-11 (este archivo): VARIEDAD ENTRE SEMANAS:
+COM-61 / HU-11: VARIEDAD ENTRE SEMANAS:
     * _recetas_semana_anterior(): receta_ids del menú VIGENTE más reciente del comedor
       con fecha_referencia < lunes de la semana a generar (criterio D1).
     * generar_tres_propuestas(..., permitir_repetidos=False): con False, los platos de
@@ -46,11 +46,25 @@ COM-61 / HU-11 (este archivo): VARIEDAD ENTRE SEMANAS:
       repeticiones_semana_anterior, variedad_pct (% de días con plato nuevo) y
       permitir_repetidos. Todo viaja en el JSONB resumen/menu (criterio D7: sin DDL).
     * La guarda anti-repetición COM-72 del día forzado ahora prefiere frescas.
+COM-74 (este archivo): COMENSALES PROYECTADOS POR DÍA:
+    * _comensales_por_dia(): para cada día de cocina consulta la PREDICCIÓN IA
+      (ai_engine.predecir_demanda_raciones con la fecha real del día) + cocineras
+      (PLANIFICACION_COCINERAS, default 20). Si sin_datos=True -> fallback a
+      parámetros estáticos y fuente_comensales='parametro' (auditable).
+    * El COSTO del día usa total_con_cocineras (raciones físicamente cocinadas) y
+      la RECOLECCIÓN solo los tipos pagantes (Social/Afiliado/Normal) × precios
+      vigentes. Antes se usaban 120 fijos sin cocineras para todo.
+    * Cada día del menú persiste comensales_social/afiliado/normal/cocinera/total y
+      fuente_comensales para auditoría y para que la selección los grabe en
+      planificacion_dia.
+    * Resumen agrega dias_con_prediccion_ia y total_comensales_dia pasa a ser el
+      promedio real de los días generados (clave conservada por compatibilidad).
+    Ningún helper, clave de payload ni bloque de trazabilidad anterior se elimina.
 Uso: Importado por routers/propuestas_menu.py (generar_tres_propuestas,
-obtener_candidatas_sesion, obtener_candidata). Todas las funciones reciben un cursor
-psycopg2 (RealDictCursor); el caller gestiona la transacción.
+     obtener_candidatas_sesion, obtener_candidata). Todas las funciones reciben un
+     cursor psycopg2 (RealDictCursor); el caller gestiona la transacción.
 Referencia: tickets COM-8 / COM-37 / COM-47 / COM-50 / COM-59 / COM-60 / COM-71 /
-COM-72 / COM-61 (HU-11) (solo trazabilidad).
+COM-72 / COM-61 / COM-74 (solo trazabilidad).
 """
 import json
 import hashlib
@@ -74,6 +88,8 @@ from subsidio_motor import (
     subsidio_gramos_del_mes,
     stock_remanente_mes,          # COM-71 (D5)
 )
+# COM-74: predicción de demanda (misma fuente que el POS) para comensales por día
+from ai_engine import predecir_demanda_raciones
 # COM-37 v4/v5: reglas de proteína VIGENTES y normalizador, compartidos con K-means
 try:
     from ml.kmeans_recetas import cargar_reglas_proteinas, _normalizar
@@ -117,6 +133,8 @@ PREFIJO_CLUSTER_ANEMIA = 'Anti-Anemia'
 # COM-71: piso sensato del factor de holgura diaria (1.0 = gasto perfectamente uniforme)
 FLEX_DIA_MIN = 1.0
 FLEX_DIA_DEFAULT = 2.0
+# COM-74: default de cocineras si el parámetro no existe (coherente con POS)
+COCINERAS_DEFAULT = 20
 
 
 # ==========================================
@@ -162,6 +180,8 @@ def cargar_parametros(cur) -> dict:
     COM-60: lee además KMEANS_CUOTA_CLUSTER_FEO (días mínimos/semana del cluster
     anti-anemia) y KMEANS_FE_SO_DESEMPATE (desempate por hierro por sol).
     COM-71: lee PLANIFICACION_FLEX_DIA (holgura diaria; default 2.0, piso 1.0).
+    COM-74: lee PLANIFICACION_COCINERAS (default 20): comensales que comen pero no
+    pagan; se suman al total de raciones a cocinar (no a la recolección).
     """
     cur.execute("""
         SELECT clave, valor FROM parametros_sistema
@@ -200,6 +220,11 @@ def cargar_parametros(cur) -> dict:
         flex_dia = FLEX_DIA_DEFAULT
     if flex_dia < FLEX_DIA_MIN:
         flex_dia = FLEX_DIA_MIN
+    # COM-74: cocineras por día (parámetro nuevo; default 20)
+    try:
+        cocineras = int(float(p.get('PLANIFICACION_COCINERAS', COCINERAS_DEFAULT)))
+    except Exception:
+        cocineras = COCINERAS_DEFAULT
     return {
         'dias': int(float(p.get('PLANIFICACION_DIAS_SEMANA', 7))),
         'rotacion': rotacion,
@@ -219,7 +244,69 @@ def cargar_parametros(cur) -> dict:
         'desempate_fe_so': desempate_fe_so,
         # COM-71: holgura diaria
         'flex_dia': flex_dia,
+        # COM-74: cocineras (comen, no pagan)
+        'cocineras': cocineras,
     }
+
+
+# ==========================================
+# COM-74: COMENSALES PROYECTADOS POR DÍA (IA + cocineras)
+# ==========================================
+def _limites_ia(cur):
+    """Lee los pisos de predicción IA (IA_MIN_* / IA_FINDE_*) desde parametros_sistema."""
+    cur.execute("SELECT clave, valor FROM parametros_sistema WHERE clave LIKE 'IA_%';")
+    p = {r['clave']: r['valor'] for r in cur.fetchall()}
+    limites_minimos = {
+        'SOCIAL': int(float(p.get('IA_MIN_SOCIAL', 15))),
+        'AFILIADO': int(float(p.get('IA_MIN_AFILIADO', 35))),
+        'NORMAL': int(float(p.get('IA_MIN_NORMAL', 80))),
+    }
+    limites_finde = {
+        'SOCIAL': int(float(p.get('IA_FINDE_SOCIAL', 10))),
+        'AFILIADO': int(float(p.get('IA_FINDE_AFILIADO', 20))),
+        'NORMAL': int(float(p.get('IA_FINDE_NORMAL', 30))),
+    }
+    return limites_minimos, limites_finde
+
+
+def _comensales_por_dia(cur, params, fecha_inicio, dias) -> dict:
+    """
+    COM-74 (D1): para cada día de cocina consulta la PREDICCIÓN DE DEMANDA con la
+    fecha real del día (misma fuente que el POS: ai_engine con historial real).
+    Suma las cocineras (PLANIFICACION_COCINERAS). Si la predicción devuelve None
+    (sin históricos suficientes del día), cae a los parámetros estáticos y marca
+    fuente_comensales='parametro' para auditoría.
+    Retorna {dia: {social, afiliado, normal, cocineras, total, pagantes, fuente}}.
+    """
+    limites_minimos, limites_finde = _limites_ia(cur)
+    out = {}
+    for d in dias:
+        fd = fecha_inicio + timedelta(days=d - 1)
+        pred = None
+        try:
+            pred = predecir_demanda_raciones(
+                fd.weekday(), fd.day, limites_minimos, limites_finde, cur=cur)
+        except Exception as e:
+            print(f"[COM-74] Predicción de comensales falló para {fd}: {e}")
+            pred = None
+        if pred:
+            soc, afi, nor = int(pred[0]), int(pred[1]), int(pred[2])
+            fuente = 'prediccion_ia'
+        else:
+            soc, afi, nor = params['com_social'], params['com_afiliado'], params['com_normal']
+            fuente = 'parametro'
+        coc = params['cocineras']
+        out[d] = {
+            'social': soc,
+            'afiliado': afi,
+            'normal': nor,
+            'cocineras': coc,
+            'total': soc + afi + nor + coc,          # raciones a cocinar (COM-74 D2)
+            'pagantes': soc + afi + nor,             # base de la recolección
+            'fuente': fuente,
+            'fecha': fd.isoformat(),
+        }
+    return out
 
 
 # =========================================================================
@@ -571,9 +658,9 @@ def _score(rec, pesos, mm, usada: bool) -> float:
 
 def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
                            presupuesto_semanal, fecha_inicio, dias,
-                           costos_por_dia, permitir_repetidos=False):
+                           costos_por_dia, comensales_por_dia, permitir_repetidos=False):
     """
-    COM-8 v2 + COM-60 + COM-71 + COM-72 + COM-61: Greedy por DÍA SELECCIONADO.
+    COM-8 v2 + COM-60 + COM-71 + COM-72 + COM-61 + COM-74: Greedy por DÍA SELECCIONADO.
     * COM-60: cuota anti-anemia por deadline y desempate Fe/S/.
     * COM-71 (D2): solo candidatas costeables y con precio completo ese día.
     * COM-71 (D3): scoring y presupuesto con el costo del día (costos_por_dia[d]).
@@ -585,9 +672,15 @@ def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
       FRESCAS (no cocinadas la semana VIGENTE anterior); las repetidas solo entran si
       el pool del cluster objetivo se queda sin frescas (repetición INEVITABLE,
       marcada por día). Con permitir_repetidos=True no se filtra, pero se audita.
+    * COM-74: el costo del día se multiplica por el TOTAL PROYECTADO del día
+      (predicción IA + cocineras) y la recolección proyectada usa solo pagantes
+      (Social/Afiliado/Normal) × precios vigentes. Cada día del menú persiste sus
+      comensales por tipo, total, pagantes y fuente_comensales para auditoría y
+      para que la selección los grabe en planificacion_dia.
     Retorna (menu, sobrepaso, conteo_anemia).
-    Trazabilidad: firma anterior sin costos_por_dia/permitir_repetidos comentada abajo.
+    Trazabilidad: firma anterior sin costos_por_dia/comensales_por_dia comentada abajo.
     """
+    comensales_por_dia = comensales_por_dia or {}
     usadas = set()
     menu = []
     acumulado = 0.0
@@ -597,16 +690,27 @@ def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
     cuota = int(params.get('cuota_feo', 2))                    # COM-60
     desempate = bool(params.get('desempate_fe_so', True))      # COM-60
     flex = float(params.get('flex_dia', FLEX_DIA_DEFAULT))     # COM-71 (D4)
-    total_comensales = params['com_social'] + params['com_afiliado'] + params['com_normal']
-    recoleccion_dia = (params['com_social'] * params['precio_social'] +
-                       params['com_afiliado'] * params['precio_afiliado'] +
-                       params['com_normal'] * params['precio_normal'])
+    # COM-74 (trazabilidad): antes total_comensales y recolección eran FIJOS:
+    # total_comensales = params['com_social'] + params['com_afiliado'] + params['com_normal']
+    # recoleccion_dia = (com_social*precio_social + com_afiliado*precio_afiliado + com_normal*precio_normal)
     limite = presupuesto_semanal * TOLERANCIA_PRESUPUESTO
 
     for i, d in enumerate(dias):
         info_dia = costos_por_dia.get(d, {})
         costo_map = info_dia.get('mapa', {}) if isinstance(info_dia, dict) else {}
         stock_rem_aplicado = bool(info_dia.get('stock_remanente_aplicado', False)) if isinstance(info_dia, dict) else False
+        # COM-74: comensales proyectados del día (IA + cocineras) con fallback estático
+        cd = comensales_por_dia.get(d) or {
+            'social': params['com_social'], 'afiliado': params['com_afiliado'],
+            'normal': params['com_normal'], 'cocineras': params.get('cocineras', COCINERAS_DEFAULT),
+            'total': params['com_social'] + params['com_afiliado'] + params['com_normal'] + params.get('cocineras', COCINERAS_DEFAULT),
+            'pagantes': params['com_social'] + params['com_afiliado'] + params['com_normal'],
+            'fuente': 'parametro',
+        }
+        total_dia = cd['total']
+        recoleccion_dia = (cd['social'] * params['precio_social'] +
+                           cd['afiliado'] * params['precio_afiliado'] +
+                           cd['normal'] * params['precio_normal'])
 
         # COM-71 (D2/D3): fusiona la receta base con sus costos DEL día y filtra elegibles
         def _merge(r):
@@ -674,7 +778,7 @@ def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
         for r in candidatas:
             if not _guardia_repeticion(r):
                 continue
-            costo_dia = r['costo_racion'] * total_comensales
+            costo_dia = r['costo_racion'] * total_dia          # COM-74: total con cocineras
             if acumulado + costo_dia <= limite and costo_dia <= cap_dia:
                 elegida = r
                 break
@@ -683,7 +787,7 @@ def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
             for r in candidatas:
                 if not _guardia_repeticion(r):
                     continue
-                costo_dia = r['costo_racion'] * total_comensales
+                costo_dia = r['costo_racion'] * total_dia
                 if acumulado + costo_dia <= limite:
                     elegida = r
                     flex_excedido_dia = True
@@ -691,10 +795,10 @@ def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
         # Pase 3: fallback histórico (la más barata; puede marcar sobrepaso)
         if elegida is None:
             elegida = min(candidatas, key=lambda r: r['costo_racion'])
-            if acumulado + elegida['costo_racion'] * total_comensales > limite:
+            if acumulado + elegida['costo_racion'] * total_dia > limite:
                 sobrepaso = True
 
-        costo_dia = round(elegida['costo_racion'] * total_comensales, 2)
+        costo_dia = round(elegida['costo_racion'] * total_dia, 2)
         acumulado += costo_dia
         usadas.add(elegida['receta_id'])
         es_anemia = elegida['cluster_codigo'] in anemia_codes   # COM-60
@@ -723,6 +827,14 @@ def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
             # COM-61 (HU-11): auditoría de variedad entre semanas por día
             'repite_semana_anterior': bool(elegida.get('repetida_semana_previa', False)),
             'repeticion_inevitable': bool(elegida.get('repetida_semana_previa', False)) and not permitir_repetidos,
+            # COM-74: comensales proyectados del día (persistibles en planificacion_dia)
+            'comensales_social': cd['social'],
+            'comensales_afiliado': cd['afiliado'],
+            'comensales_normal': cd['normal'],
+            'comensales_cocinera': cd['cocineras'],
+            'comensales_total': cd['total'],
+            'comensales_pagantes': cd['pagantes'],
+            'fuente_comensales': cd['fuente'],
             'costo_total_dia': costo_dia,
             'energia_kcal': round(elegida['energia_kcal'], 2),
             'proteina_g': round(elegida['proteina_g'], 2),
@@ -733,7 +845,7 @@ def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
 
 # COM-71 (trazabilidad): firma anterior de _generar_menu_variante (sin costos_por_dia),
 # comentada: el costo venía mutado en `recetas` por _costear_recetas de una sola fecha.
-# COM-72 (trazabilidad): firma intermedia con costos_por_dia pero sin permitir_repetidos.
+# COM-74 (trazabilidad): firma intermedia sin comensales_por_dia:
 # def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
 #                            presupuesto_semanal, fecha_inicio, dias,
 #                            costos_por_dia): ...
@@ -768,8 +880,11 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
                             permitir_repetidos: bool = False):
     """
     COM-8 v2/v3 + COM-37 + COM-47 v3 + COM-50 v3 + COM-59A + COM-60 + COM-71 +
-    COM-72 + COM-61: Genera y persiste las 3 propuestas de menú semanal para los
-    DÍAS DE COCINA indicados.
+    COM-72 + COM-61 + COM-74: Genera y persiste las 3 propuestas de menú semanal para
+    los DÍAS DE COCINA indicados.
+    COM-74: los comensales de cada día vienen de la PREDICCIÓN IA (con cocineras y
+    fallback a parámetros marcado como fuente='parametro'); el costo del día usa el
+    total con cocineras y la recolección solo pagantes.
     COM-71: (D2) filtra no costeables y las audita; (D3) costeo por día con fecha
     real; (D5) subsidio contra stock REMANENTE; (D4) tope diario FLEX.
     COM-72 (HOTFIX): el mapa de costos del primer día (que rellena `ingredientes` y
@@ -800,6 +915,8 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
     seleccionables = [r for r in recetas if r.get('costeable', True)]
 
     fecha_inicio = _lunes_de(fecha_referencia)
+    # COM-74 (D1): comensales proyectados por día (IA + cocineras) ANTES del costeo
+    comensales_por_dia = _comensales_por_dia(cur, params, fecha_inicio, dias)
     # COM-71 (D3/D5): stock remanente por mes involucrado y mapa de costos por día
     meses = sorted({((fecha_inicio + timedelta(days=d - 1)).year,
                      (fecha_inicio + timedelta(days=d - 1)).month) for d in dias})
@@ -858,7 +975,6 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
     recetas_por_id = {r['receta_id']: r for r in seleccionables}
     marca = f"{comedor_id}|{fecha_inicio.isoformat()}|{creado_por_id}|{seed}|{'-'.join(map(str, dias))}"
     sesion_id = hashlib.sha256(marca.encode()).hexdigest()[:32]
-    total_comensales = params['com_social'] + params['com_afiliado'] + params['com_normal']
     margen_objetivo = margen_semanal_objetivo(cur)
     propuestas = []
     for idx, (codigo, meta) in enumerate(VARIANTES.items()):
@@ -866,6 +982,7 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
         menu, sobrepaso, conteo_anemia = _generar_menu_variante(
             recetas_por_cluster, seleccionables, pesos, params,
             presupuesto_semanal, fecha_inicio, dias, costos_por_dia,
+            comensales_por_dia=comensales_por_dia,
             permitir_repetidos=permitir_repetidos)
         costo_total = round(sum(d['costo_total_dia'] for d in menu), 2)
         recoleccion_total = round(sum(d['recoleccion_proyectada'] for d in menu), 2)
@@ -877,10 +994,11 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
             rec = recetas_por_id.get(d['receta_id'])
             if not rec:
                 continue
+            total_dia = d.get('comensales_total', params['com_social'] + params['com_afiliado'] + params['com_normal'])
             for ing_id, g_racion in (rec.get('detalle_gramos_racion') or {}).items():
                 if ing_id in stock_rem_por_mes.get(clave_mes, {}):
                     consumo_por_mes.setdefault(clave_mes, {}).setdefault(ing_id, 0.0)
-                    consumo_por_mes[clave_mes][ing_id] += g_racion * total_comensales
+                    consumo_por_mes[clave_mes][ing_id] += g_racion * total_dia
         agotados_ids = set()
         for clave_mes, cons in consumo_por_mes.items():
             rem = stock_rem_por_mes.get(clave_mes, {})
@@ -892,7 +1010,7 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
             cur.execute("SELECT nombre FROM ingredientes WHERE id = ANY(%s);", (sorted(agotados_ids),))
             agotados_nombres = [f['nombre'] for f in cur.fetchall()]
         ahorro_subsidio_semana = round(
-            sum(d.get('ahorro_subsidio', 0.0) * total_comensales for d in menu), 2)
+            sum(d.get('ahorro_subsidio', 0.0) * d.get('comensales_total', 1) for d in menu), 2)
         margen_semana_pct = round(((recoleccion_total - costo_total) / costo_total) * 100, 2) \
             if costo_total else None
         cumple_margen = bool(margen_semana_pct is not None and
@@ -911,16 +1029,21 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
             for d in menu if d.get('repite_semana_anterior')
         ]
         variedad_pct = round(100.0 * (len(menu) - len(repeticiones)) / len(menu), 1) if menu else 100.0
+        # COM-74: auditoría de fuente de comensales
+        dias_con_ia = sum(1 for d in menu if d.get('fuente_comensales') == 'prediccion_ia')
+        total_comensales_prom = round(sum(d.get('comensales_total', 0) for d in menu) / max(len(menu), 1), 1)
         resumen = {
             'costo_total_semana': costo_total,
-            'costo_racion_promedio': round(costo_total / max(total_comensales * len(menu), 1), 2),
+            'costo_racion_promedio': round(costo_total / max(sum(d.get('comensales_total', 0) for d in menu), 1), 2),
             'calorias_promedio_dia': round(sum(d['energia_kcal'] for d in menu) / max(len(menu), 1), 2),
             'hierro_promedio_dia': round(sum(d['hierro_mg'] for d in menu) / max(len(menu), 1), 2),
             'proteina_promedio_dia': round(sum(d['proteina_g'] for d in menu) / max(len(menu), 1), 2),
             'top_ingredientes': _top_ingredientes(menu, recetas_por_id, n=3),
             'presupuesto_semanal': presupuesto_semanal,
             'dias_seleccionados': dias,
-            'total_comensales_dia': total_comensales,
+            # COM-74: clave conservada; ahora es el promedio real proyectado (con cocineras)
+            'total_comensales_dia': total_comensales_prom,
+            'dias_con_prediccion_ia': dias_con_ia,
             'recoleccion_total_semana': recoleccion_total,
             'margen_proyectado': round(recoleccion_total - costo_total, 2),
             'dentro_de_presupuesto': not sobrepaso and costo_total <= presupuesto_semanal,
@@ -997,6 +1120,8 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
             'receta_ids': sorted(recetas_previas),
         },
         'permitir_repetidos': bool(permitir_repetidos),
+        # COM-74: proyección de comensales usada (transparencia para la UI)
+        'comensales_por_dia': comensales_por_dia,
     }
 
 

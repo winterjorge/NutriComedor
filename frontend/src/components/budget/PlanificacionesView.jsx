@@ -4,31 +4,25 @@ Objetivo: Vista de Planificaciones semanales (menús definitivos del comedor). L
       las planificaciones vigentes/reemplazadas y, al expandirlas, muestra:
       (1) tarjetas de resumen con Costo semanal, Recolección semanal, MARGEN
           (ventas - compras), Kcal/día, Hierro/día y Proteína/día;
-      (2) el detalle POR DÍA con comensales Social/Afiliado/Normal en columnas
-          separadas, recolección proyectada y nutrición por ración;
+      (2) el detalle POR DÍA con comensales Social/Afiliado/Normal/Cocineras en
+          columnas separadas, recolección proyectada y nutrición por ración;
       (3) la lista de compras consolidada (semanal o por día) con exportación
           a PDF para imprimir o llevar al mercado.
 Historial:
-  Sprint 2: versión original (api.getPlanificaciones / getPlanificacionDetalle /
-            eliminarPlanificacion / getListaCompras).
-  COM-8 v2: reconstruida sobre /propuestas/historial y /propuestas/historial/{id}/dias.
-  COM-8 v4: comensales por día en columnas separadas; tarjetas de hierro y proteína.
-  COM-8 v5: trazabilidad recuperada. Todo lo reemplazado se conserva COMENTADO.
-  COM-65: FIX del bug "Sin ítems de compra registrados" (el frontend
-            leía data.items/data.grupos pero el backend devuelve data.lista_compras).
-            Se agrega filtro por día y exportación a PDF de la lista de compras.
-  COM-66: Rediseño responsive para móviles/tablets (tooltips, modal de detalles,
-            scroll horizontal controlado).
-  COM-69 (este archivo): la lista de compras se solicita CON comedor_id para que el
-            backend aplique la cobertura del subsidio del mes (Solución B):
-            * Nuevas columnas "Subsidio cubre" y "Costo": cuando el ítem queda 100%
-              cubierto por el subsidio, el costo se reemplaza por el badge ROJO
-              "SUBSIDIADO"; cobertura parcial muestra "SUBS. PARCIAL" + el costo del
-              restante que sí se compra.
-            * Franja resumen del subsidio del mes (ítems subsidiados, ahorro
-              estimado y costo de compra estimado).
-            * El PDF incluye las mismas columnas y el texto SUBSIDIADO en rojo.
-            Trazabilidad: la tabla anterior de 5 columnas queda comentada al final.
+Sprint 2: versión original (api.getPlanificaciones / getPlanificacionDetalle /
+        eliminarPlanificacion / getListaCompras).
+COM-8 v2: reconstruida sobre /propuestas/historial y /propuestas/historial/{id}/dias.
+COM-8 v4: comensales por día en columnas separadas; tarjetas de hierro y proteína.
+COM-8 v5: trazabilidad recuperada. Todo lo reemplazado se conserva COMENTADO.
+COM-65: FIX del bug "Sin ítems de compra registrados" (el frontend
+        leía data.items/data.grupos pero el backend devuelve data.lista_compras).
+        Se agrega filtro por día y exportación a PDF de la lista de compras.
+COM-66: Rediseño responsive para móviles/tablets (tooltips, modal de detalles,
+        scroll horizontal controlado).
+COM-69: la lista de compras se solicita CON comedor_id para que el backend aplique
+        la cobertura del subsidio del mes (Solución B).
+COM-74 (este archivo): muestra tarjeta Cocineras + badge de fuente (IA/parámetro)
+        + desglose costo mercado vs post-subsidio y ahorro en el modal de detalles.
 Permisos: módulo 'planificaciones' (Directivo y Operativo del comedor, COM-25/COM-8).
 Uso: Montada por App.jsx en la pestaña "Planificaciones".
 */
@@ -36,7 +30,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
     ClipboardList, Loader2, AlertCircle, ChevronDown, ChevronUp,
     Wallet, Coins, TrendingUp, Flame, Users, ShoppingCart, History,
-    Droplet, Trash2, FileDown, Calendar, Printer, Info, X, Gift
+    Droplet, Trash2, FileDown, Calendar, Printer, Info, X, Gift, Sparkles
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
@@ -73,9 +67,12 @@ const Tooltip = ({ children, content }) => {
     );
 };
 
-// COM-66: Modal para detalles nutricionales
+// COM-66 + COM-74: Modal para detalles nutricionales con cocineras y fuente
 const ModalDetallesReceta = ({ receta, onClose }) => {
     if (!receta) return null;
+    const fuenteBadge = receta.fuente_comensales === 'prediccion_ia'
+        ? { color: 'bg-emerald-100 text-emerald-700', texto: 'IA' }
+        : { color: 'bg-slate-100 text-slate-600', texto: 'Parámetro' };
     return (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
             <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
@@ -113,8 +110,13 @@ const ModalDetallesReceta = ({ receta, onClose }) => {
                         </div>
                     </div>
                     <div className="bg-slate-50 p-4 rounded-lg">
-                        <h5 className="font-bold text-slate-700 mb-2">Proyección de Atenciones</h5>
-                        <div className="grid grid-cols-3 gap-3">
+                        <h5 className="font-bold text-slate-700 mb-2 flex items-center gap-2">
+                            <Users size={14} /> Proyección de Atenciones
+                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${fuenteBadge.color}`}>
+                                {fuenteBadge.texto}
+                            </span>
+                        </h5>
+                        <div className="grid grid-cols-4 gap-3">
                             <div className="text-center">
                                 <p className="text-xs text-red-600 font-semibold">Social</p>
                                 <p className="text-2xl font-bold text-red-700">{receta.comensales_social}</p>
@@ -126,6 +128,10 @@ const ModalDetallesReceta = ({ receta, onClose }) => {
                             <div className="text-center">
                                 <p className="text-xs text-emerald-600 font-semibold">Normal</p>
                                 <p className="text-2xl font-bold text-emerald-700">{receta.comensales_normal}</p>
+                            </div>
+                            <div className="text-center">
+                                <p className="text-xs text-purple-600 font-semibold">Cocineras</p>
+                                <p className="text-2xl font-bold text-purple-700">{receta.comensales_cocinera || 0}</p>
                             </div>
                         </div>
                         <div className="mt-3 pt-3 border-t border-slate-200 text-center">
@@ -145,6 +151,12 @@ const ModalDetallesReceta = ({ receta, onClose }) => {
                                 <p className="text-lg font-bold text-emerald-700">S/ {receta.recoleccion_proyectada}</p>
                             </div>
                         </div>
+                        {receta.ahorro_subsidio > 0 && (
+                            <div className="mt-3 pt-3 border-t border-slate-200">
+                                <p className="text-xs text-slate-600">Ahorro por subsidio</p>
+                                <p className="text-lg font-bold text-emerald-600">S/ {receta.ahorro_subsidio.toFixed(2)}</p>
+                            </div>
+                        )}
                     </div>
                 </div>
             </div>
@@ -537,7 +549,7 @@ export const PlanificacionesView = () => {
                                                     {tarjeta(<Users size={12} className="text-blue-500" />,
                                                         `${calcularPromedios(det.dias).proteina} g`, 'Proteína promedio por día')}
                                                 </div>
-                                                {/* COM-66: Tabla responsive de días */}
+                                                {/* COM-66 + COM-74: Tabla responsive de días con cocineras y fuente */}
                                                 <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
                                                     <table className="w-full text-left border-collapse whitespace-nowrap text-sm">
                                                         <thead>
@@ -545,7 +557,7 @@ export const PlanificacionesView = () => {
                                                                 <th className="p-2 font-semibold">Día</th>
                                                                 <th className="p-2 font-semibold">Receta</th>
                                                                 <th className="p-2 font-semibold text-center">
-                                                                    <Tooltip content="Social / Afiliado / Normal">
+                                                                    <Tooltip content="Social / Afiliado / Normal / Cocineras">
                                                                         <span className="cursor-help">Comensales</span>
                                                                     </Tooltip>
                                                                 </th>
@@ -557,25 +569,35 @@ export const PlanificacionesView = () => {
                                                             </tr>
                                                         </thead>
                                                         <tbody className="divide-y divide-slate-200">
-                                                            {det.dias.map(d => (
-                                                                <tr key={d.id} className="hover:bg-slate-50 cursor-pointer" onClick={() => setRecetaSeleccionada(d)}>
-                                                                    <td className="p-2 font-bold text-slate-700">{d.dia_nombre}</td>
-                                                                    <td className="p-2 text-slate-600 max-w-[200px] truncate" title={d.nombre_receta}>{d.nombre_receta}</td>
-                                                                    <td className="p-2 text-center">
-                                                                        <Tooltip content={`Social: ${d.comensales_social} | Afiliado: ${d.comensales_afiliado} | Normal: ${d.comensales_normal}`}>
-                                                                            <span className="inline-flex items-center gap-1 text-slate-700 font-medium">
-                                                                                {d.total_comensales}
-                                                                                <Info size={10} className="text-slate-400" />
+                                                            {det.dias.map(d => {
+                                                                const fuenteBadge = d.fuente_comensales === 'prediccion_ia'
+                                                                    ? { color: 'bg-emerald-100 text-emerald-700', texto: 'IA' }
+                                                                    : { color: 'bg-slate-100 text-slate-600', texto: 'Par.' };
+                                                                return (
+                                                                    <tr key={d.id} className="hover:bg-slate-50 cursor-pointer" onClick={() => setRecetaSeleccionada(d)}>
+                                                                        <td className="p-2 font-bold text-slate-700">{d.dia_nombre}</td>
+                                                                        <td className="p-2 text-slate-600 max-w-[200px] truncate" title={d.nombre_receta}>{d.nombre_receta}</td>
+                                                                        <td className="p-2 text-center">
+                                                                            <Tooltip content={`Social: ${d.comensales_social} | Afiliado: ${d.comensales_afiliado} | Normal: ${d.comensales_normal} | Cocineras: ${d.comensales_cocinera || 0}`}>
+                                                                                <span className="inline-flex items-center gap-1 text-slate-700 font-medium">
+                                                                                    {d.total_comensales}
+                                                                                    <Info size={10} className="text-slate-400" />
+                                                                                </span>
+                                                                            </Tooltip>
+                                                                        </td>
+                                                                        <td className="p-2 text-center font-bold text-slate-800">
+                                                                            {d.total_comensales}
+                                                                            <span className={`ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold ${fuenteBadge.color}`}>
+                                                                                {fuenteBadge.texto}
                                                                             </span>
-                                                                        </Tooltip>
-                                                                    </td>
-                                                                    <td className="p-2 text-center font-bold text-slate-800">{d.total_comensales}</td>
-                                                                    <td className="p-2 text-slate-600">S/ {d.costo_racion}</td>
-                                                                    <td className="p-2 text-slate-600">{d.energia_kcal_racion ?? '—'}</td>
-                                                                    <td className="p-2 font-semibold text-red-700">{d.hierro_mg_racion ?? '—'}</td>
-                                                                    <td className="p-2 text-slate-600">{d.proteina_g_racion ?? '—'}</td>
-                                                                </tr>
-                                                            ))}
+                                                                        </td>
+                                                                        <td className="p-2 text-slate-600">S/ {d.costo_racion}</td>
+                                                                        <td className="p-2 text-slate-600">{d.energia_kcal_racion ?? '—'}</td>
+                                                                        <td className="p-2 font-semibold text-red-700">{d.hierro_mg_racion ?? '—'}</td>
+                                                                        <td className="p-2 text-slate-600">{d.proteina_g_racion ?? '—'}</td>
+                                                                    </tr>
+                                                                );
+                                                            })}
                                                         </tbody>
                                                     </table>
                                                 </div>
@@ -719,7 +741,7 @@ export const PlanificacionesView = () => {
                     })}
                 </div>
             )}
-            {/* COM-66: Modal de detalles de receta */}
+            {/* COM-66 + COM-74: Modal de detalles de receta */}
             <ModalDetallesReceta receta={recetaSeleccionada} onClose={() => setRecetaSeleccionada(null)} />
             {/* Confirmación de eliminación */}
             <ModalConfirmacion
@@ -734,15 +756,3 @@ export const PlanificacionesView = () => {
         </div>
     );
 };
-
-/*
-COM-69 (trazabilidad): tabla de lista de compras ANTERIOR (5 columnas, sin subsidio),
-COMENTADA. Las columnas "Cantidad/Unidad" mostraban el requerimiento total sin
-distinguir lo cubierto por el subsidio municipal:
-    <th>#</th><th>Ingrediente</th><th>Cantidad</th><th>Unidad</th><th>Días de uso</th>
-    ...
-    <td>{row.cantidad}</td><td>{row.unidad}</td>
-Desde COM-69 la lista solicita comedor_id y muestra "Comprar" (solo lo que se
-compra), "Subsidio cubre" y "Costo" con badge SUBSIDIADO en rojo cuando el ítem
-queda 100% cubierto por el subsidio del mes.
-*/
