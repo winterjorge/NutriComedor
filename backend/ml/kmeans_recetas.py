@@ -28,22 +28,21 @@ COM-60: K-MEANS v2: FEATURES = 6 variables NUTRICIONALES (el precio sale de la
 COM-60 v2.1: REGLA R0: el universo del modelo son SOLO recetas con los 6 nutrientes
     COMPLETOS; las incompletas se excluyen con motivo auditable 'nutricion_incompleta'
     (sin imputación; el bloque de imputación por mediana queda COMENTADO).
-COM-71 (este archivo): MODELO LIMPIO (criterio cerrado con la administradora):
-    * R3 (excluir por precio alto) SE ELIMINA del clustering: el precio ya no decide
-      qué recetas existen para el motor; `nivel_precio` queda SOLO informativo en el
-      snapshot (bajo/medio/alto/incompleto/sin_precio). Los umbrales
-      KMEANS_PRECIO_BAJO_MAX/MEDIO_MAX se conservan para ese etiquetado informativo.
-      (Bloque de exclusión anterior COMENTADO por trazabilidad.)
-    * R4 (precios completos) pasa de EXCLUSIÓN a FLAG `costeable`: una receta sin
-      precios completos ENTRA al cluster (su nutrición es válida y estable) pero queda
-      marcada costeable=False; el greedy (COM-71 Drop 2) no puede seleccionarla y la
-      audita. Cuando llegue el precio (scraper/manual) vuelve a ser seleccionable SIN
-      re-entrenar. Se persiste en recetas_clusters.costeable (migración COM-71).
-    * Las métricas post-hoc por cluster (precio mediano, Fe/S/, Prot/S/) y la mediana
-      de precio se calculan SOLO sobre miembros costeables (no sesgar con ceros).
-    * /candidatas y el resumen exponen n_costeables / n_no_costeables para auditoría.
+COM-71: MODELO LIMPIO: R3 (excluir por precio alto) SE ELIMINA del clustering
+    (nivel_precio SOLO informativo); R4 pasa a FLAG `costeable` persistido en
+    recetas_clusters; post-hoc y mediana de precio solo sobre costeables;
+    /candidatas y resumen exponen n_costeables / n_no_costeables.
+COM-72 (este archivo): AFINADO ante clusters singleton y silhouette baja:
+    * Espacio de features log1p + RobustScaler (TRANSFORM): comprime colas de
+      micronutrientes sesgados (vitamina A, zinc) que volvían recetas extremas en
+      clusters de 1 miembro. Centroides reales vía expm1(inverse_transform(...)).
+      Se aplica también en diagnosticar_k para coherencia de la curva de k.
+    * Auditoría de tamaños: tamanos_clusters y aviso_clusters_pequenos (códigos con
+      < KMEANS_MIN_CLUSTER_RECETAS miembros) en parametros y en el resumen, para que
+      el comité detecte singletons sin que el motor los fusione a ciegas.
+    * No se elimina ningún helper, regla ni bloque de trazabilidad de COM-71.
 Uso: Importado por routers/kmeans.py y por ml/greedy_search.py (reglas R1/R2).
-Referencia: tickets COM-5 / COM-37 / COM-47 / COM-60 / COM-71 (solo trazabilidad).
+Referencia: tickets COM-5 / COM-37 / COM-47 / COM-60 / COM-71 / COM-72 (trazabilidad).
 """
 import re
 import json
@@ -92,8 +91,14 @@ N_INIT = 10
 # COM-60: rango del diagnóstico de k óptimo (informativo, no cambia el k operativo)
 K_DIAG_MIN = 2
 K_DIAG_MAX = 8
+# COM-72: tamaño mínimo deseado por cluster para auditar singletons
+KMEANS_MIN_CLUSTER_RECETAS = 2
+# COM-72: transformación del espacio de features (log1p antes de RobustScaler)
+TRANSFORM = 'log1p+RobustScaler'
 
 # COM-5 v4: listas POR DEFECTO (fallback si el parámetro no existe o es inválido).
+# COM-72: se conservan EXACTAMENTE los defaults vigentes en disco (incluyen res/cerdo
+# como permitidas y solo 'jamonada' vetada), decisión de negocio del comedor.
 PROTEINAS_PERMITIDAS_DEFAULT = [
     'pollo', 'gallina', 'huevo', 'higado', 'pescado',
     'atun', 'bonito', 'jurel', 'caballa', 'trucha', 'sangrecita',
@@ -110,6 +115,23 @@ INGREDIENTES_VETADOS_DEFAULT = [
 #     r'\b(pollo|gallina|huevo|higado|pescado|atun|bonito|jurel|caballa|trucha|sangrecita)\b')
 # RE_PROHIBIDO = re.compile(
 #     r'\b(res|vaca|vacuno|cerdo|chancho|porcino|chorizo|salchicha|bistec|bisteck|lomo|panceta|tocino|chicharron)\b')
+
+
+# ==========================================
+# COM-72: TRANSFORMACIÓN DEL ESPACIO DE FEATURES
+# ==========================================
+def _transformar_features(X: np.ndarray) -> np.ndarray:
+    """
+    COM-72: log1p con clip de negativos. Comprime las colas de micronutrientes muy
+    sesgados (vitamina A en µg, zinc) para que una receta extrema no se convierta en
+    un cluster de un solo miembro. Monotónica y reversible con _inv_transformar_features.
+    """
+    return np.log1p(np.clip(X, 0.0, None))
+
+
+def _inv_transformar_features(Xl: np.ndarray) -> np.ndarray:
+    """COM-72: inversa de log1p para regresar centroides a unidades reales."""
+    return np.expm1(Xl)
 
 
 # ==========================================
@@ -557,7 +579,6 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
         if not tiene_proteina_permitida:
             excluidas.append({'receta_id': rec['id'], 'nombre': rec['nombre'], 'motivo': 'sin_proteina_permitida'})
             continue
-
         # ==================================================================
         # COM-71: R3/R4 ya NO excluyen. Se calcula el FLAG costeable y el
         # nivel_precio INFORMATIVO. Trazabilidad del bloque excluyente anterior:
@@ -585,6 +606,10 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
             'receta_id': rec['id'],
             'nombre': rec['nombre'],
             # COM-47 v3: nutrición POR RACIÓN tal como se capturó (sin dividir).
+            # COM-47 v2 (trazabilidad): división entre raciones COMENTADA:
+            # 'energia_kcal': round(float(rec['energia_kcal'] or 0) / rac, 2),
+            # 'hierro_mg': round(float(rec['hierro_mg'] or 0) / rac, 2),
+            # 'proteina_g': round(float(rec['proteina_g'] or 0) / rac, 2),
             'energia_kcal': round(float(rec['energia_kcal']), 2),
             'hierro_mg': round(float(rec['hierro_mg']), 2),
             'proteina_g': round(float(rec['proteina_g']), 2),
@@ -712,12 +737,12 @@ def _post_hoc_por_indice(filas, labels):
 
 
 # ==========================================
-# COM-60: DIAGNÓSTICO DE K ÓPTIMO (informativo)
+# COM-60 + COM-72: DIAGNÓSTICO DE K ÓPTIMO (informativo, espacio log1p)
 # ==========================================
 def diagnosticar_k(cur, k_max=K_DIAG_MAX):
     """
-    COM-60 (criterio D5): curva de silhouette e inercia para k=2..k_max sobre el
-    dataset apto escalado con RobustScaler. Devuelve también k_recomendado (mejor
+    COM-60 (criterio D5) + COM-72: curva silhouette/inercia k=2..k_max sobre el
+    dataset apto en espacio log1p+RobustScaler. Devuelve k_recomendado (mejor
     silhouette). NO persiste nada ni cambia el k operativo (KMEANS_K).
     """
     k_operativo, bajo_max, medio_max = _parametros_kmeans(cur)
@@ -727,7 +752,7 @@ def diagnosticar_k(cur, k_max=K_DIAG_MAX):
         raise ValueError(
             f"Solo {n} recetas aptas para diagnosticar k (mínimo 3). "
             f"Cargue precios/nutrición o amplíe el recetario.")
-    X = np.array([[f[c] for c in FEATURES] for f in filas], dtype=float)
+    X = _transformar_features(np.array([[f[c] for c in FEATURES] for f in filas], dtype=float))
     scaler = RobustScaler()
     Xs = scaler.fit_transform(X)
     tope = min(k_max, n - 1)
@@ -747,6 +772,7 @@ def diagnosticar_k(cur, k_max=K_DIAG_MAX):
         'n_recetas_aptas': n,
         'n_excluidas': len(excluidas),
         'scaler': 'RobustScaler',
+        'transform': TRANSFORM,
         'features': FEATURES,
         'nota': ("El k operativo se mantiene por regla de negocio (KMEANS_K); la curva es "
                  "informativa para el comité de menú y la tesis."),
@@ -754,16 +780,17 @@ def diagnosticar_k(cur, k_max=K_DIAG_MAX):
 
 
 # ==========================================
-# ENTRENAMIENTO Y PERSISTENCIA
+# ENTRENAMIENTO Y PERSISTENCIA (COM-72: espacio log1p)
 # ==========================================
 def entrenar_y_persistir(cur):
     """
-    COM-71: pipeline completo: dataset (R0-R2 + flags R3/R4) -> RobustScaler ->
-    K-means(k=KMEANS_K) -> re-etiquetado por medianas -> métricas post-hoc (solo
-    costeables) -> diagnóstico de k -> persistencia del modelo activo y su asignación
-    receta->cluster (incluye costeable).
-    COM-5 v6: centroides persistidos en UNIDADES REALES (inverse_transform).
+    COM-71 + COM-72: pipeline completo: dataset (R0-R2 + flags R3/R4) -> log1p ->
+    RobustScaler -> K-means(k=KMEANS_K) -> re-etiquetado por medianas -> métricas
+    post-hoc (solo costeables) -> diagnóstico de k -> persistencia del modelo activo
+    y su asignación receta->cluster (incluye costeable).
+    COM-5 v6: centroides en UNIDADES REALES (inverse_transform + expm1 en COM-72).
     COM-37 v5-fix: silhouette solo si n_samples > n_clusters.
+    COM-72: agrega tamanos_clusters y aviso_clusters_pequenos (singletons auditados).
     Retorna el resumen del entrenamiento (dict). El caller gestiona el commit.
     """
     k, bajo_max, medio_max = _parametros_kmeans(cur)
@@ -775,10 +802,12 @@ def entrenar_y_persistir(cur):
             f"Solo {len(filas)} recetas con nutrición completa para k={k} ({n_nut} "
             f"excluidas por nutrición incompleta). Complete los 6 nutrientes o amplíe "
             f"el recetario. (Las recetas sin precio NO se excluyen: quedan costeable=False.)")
-    X = np.array([[f[c] for c in FEATURES] for f in filas], dtype=float)
-    # COM-60: RobustScaler (trazabilidad: StandardScaler comentado)
+    # COM-72: log1p antes de RobustScaler (trazabilidad: antes solo RobustScaler)
+    X = _transformar_features(np.array([[f[c] for c in FEATURES] for f in filas], dtype=float))
     scaler = RobustScaler()
     Xs = scaler.fit_transform(X)
+    # COM-60 (trazabilidad): línea anterior sin log1p:
+    # Xs = scaler.fit_transform(np.array([[f[c] for c in FEATURES] for f in filas], dtype=float))
 
     # COM-60: diagnóstico de k óptimo (informativo, se persiste en parametros)
     curva_k = []
@@ -803,7 +832,9 @@ def entrenar_y_persistir(cur):
     asignacion = _etiquetar_por_medianas(medianas_idx)
     post_hoc_idx = _post_hoc_por_indice(filas, labels)
 
-    centros_crudos = scaler.inverse_transform(km.cluster_centers_)
+    # COM-72: centroides log-espacio -> unidades reales con expm1
+    centros_log = scaler.inverse_transform(km.cluster_centers_)
+    centros_crudos = _inv_transformar_features(centros_log)
     centroides = {}
     centroides_robustos = {}
     for i, codigo in asignacion.items():
@@ -821,6 +852,13 @@ def entrenar_y_persistir(cur):
         medianas_por_codigo[str(codigo)] = medianas_idx[idx]
         post_hoc_por_codigo[str(codigo)] = post_hoc_idx[idx]
 
+    # COM-72: auditoría de tamaños de cluster (singletons)
+    tamanos = {}
+    for f, lab in zip(filas, labels):
+        codigo = asignacion[lab]
+        tamanos[codigo] = tamanos.get(codigo, 0) + 1
+    aviso_pequenos = sorted([c for c, n in tamanos.items() if n < KMEANS_MIN_CLUSTER_RECETAS])
+
     cur.execute("UPDATE kmeans_modelos SET activo = FALSE WHERE activo = TRUE;")
     parametros = {
         'features': FEATURES,
@@ -834,18 +872,22 @@ def entrenar_y_persistir(cur):
                    'R4_flag_costeable_COM71'],
         # COM-60: auditoría del modelo v2
         'scaler': 'RobustScaler',
-        'centroides_z': centroides_robustos,  # clave histórica conservada (ahora robusta)
+        'transform': TRANSFORM,  # COM-72
+        'centroides_z': centroides_robustos,  # clave histórica conservada (ahora robusta/log)
         'centroides_robustos': centroides_robustos,
         'k_evaluados': curva_k,
         'k_recomendado': k_recomendado,
         'n_imputadas': 0,  # COM-60 v2.1: ya no se imputa (R0); clave conservada en 0
         'medianas_por_cluster': medianas_por_codigo,
         'post_hoc_por_cluster': post_hoc_por_codigo,
-        'criterio': 'COM-71: clustering SOLO nutricional (6 variables completas); el precio '
-                    'no excluye (R3 informativa) y la completitud de precios es un flag de '
-                    'elegibilidad (costeable) que aplica el greedy; prioridad Anemia Cero y '
-                    'desempate Fe/S/ en el greedy (COM-60); holgura semanal y stock remanente '
-                    'del subsidio en el greedy (COM-71).',
+        # COM-72: auditoría de singletons
+        'tamanos_clusters': tamanos,
+        'min_cluster_recetas': KMEANS_MIN_CLUSTER_RECETAS,
+        'criterio': 'COM-72: clustering SOLO nutricional en espacio log1p+RobustScaler; '
+                    'el precio no excluye (R3 informativa) y la completitud de precios es '
+                    'un flag de elegibilidad (costeable) que aplica el greedy; prioridad '
+                    'Anemia Cero y desempate Fe/S/ en el greedy (COM-60); holgura semanal '
+                    'y stock remanente del subsidio en el greedy (COM-71).',
     }
     cur.execute("""
         INSERT INTO kmeans_modelos
@@ -897,6 +939,7 @@ def entrenar_y_persistir(cur):
         'inercia': round(inercia, 4),
         'silhouette': round(silhouette, 4),
         'scaler': 'RobustScaler',
+        'transform': TRANSFORM,
         'features': FEATURES,
         'k_recomendado': k_recomendado,
         'k_evaluados': curva_k,
@@ -905,6 +948,9 @@ def entrenar_y_persistir(cur):
         # COM-71: auditoría de elegibilidad económica (ya no es exclusión del modelo)
         'n_costeables': len(filas) - n_no_costeables,
         'n_no_costeables': n_no_costeables,
+        # COM-72: auditoría de singletons
+        'tamanos_clusters': tamanos,
+        'aviso_clusters_pequenos': aviso_pequenos,
         'clusters': resumen_clusters,
         'excluidas': excluidas,
     }
