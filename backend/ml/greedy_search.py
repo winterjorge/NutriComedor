@@ -22,30 +22,28 @@ COM-60: PRIORIDAD ANEMIA CERO + DESEMPATE Fe/S/: cuota semanal mínima de días 
     cluster Anti-Anemia (KMEANS_CUOTA_CLUSTER_FEO, regla de deadline) y desempate por
     hierro por sol (KMEANS_FE_SO_DESEMPATE). Auditoría dias_anti_anemia /
     cumple_cuota_anemia por variante y es_anti_anemia / fe_por_sol por día.
-COM-71 (este archivo): ECONOMÍA SEMANAL CON HOLGURA Y SUBSIDIO REAL (criterio cerrado):
-    * D2 ELEGIBILIDAD: las recetas con costeable=False (R4 como flag en K-means COM-71)
-      NO son seleccionables; se auditan en el resumen como recetas_no_costeables y se
-      conserva la clave legacy recetas_excluidas_precio_incompleto con el mismo contenido.
-    * D3 COSTEO POR DÍA: cada día de cocina se costea con SU propia fecha (precios
-      scraper/predicción de ese día) mediante _mapa_costos_dia(); el scoring y el
-      presupuesto usan el costo del día, no un costo semanal único.
-    * D5 STOCK REMANENTE: el descuento de subsidio de cada día se hace contra
-      stock_remanente_mes() (stock del mes MENOS consumo de planificaciones VIGENTES
-      anteriores del mismo mes/comedor, helper de subsidio_motor COM-71), no contra el
-      stock completo del mes. La auditoría semanal de agotados también usa remanente.
+COM-71: ECONOMÍA SEMANAL CON HOLGURA Y SUBSIDIO REAL:
+    * D2 ELEGIBILIDAD: recetas con costeable=False no seleccionables; auditadas en
+      recetas_no_costeables (y clave legacy recetas_excluidas_precio_incompleto).
+    * D3 COSTEO POR DÍA: _mapa_costos_dia() con la fecha real de cada día.
+    * D5 STOCK REMANENTE: descuento contra stock_remanente_mes() de subsidio_motor.
     * D4 HOLGURA DIARIA (FLEX): tope por día = PLANIFICACION_FLEX_DIA ×
-      ((límite semanal − acumulado) / días restantes). Si ninguna candidata cabe en el
-      tope diario pero sí en el límite semanal, se permite y se marca flex_excedido
-      (auditoría). Esto implementa "un día caro se compensa con días baratos".
-    * Auditoría nueva POR DÍA: flex_cap_dia, flex_excedido, stock_remanente_aplicado.
-      POR VARIANTE: flex_dia, dias_con_flex_excedido, stock_remanente_usado.
-    * TRAZABILIDAD: _costear_recetas(fecha única) se conserva como wrapper que aplica
-      el mapa de UN día con stock completo del mes (comportamiento COM-59A/COM-60 para
-      cualquier caller externo); el cuerpo original vive ahora en _mapa_costos_dia.
+      ((límite − acumulado) / días restantes); excedente marcado flex_excedido.
+    * _costear_recetas queda como wrapper de trazabilidad (stock completo, 1 fecha).
+COM-72 (este archivo): dos correcciones ADITIVAS sobre COM-71:
+    * HOTFIX KeyError 'propuestas': el mapa de costos del primer día (que rellena
+      `ingredientes`/`precio_completo`) se calcula ANTES de validar R1/R2. En COM-71
+      la validación corría con `ingredientes=[]` y TODAS las recetas caían en
+      'sin_proteina_permitida' -> ValueError -> HTTP 400 sin clave 'propuestas'.
+      (Orden anterior COMENTADO abajo por trazabilidad.)
+    * Guarda anti-repetición en día forzado anti-anemia: si el cluster forzado es
+      singleton y ya no tiene recetas sin usar, se relaja la cuota ESE día (se amplía
+      a elegibles sin usar) en lugar de repetir el mismo plato en la semana.
+    Ningún helper, clave de payload ni bloque de trazabilidad de COM-71 se elimina.
 Uso: Importado por routers/propuestas_menu.py (generar_tres_propuestas,
      obtener_candidatas_sesion, obtener_candidata). Todas las funciones reciben un
      cursor psycopg2 (RealDictCursor); el caller gestiona la transacción.
-Referencia: tickets COM-8 / COM-37 / COM-47 / COM-50 / COM-59 / COM-60 / COM-71.
+Referencia: tickets COM-8 / COM-37 / COM-47 / COM-50 / COM-59 / COM-60 / COM-71 / COM-72.
 """
 import json
 import hashlib
@@ -399,7 +397,6 @@ def _mapa_costos_dia(cur, recetas, fecha: date, comedor_id=None, stock_override=
             'nombre': fila['ing_nombre'],
             'categoria': fila['categoria'] or '',
         })
-
     mapa = {}
     for r in recetas:
         rid = r['receta_id']
@@ -455,6 +452,8 @@ def _validar_reglas_proteinas_vigentes(cur, recetas):
     COM-37 v4/v5: aplica las listas CONFIGURABLES de proteínas permitidas (R1) e
     ingredientes vetados (R2) vigentes en parametros_sistema (las mismas que usa
     K-means) sobre las recetas candidatas del modelo activo. Retorna (validas, excluidas).
+    COM-72 (nota): requiere que `recetas[].ingredientes` YA esté poblado (lo hace el
+    primer_mapa en generar_tres_propuestas ANTES de llamar a esta función).
     """
     re_permitida, re_vetada, _, _ = cargar_reglas_proteinas(cur)
     validas = []
@@ -533,13 +532,16 @@ def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
                            presupuesto_semanal, fecha_inicio, dias,
                            costos_por_dia):
     """
-    COM-8 v2 + COM-60 + COM-71: Greedy por DÍA SELECCIONADO.
+    COM-8 v2 + COM-60 + COM-71 + COM-72: Greedy por DÍA SELECCIONADO.
     * COM-60: cuota anti-anemia por deadline y desempate Fe/S/.
     * COM-71 (D2): solo candidatas costeables y con precio completo ese día.
     * COM-71 (D3): scoring y presupuesto con el costo del día (costos_por_dia[d]).
     * COM-71 (D4): tope diario = flex × ((límite − acumulado) / días restantes); si no
       cabe en el tope pero sí en el límite semanal, se permite con flex_excedido=True.
     * COM-71 (D5): el costo del día ya viene descontado contra stock REMANENTE.
+    * COM-72: guarda anti-repetición en día forzado: si el cluster anti-anemia forzado
+      es singleton y ya no tiene recetas sin usar (y hay elegibles sin usar), se relaja
+      la cuota ESE día en lugar de repetir el mismo plato en la semana.
     Retorna (menu, sobrepaso, conteo_anemia).
     Trazabilidad: firma anterior sin costos_por_dia comentada al final.
     """
@@ -591,6 +593,14 @@ def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
         candidatas = list(por_cluster_dia.get(cluster_obj, [])) or list(elegibles)
         if not candidatas:
             continue  # sin elegibles ese día (ej. todo sin precio): se omite el día
+
+        # COM-72: guarda anti-repetición en día forzado (cluster singleton agotado):
+        # si TODAS las candidatas del cluster forzado ya se usaron y existen elegibles
+        # sin usar, se relaja la cuota este día ampliando a esas elegibles.
+        if forzar_anemia and all(c['receta_id'] in usadas for c in candidatas):
+            sin_usar = [e for e in elegibles if e['receta_id'] not in usadas]
+            if sin_usar:
+                candidatas = sin_usar
 
         # COM-60: orden por (score, Fe/S/ si desempate, sin_usar).
         candidatas.sort(key=lambda r: (
@@ -698,16 +708,16 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
                             creado_por_id: int, fecha_referencia: date = None,
                             seed: int = 0, dias_semana: list = None):
     """
-    COM-8 v2/v3 + COM-37 + COM-47 v3 + COM-50 v3 + COM-59A + COM-60 + COM-71:
-    Genera y persiste las 3 propuestas de menú semanal para los DÍAS DE COCINA
-    indicados.
-    COM-71: (D2) filtra recetas no costeables antes de seleccionar y las audita;
-    (D3) costea CADA día con su fecha real; (D5) descuenta subsidio contra el stock
-    REMANENTE del mes (semanas VIGENTES anteriores ya comprometidas); (D4) aplica el
-    tope diario FLEX sobre el presupuesto restante.
-    COM-59A: recolección con precios de venta vigentes y validación del margen
-    semanal objetivo; auditoría de subsidio agotado ahora contra remanente.
+    COM-8 v2/v3 + COM-37 + COM-47 v3 + COM-50 v3 + COM-59A + COM-60 + COM-71 + COM-72:
+    Genera y persiste las 3 propuestas de menú semanal para los DÍAS DE COCINA indicados.
+    COM-71: (D2) filtra no costeables y las audita; (D3) costeo por día con fecha real;
+    (D5) subsidio contra stock REMANENTE; (D4) tope diario FLEX.
+    COM-72 (HOTFIX): el mapa de costos del primer día (que rellena `ingredientes` y
+    `precio_completo`) se aplica ANTES de la validación R1/R2; el orden de COM-71
+    (validar primero) dejaba `ingredientes=[]` y excluía TODAS las recetas con
+    'sin_proteina_permitida', produciendo HTTP 400 sin clave 'propuestas'.
     COM-60: auditoría de cuota anti-anemia por variante.
+    COM-59A: recolección con precios vigentes y validación del margen semanal objetivo.
     """
     if presupuesto_semanal is None or float(presupuesto_semanal) <= 0:
         raise ValueError("El presupuesto semanal debe ser mayor a cero.")
@@ -722,30 +732,11 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
         raise ValueError(
             "No hay un modelo K-means activo con recetas aptas. Entrene el modelo en "
             "la pestaña 'Clusters K-Means' antes de generar propuestas de menú.")
-
     # COM-71 (D2): separa no costeables (auditoría) de seleccionables
     no_costeables = [r for r in recetas if not r.get('costeable', True)]
     seleccionables = [r for r in recetas if r.get('costeable', True)]
-    seleccionables, excluidas_reglas = _validar_reglas_proteinas_vigentes(cur, seleccionables)
-    if len(seleccionables) < len(dias):
-        detalle_reglas = "; ".join(
-            f"{e['nombre']} ({'/'.join(e['detalle'])})" for e in excluidas_reglas[:5]
-        )
-        detalle_nc = "; ".join(
-            f"{r['nombre']} (sin precio: {', '.join(r.get('ingredientes_sin_precio') or ['?'])[:60]})"
-            for r in no_costeables[:5]
-        )
-        raise ValueError(
-            f"Solo hay {len(seleccionables)} recetas costeables y con reglas de proteína "
-            f"vigentes; se requieren al menos {len(dias)} para cubrir los días seleccionados. "
-            f"No costeables (R4 como flag, COM-71): {detalle_nc or 'ninguna'}. "
-            f"Excluidas por reglas de proteína: {detalle_reglas or 'ninguna'}. "
-            f"Cargue precios manuales en Gestión de Ingredientes (COM-37) o espere la "
-            f"corrida del scraper; al completarse el precio la receta vuelve a ser "
-            f"seleccionable SIN re-entrenar el modelo.")
 
     fecha_inicio = _lunes_de(fecha_referencia)
-
     # COM-71 (D3/D5): stock remanente por mes involucrado y mapa de costos por día
     meses = sorted({((fecha_inicio + timedelta(days=d - 1)).year,
                      (fecha_inicio + timedelta(days=d - 1)).month) for d in dias})
@@ -764,11 +755,33 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
             'mapa': _mapa_costos_dia(cur, seleccionables, fd, comedor_id, stock_override=rem),
             'stock_remanente_aplicado': bool(rem),
         }
-    # Rellena en las recetas base los campos independientes de la fecha (gramos,
-    # ingredientes, completitud) tomando el mapa del primer día, para auditoría/top.
+    # COM-72 (HOTFIX): rellena ingredientes/completitud ANTES de validar R1/R2.
+    # COM-71 (trazabilidad): este bloque estaba DESPUÉS de la validación:
+    #   seleccionables, excluidas_reglas = _validar_reglas_proteinas_vigentes(...)
+    #   ... raise si len(seleccionables) < len(dias) ...
+    #   primer_mapa = costos_por_dia[dias[0]]['mapa']; for r in seleccionables: r.update(...)
     primer_mapa = costos_por_dia[dias[0]]['mapa'] if dias else {}
     for r in seleccionables:
         r.update(primer_mapa.get(r['receta_id'], {}))
+
+    # COM-37 v4/v5: reglas de proteína vigentes sobre recetas YA pobladas
+    seleccionables, excluidas_reglas = _validar_reglas_proteinas_vigentes(cur, seleccionables)
+    if len(seleccionables) < len(dias):
+        detalle_reglas = "; ".join(
+            f"{e['nombre']} ({'/'.join(e['detalle'])})" for e in excluidas_reglas[:5]
+        )
+        detalle_nc = "; ".join(
+            f"{r['nombre']} (sin precio: {', '.join(r.get('ingredientes_sin_precio') or ['?'])[:60]})"
+            for r in no_costeables[:5]
+        )
+        raise ValueError(
+            f"Solo hay {len(seleccionables)} recetas costeables y con reglas de proteína "
+            f"vigentes; se requieren al menos {len(dias)} para cubrir los días seleccionados. "
+            f"No costeables (R4 como flag, COM-71): {detalle_nc or 'ninguna'}. "
+            f"Excluidas por reglas de proteína: {detalle_reglas or 'ninguna'}. "
+            f"Cargue precios manuales en Gestión de Ingredientes (COM-37) o espere la "
+            f"corrida del scraper; al completarse el precio la receta vuelve a ser "
+            f"seleccionable SIN re-entrenar el modelo.")
 
     recetas_por_cluster = {}
     for r in seleccionables:
@@ -786,7 +799,6 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
             presupuesto_semanal, fecha_inicio, dias, costos_por_dia)
         costo_total = round(sum(d['costo_total_dia'] for d in menu), 2)
         recoleccion_total = round(sum(d['recoleccion_proyectada'] for d in menu), 2)
-
         # ---- COM-59A + COM-71(D5): auditoría semanal contra STOCK REMANENTE por mes ----
         consumo_por_mes = {}
         for d in menu:
