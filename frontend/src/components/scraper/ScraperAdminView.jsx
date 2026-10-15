@@ -194,7 +194,7 @@ export const ScraperAdminView = () => {
                     </button>
                 </div>
                 <p className="text-[11px] text-slate-400 mt-2">
-                    Sin fechas => corre el día de hoy. El proceso corre en segundo plano: puede
+                    Sin fechas ⇒ corre el día de hoy. El proceso corre en segundo plano: puede
                     cerrar esta pestaña y volver para ver el progreso.
                 </p>
             </div>
