@@ -4,26 +4,36 @@ Objetivo: DDL del módulo de clustering nutricional (COM-5): tabla de composici�
 nutricional por ingrediente (por 100 g), tabla de modelos K-means entrenados
 y tabla de asignación receta->cluster con el snapshot de features.
 Historial:
- - COM-5: versión original (3 tablas + seed de parámetros KMEANS_*).
- - COM-60: migración idempotente de recetas_clusters para el snapshot de las 6
-   variables nutricionales (vitamina_a_ug, zinc_mg, carbohidratos_g con DEFAULT 0),
-   y seed de KMEANS_CUOTA_CLUSTER_FEO / KMEANS_FE_SO_DESEMPATE (prioridad Anemia
-   Cero y desempate Fe/S/ en el greedy).
- - COM-71 (este archivo):
-   * recetas_clusters gana la columna `costeable BOOLEAN NOT NULL DEFAULT TRUE`:
-     marca si la receta tenía precios completos al entrenar (R4 pasa de EXCLUSIÓN
-     a FLAG de elegibilidad; el greedy no selecciona no-costeables).
-   * Seed del parámetro PLANIFICACION_FLEX_DIA ('2.0'): holgura diaria del greedy
-     (un día puede gastar hasta flex × (presupuesto restante / días restantes),
-     siempre dentro del tope semanal). Es leído por cargar_parametros() del greedy
-     porque su consulta usa LIKE 'PLANIFICACION_%'.
-   * KMEANS_PRECIO_BAJO_MAX / MEDIO_MAX se conservan pero pasan a ser SOLO
-     informativos (nivel_precio del snapshot); ya no excluyen recetas (R3 sale del
-     clustering, criterio COM-71 D1).
-   Nada existente se elimina; el bootstrap aplica esto en cada arranque.
+COM-5: versión original (3 tablas + seed de parámetros KMEANS_*).
+COM-60: migración idempotente de recetas_clusters para el snapshot de las 6
+    variables nutricionales (vitamina_a_ug, zinc_mg, carbohidratos_g con DEFAULT 0),
+    y seed de KMEANS_CUOTA_CLUSTER_FEO / KMEANS_FE_SO_DESEMPATE (prioridad Anemia
+    Cero y desempate Fe/S/ en el greedy).
+COM-71: recetas_clusters gana la columna `costeable BOOLEAN NOT NULL DEFAULT TRUE`:
+    marca si la receta tenía precios completos al entrenar (R4 pasa de EXCLUSIÓN
+    a FLAG de elegibilidad; el greedy no selecciona no-costeables).
+    Seed del parámetro PLANIFICACION_FLEX_DIA ('2.0'): holgura diaria del greedy
+    (un día puede gastar hasta flex × (presupuesto restante / días restantes),
+    siempre dentro del tope semanal). Es leído por cargar_parametros() del greedy
+    porque su consulta usa LIKE 'PLANIFICACION_%'.
+    KMEANS_PRECIO_BAJO_MAX / MEDIO_MAX se conservan pero pasan a ser SOLO
+    informativos (nivel_precio del snapshot); ya no excluyen recetas (R3 sale del
+    clustering, criterio COM-71 D1).
+COM-76 (este archivo): SIN cambios de DDL ni de seeds (criterio D7): las etiquetas
+    de negocio (1='Anti-Anemia Premium', 2='Fortalecimiento Balanceado',
+    3='Ligero y Saludable', 4='All-Rounder') viven en JSONB
+    (kmeans_modelos.etiquetas) y en recetas_clusters.cluster_etiqueta (varchar 60),
+    y los códigos 1..4 ya coinciden con el seed documentado de
+    PLANIFICACION_ROTACION_CLUSTERS ('[1,2,4,1,3,2,4]', 1=AntiAnemia 2=Fortalecimiento
+    3=Ligero 4=AllRounder) sembrado en esquema_planificaciones.py. El n_init=25 de
+    COM-76 (D6) se lee con default en ml/kmeans_recetas._parametros_kmeans() y puede
+    ajustarse opcionalmente creando el parámetro KMEANS_N_INIT a mano; no se siembra
+    aquí para no alterar seeds existentes. Este archivo solo gana comentarios de
+    trazabilidad COM-76.
+Nada existente se elimina; el bootstrap aplica esto en cada arranque.
 Uso: Importado por db_bootstrap.py, que ejecuta `aplicar_esquema_kmeans(cur)`.
 Nota: Sentencias idempotentes (IF NOT EXISTS / ON CONFLICT DO NOTHING).
-Referencia: tickets COM-5 / COM-60 / COM-71 (solo trazabilidad).
+Referencia: tickets COM-5 / COM-60 / COM-71 / COM-76 (solo trazabilidad).
 """
 
 # =========================================================================
@@ -45,6 +55,7 @@ CREATE TABLE IF NOT EXISTS ingredientes_nutricion (
 
 # =========================================================================
 # DDL: Modelos K-means entrenados (uno activo a la vez)
+# COM-76: sin cambios; las etiquetas de negocio se persisten en `etiquetas` JSONB.
 # =========================================================================
 DDL_KMEANS_MODELOS = """
 CREATE TABLE IF NOT EXISTS kmeans_modelos (
@@ -67,6 +78,7 @@ CREATE INDEX IF NOT EXISTS idx_kmeans_modelos_activo ON kmeans_modelos(activo);
 # DDL: Asignación receta -> cluster (snapshot de features al entrenar)
 # COM-60: el snapshot incluye las 6 variables nutricionales (antes 4 columnas).
 # COM-71: columna `costeable` (flag R4; antes la receta se excluía del modelo).
+# COM-76: sin cambios; cluster_etiqueta (varchar 60) alberga las nuevas etiquetas.
 # =========================================================================
 DDL_RECETAS_CLUSTERS = """
 CREATE TABLE IF NOT EXISTS recetas_clusters (
@@ -100,15 +112,15 @@ CREATE INDEX IF NOT EXISTS idx_recetas_clusters_cluster ON recetas_clusters(mode
 MIGRAR_RECETAS_CLUSTERS_COM60 = [
     """
     ALTER TABLE recetas_clusters
-        ADD COLUMN IF NOT EXISTS vitamina_a_ug NUMERIC(8,2) NOT NULL DEFAULT 0;
+    ADD COLUMN IF NOT EXISTS vitamina_a_ug NUMERIC(8,2) NOT NULL DEFAULT 0;
     """,
     """
     ALTER TABLE recetas_clusters
-        ADD COLUMN IF NOT EXISTS zinc_mg NUMERIC(8,2) NOT NULL DEFAULT 0;
+    ADD COLUMN IF NOT EXISTS zinc_mg NUMERIC(8,2) NOT NULL DEFAULT 0;
     """,
     """
     ALTER TABLE recetas_clusters
-        ADD COLUMN IF NOT EXISTS carbohidratos_g NUMERIC(8,2) NOT NULL DEFAULT 0;
+    ADD COLUMN IF NOT EXISTS carbohidratos_g NUMERIC(8,2) NOT NULL DEFAULT 0;
     """,
 ]
 
@@ -118,7 +130,7 @@ MIGRAR_RECETAS_CLUSTERS_COM60 = [
 MIGRAR_RECETAS_CLUSTERS_COM71 = [
     """
     ALTER TABLE recetas_clusters
-        ADD COLUMN IF NOT EXISTS costeable BOOLEAN NOT NULL DEFAULT TRUE;
+    ADD COLUMN IF NOT EXISTS costeable BOOLEAN NOT NULL DEFAULT TRUE;
     """,
 ]
 
@@ -126,7 +138,9 @@ MIGRAR_RECETAS_CLUSTERS_COM71 = [
 # SEED: Parámetros operativos del clustering y del greedy
 # COM-60: prioridad Anemia Cero y desempate Fe/S/.
 # COM-71: PLANIFICACION_FLEX_DIA (holgura diaria del greedy) y actualización de la
-#         descripción de los umbrales de precio (ahora solo informativos).
+#     descripción de los umbrales de precio (ahora solo informativos).
+# COM-76: sin seeds nuevos (D7). KMEANS_N_INIT es opcional y se crea a mano si el
+#     comité desea otro n_init; el default 25 vive en ml/kmeans_recetas.N_INIT.
 # =========================================================================
 SEED_PARAMETROS_KMEANS = """
 INSERT INTO parametros_sistema (clave, valor, descripcion, categoria, tipo_dato) VALUES
@@ -142,8 +156,10 @@ ON CONFLICT (clave) DO NOTHING;
 
 def aplicar_esquema_kmeans(cur):
     """
-    COM-5 + COM-60 + COM-71: crea/migra las tablas del módulo de clustering y siembra
-    los parámetros. Es idempotente. El caller (db_bootstrap) es responsable del commit.
+    COM-5 + COM-60 + COM-71 + COM-76: crea/migra las tablas del módulo de clustering
+    y siembra los parámetros. Es idempotente. El caller (db_bootstrap) es responsable
+    del commit. COM-76 no añade DDL ni seeds (las etiquetas de negocio y el n_init=25
+    viven en código/JSONB, criterio D7).
     """
     cur.execute(DDL_INGREDIENTES_NUTRICION)
     cur.execute(DDL_KMEANS_MODELOS)

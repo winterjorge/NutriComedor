@@ -1,20 +1,31 @@
 /**
- * components/ml/ModelosMLView.jsx
- * Objetivo: Panel de gráficos de Machine Learning (COM-5 v4 / COM-8 v7), exclusivo del
- *           Administrador de Sistemas (módulo 'modelos_ml'). Tres gráficos SVG propios
- *           (sin librerías externas), todos con sus VARIABLES/INDICADORES rotulados:
- *           1) Random Forest: dispersión REAL vs PREDICHO de la demanda diaria por tipo
- *              de comensal, con línea de referencia y=x, métricas R²/MAE por tipo y
- *              barras de importancia de las variables del modelo.
- *           2) K-means: dispersión PCA-2D de las recetas coloreada por cluster, con
- *              centroides proyectados, varianza explicada de PC1/PC2 y tabla de cargas
- *              de cada variable original en ambos componentes.
- *           3) Greedy Search: barras de totales por variante (costo, recolección,
- *              margen) y líneas de la serie diaria con indicador seleccionable
- *              (costo del día, recolección, kcal/ración, hierro/ración).
- * Uso: Montada por App.jsx en la pestaña "Modelos ML" (gate por módulo 'modelos_ml').
- * Referencia: tickets COM-5 v4 / COM-8 v7 (solo trazabilidad).
- */
+components/ml/ModelosMLView.jsx
+Objetivo: Panel de gráficos de Machine Learning (COM-5 v4 / COM-8 v7), exclusivo del
+      Administrador de Sistemas (módulo 'modelos_ml'). Tres gráficos SVG propios
+      (sin librerías externas), todos con sus VARIABLES/INDICADORES rotulados:
+      1) Random Forest: dispersión REAL vs PREDICHO de la demanda diaria por tipo
+         de comensal, con línea de referencia y=x, métricas R²/MAE por tipo y
+         barras de importancia de las variables del modelo.
+      2) K-means: dispersión PCA-2D de las recetas coloreada por cluster, con
+         centroides proyectados, varianza explicada de PC1/PC2 y tabla de cargas
+         de cada variable original en ambos componentes.
+      3) Greedy Search: barras de totales por variante (costo, recolección,
+         margen) y líneas de la serie diaria con indicador seleccionable
+         (costo del día, recolección, kcal/ración, hierro/ración).
+Historial:
+COM-5 v4 / COM-8 v7: versión original del panel.
+COM-60: el scatter K-means proyecta las 6 variables nutricionales; el precio queda
+      solo como campo de tooltip informativo.
+COM-76 (este archivo): el precio SALE también del tooltip del scatter K-means y del
+      rótulo de "variables originales" (D3: el front no muestra precio por cluster).
+      El tooltip ahora rotula nombre, cluster y hierro (variable de prioridad
+      Anemia Cero). El caption de variables se alimenta de data.variables (las 6
+      nutricionales que devuelve el backend). Los gráficos de Random Forest y
+      Greedy (que sí manejan demanda y costos del menú, no del cluster) quedan
+      intactos.
+Uso: Montada por App.jsx en la pestaña "Modelos ML" (gate por módulo 'modelos_ml').
+Referencia: tickets COM-5 v4 / COM-8 v7 / COM-60 / COM-76 (solo trazabilidad).
+*/
 import React, { useState, useEffect, useCallback } from 'react';
 import {
     Activity, Loader2, AlertCircle, RefreshCw, TrendingUp, PieChart, Sparkles
@@ -29,12 +40,16 @@ const COLOR_TIPO = { social: '#dc2626', afiliado: '#2563eb', normal: '#059669' }
 const COLOR_CLUSTER = { 1: '#dc2626', 2: '#2563eb', 3: '#16a34a', 4: '#d97706' };
 const COLOR_VARIANTE = { NUTRI: '#dc2626', ECONO: '#d97706', BALANCE: '#059669' };
 const COLOR_INDICADOR = { costo: '#64748b', recoleccion: '#059669', margen: '#2563eb' };
-
 const METRICAS_SERIE = [
     { clave: 'costo_total_dia', label: 'Costo del día (S/)' },
     { clave: 'recoleccion_proyectada', label: 'Recolección del día (S/)' },
     { clave: 'energia_kcal', label: 'Kcal por ración' },
     { clave: 'hierro_mg', label: 'Hierro por ración (mg)' },
+];
+// COM-76: variables nutricionales del clustering (fallback del caption si el
+// backend no enviara data.variables); el precio ya NO forma parte del espacio.
+const VARIABLES_KMEANS_DEFAULT = [
+    'energia_kcal', 'hierro_mg', 'proteina_g', 'vitamina_a_ug', 'zinc_mg', 'carbohidratos_g',
 ];
 
 // ==========================================
@@ -93,7 +108,7 @@ const ScatterRF = ({ puntos }) => {
 };
 
 // ==========================================
-// GRÁFICO 2: DISPERSIÓN PCA-2D DEL K-MEANS
+// GRÁFICO 2: DISPERSIÓN PCA-2D DEL K-MEANS (COM-76: sin precio en tooltip)
 // ==========================================
 const ScatterKmeans = ({ data }) => {
     const W = 560, H = 380, M = { t: 16, r: 16, b: 48, l: 56 };
@@ -119,11 +134,13 @@ const ScatterKmeans = ({ data }) => {
                     <text x={M.l - 8} y={sy(t) + 3} fontSize="10" fill="#64748b" textAnchor="end">{fmt(t, 2)}</text>
                 </g>
             ))}
-            {/* Recetas por cluster */}
+            {/* Recetas por cluster (COM-76: tooltip sin precio; rotula hierro) */}
             {data.puntos.map(p => (
                 <circle key={p.receta_id} cx={sx(p.x)} cy={sy(p.y)} r="4.5"
                     fill={COLOR_CLUSTER[p.cluster_codigo] || '#64748b'} fillOpacity="0.7">
-                    <title>{`${p.nombre} · ${p.cluster_etiqueta} · S/ ${p.precio_soles} · Fe ${p.hierro_mg} mg`}</title>
+                    {/* COM-76 (trazabilidad): tooltip COM-60 con precio, comentado:
+                        <title>{`${p.nombre} · ${p.cluster_etiqueta} · S/ ${p.precio_soles} · Fe ${p.hierro_mg} mg`}</title> */}
+                    <title>{`${p.nombre} · ${p.cluster_etiqueta} · Fe ${p.hierro_mg} mg · Prot ${p.proteina_g} g`}</title>
                 </circle>
             ))}
             {/* Centroides proyectados (rombos con borde oscuro) */}
@@ -257,14 +274,12 @@ const LineasGreedy = ({ variantes, metrica }) => {
 // ==========================================
 export const ModelosMLView = () => {
     const { usuario } = useAuth();
-
     const [estado, setEstado] = useState(null);
     const [rf, setRf] = useState(null);
     const [km, setKm] = useState(null);
     const [greedy, setGreedy] = useState(null);
     const [cargando, setCargando] = useState(true);
     const [error, setError] = useState('');
-
     // Selectores de indicador
     const [tipoRF, setTipoRF] = useState('social');
     const [metricaSerie, setMetricaSerie] = useState(METRICAS_SERIE[0]);
@@ -287,7 +302,6 @@ export const ModelosMLView = () => {
             setCargando(false);
         }
     }, [usuario.id]);
-
     useEffect(() => { cargarTodo(); }, [cargarTodo]);
 
     const tarjetaEstado = (icono, titulo, detalle, ok) => (
@@ -355,7 +369,7 @@ export const ModelosMLView = () => {
                         </p>
                         {!rf ? (
                             <p className="text-xs text-slate-500 p-8 text-center">
-                            Sin datos suficientes de padrón/ventas para entrenar Random Forest (mínimo 30 días).
+                                Sin datos suficientes de padrón/ventas para entrenar Random Forest (mínimo 30 días).
                             </p>
                         ) : (
                             <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -397,11 +411,14 @@ export const ModelosMLView = () => {
                         )}
                     </div>
 
-                    {/* ===== GRÁFICO 2: K-MEANS PCA ===== */}
+                    {/* ===== GRÁFICO 2: K-MEANS PCA (COM-76: sin precio) ===== */}
                     <div className="bg-white border border-slate-200 rounded-xl p-4">
                         <h3 className="font-bold text-slate-800 text-sm mb-1">2. K-means — Recetas en espacio PCA (4 clusters)</h3>
+                        {/* COM-76: caption alimentado por data.variables (6 nutricionales);
+                            trazabilidad COM-60 del caption con precio, comentada:
+                            Variables originales: energia_kcal, hierro_mg, proteina_g, precio_soles */}
                         <p className="text-[11px] text-slate-500 mb-3">
-                            Variables originales: energia_kcal, hierro_mg, proteina_g, precio_soles ·
+                            Variables originales: {(km?.variables || VARIABLES_KMEANS_DEFAULT).join(', ')} ·
                             Los rombos con borde oscuro son los centroides de cada cluster.
                         </p>
                         {!km ? (
