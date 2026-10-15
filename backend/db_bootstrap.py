@@ -92,6 +92,8 @@ from esquema_subsidio_precios import aplicar_esquema_subsidio_precios
 from esquema_comensales_pos import aplicar_esquema_comensales_pos
 # COM-63: esquema de carga histórica y tipo Cocinera
 from esquema_carga_historica import aplicar_esquema_carga_historica
+# COM-43: esquema de auditoría de corridas del scraper (web/cron/arranque)
+from esquema_scraper import aplicar_esquema_scraper
 
 # ==========================================
 # CONSTANTES DE ROLES (COM-21)
@@ -757,6 +759,8 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
              generico_ok) = aplicar_esquema_comensales_pos(cur)
             # 17. COM-63: esquema de carga histórica y tipo Cocinera.
             (comensal_coc_ok, precio_coc_ok, params_coc_ok) = aplicar_esquema_carga_historica(cur)
+            # 18. COM-43: tabla de auditoría de corridas del scraper.
+            aplicar_esquema_scraper(cur)
             conn.commit()
             cur.close()
             if migrados:

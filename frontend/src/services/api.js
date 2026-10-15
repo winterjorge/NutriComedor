@@ -1180,5 +1180,30 @@ export const api = {
         const response = await fetch(`${API_BASE}/planificaciones/${id}`, { method: 'DELETE' });
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al eliminar planificación'));
         return response.json();
+    },
+    // ==========================================
+    // COM-43: SCRAPER SISAP (solo Admin de Sistemas)
+    // ==========================================
+    // Lanza una corrida web del scraper existente (día o rango); responde al instante.
+    ejecutarScraper: async (data) => {
+        const response = await fetch(`${API_BASE}/scraper/ejecutar`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al lanzar el scraper'));
+        return response.json();
+    },
+    // Progreso en vivo del job + última fecha en BD + hueco de días faltantes.
+    getEstadoScraper: async (usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/scraper/estado?usuario_solicitante_id=${usuarioSolicitanteId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al consultar el estado del scraper'));
+        return response.json();
+    },
+    // Historial auditado de corridas (scraper_corridas).
+    getHistorialScraper: async (usuarioSolicitanteId, limite = 20) => {
+        const response = await fetch(`${API_BASE}/scraper/historial?usuario_solicitante_id=${usuarioSolicitanteId}&limite=${limite}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al consultar el historial del scraper'));
+        return response.json();
     }
 };
