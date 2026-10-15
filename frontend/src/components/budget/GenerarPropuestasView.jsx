@@ -13,7 +13,7 @@ COM-8 v4: se retira el botón independiente "Regenerar"; al pulsar "Generar 3
          propuestas" con una sesión activa se abre un modal de confirmación.
 COM-8 v5: trazabilidad recuperada. Todas las líneas reemplazadas en
          versiones anteriores se conservan COMENTADAS (no borradas).
-COM-61 / HU-11 (este archivo): VARIEDAD ENTRE SEMANAS en la UI:
+COM-61 / HU-11: VARIEDAD ENTRE SEMANAS en la UI:
          * Checkbox "Permitir platos repetidos" (opt-in explícito, default OFF).
            Al marcarlo se exige confirmación con el mensaje del criterio:
            "¿Está seguro de permitir platos repetidos en la generación de nuevas
@@ -28,12 +28,16 @@ COM-61 / HU-11 (este archivo): VARIEDAD ENTRE SEMANAS en la UI:
          * Chips de contexto en el encabezado de sesión: semana anterior detectada
            y aviso de "repetición permitida" si la generación usó el opt-in.
          Nada existente de COM-8 v1-v5 se elimina; los bloques comentados se conservan.
-COM-74 (este archivo): muestra por día los comensales proyectados (IA + cocineras)
-         con badge de fuente (IA/parámetro) en cada tarjeta de propuesta.
+COM-74: muestra por día los comensales proyectados (IA + cocineras) con badge de
+         fuente (IA/parámetro) en cada tarjeta de propuesta.
+COM-75 (este archivo): banner de aviso cuando la generación detecta ingredientes
+         cuyos insumos son NUEVOS y no se pueden predecir (sin histórico de scraper):
+         promptea al usuario a asignar un precio manual temporal en Gestión de
+         Ingredientes hasta juntar datos suficientes para predecir.
 Permisos: vista para Directivo y Operativo (módulo 'propuestas', COM-25). El botón de
       selección solo aparece si el backend responde puede_seleccionar=true.
 Uso: Montada por App.jsx en la pestaña "Propuestas de Menú".
-Referencia: ticket COM-8 / HU-08 / COM-61 / COM-74 (solo trazabilidad).
+Referencia: ticket COM-8 / HU-08 / COM-61 / COM-74 / COM-75 (solo trazabilidad).
 */
 import React, { useState, useEffect, useCallback } from 'react';
 import {
@@ -309,6 +313,27 @@ export const GenerarPropuestasView = () => {
             {error && (
                 <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-center gap-2 text-sm">
                     <AlertCircle size={16} /> {error}
+                </div>
+            )}
+            {/* COM-75: prompt de precio manual temporal para insumos nuevos sin histórico */}
+            {sesion && (sesion.ingredientes_requieren_precio_manual || []).length > 0 && (
+                <div className="mb-4 p-3 bg-amber-50 border border-amber-300 rounded-lg text-amber-800 text-sm">
+                    <p className="font-bold flex items-center gap-1 mb-1">
+                        <AlertCircle size={15} /> Ingredientes sin precio predecible
+                    </p>
+                    <p className="mb-2">
+                        Estos insumos son nuevos o no tienen histórico suficiente para que la IA
+                        los prediga. Asigne un <b>precio manual temporal</b> en
+                        Gestión de Ingredientes hasta juntar datos del scraper:
+                    </p>
+                    <ul className="list-disc ml-5 space-y-0.5 text-xs">
+                        {sesion.ingredientes_requieren_precio_manual.map((x, i) => (
+                            <li key={i}>
+                                <b>{x.ingrediente}</b>
+                                {(x.insumos || []).length > 0 ? ` (insumos: ${x.insumos.join(', ')})` : ''}
+                            </li>
+                        ))}
+                    </ul>
                 </div>
             )}
             {/* Tarjetas de propuestas */}
