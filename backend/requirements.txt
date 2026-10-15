@@ -1,3 +1,6 @@
+# COM-43: se agregan requests / beautifulsoup4 / python-dotenv para que el contenedor
+# api pueda INVOCAR el scraper existente (scraper/main.py) desde el endpoint web y el
+# catch-up de arranque. El scraper de host sigue usando su propio venv (sin cambios).
 fastapi
 uvicorn
 pandas
@@ -5,3 +8,6 @@ scikit-learn
 psycopg2-binary
 pydantic
 python-multipart
+requests
+beautifulsoup4
+python-dotenv

@@ -41,7 +41,8 @@ import {
     Package,   // COM-37: ícono de la pestaña "Gestión de Ingredientes"
     Gift,      // COM-59A: ícono de la pestaña "Subsidio de Víveres"
     Coins,     // COM-59A: ícono de la pestaña "Precios de Venta"
-    ClipboardCheck // COM-69: ícono de la pestaña "Reporte Subsidio"
+    ClipboardCheck, // COM-69: ícono de la pestaña "Reporte Subsidio"
+    Database    // COM-43: ícono de la pestaña "Scraper SISAP"
 } from 'lucide-react';
 import { RecipesView } from './components/recipes/RecipesView';
 import { ClusterRecetasView } from './components/recipes/ClusterRecetasView';
@@ -75,6 +76,8 @@ import { LoginView } from './components/auth/LoginView';
 import { ModalCambioClave } from './components/auth/ModalCambioClave';
 import { SeleccionComedorView } from './components/auth/SeleccionComedorView';
 import { api } from './services/api';
+// COM-43: panel de ejecución/auditoría del scraper SISAP (solo Admin de Sistemas)
+import { ScraperAdminView } from './components/scraper/ScraperAdminView';
 
 // COM-25: módulos de administración que abren el panel global de usuarios
 const MODULOS_ADMIN = ['municipalidades', 'roles', 'bloqueos', 'vistas'];
@@ -89,6 +92,9 @@ const TABS_BASE = [
     { id: 'clusters', label: 'Clusters K-Means', icon: PieChart, color: 'emerald', modulo: 'clusters' }, // COM-5 v4: solo Admin
     // COM-5 v4: panel de gráficos de validación de los modelos ML (solo Admin)
     { id: 'modelos_ml', label: 'Modelos ML', icon: LineChart, color: 'blue', modulo: 'modelos_ml' },
+    // COM-43: ejecución web y auditoría del scraper SISAP. Gateada por el módulo
+    // 'modelos_ml' (sembrado solo para el Admin de Sistemas); el backend re-valida.
+    { id: 'scraper', label: 'Scraper SISAP', icon: Database, color: 'blue', modulo: 'modelos_ml' },
     // COM-37: gestión de ingredientes y precios manuales con vigencia (solo Admin)
     { id: 'gestion_ingredientes', label: 'Gestión de Ingredientes', icon: Package, color: 'amber', modulo: 'gestion_ingredientes' },
     // COM-59A: subsidio mensual de víveres (módulo 'subsidio': Admin gestiona todo;
@@ -315,6 +321,7 @@ function AppContent() {
                                 {activeTab === 'recipes' && <RecipesView />}
                                 {activeTab === 'clusters' && <ClusterRecetasView />} {/* COM-5 / COM-5 v4: módulo 'clusters' */}
                                 {activeTab === 'modelos_ml' && <ModelosMLView />} {/* COM-5 v4: panel ML solo Admin */}
+                                {activeTab === 'scraper' && <ScraperAdminView />} {/* COM-43 */}
                                 {/* COM-37: gestión de ingredientes y precios manuales (solo Admin) */}
                                 {activeTab === 'gestion_ingredientes' && <GestionIngredientesView />}
                                 {/* COM-59A: subsidio mensual de víveres por comedor */}
