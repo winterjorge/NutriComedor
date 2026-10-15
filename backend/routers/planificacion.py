@@ -25,8 +25,8 @@ control acumulado entre semanas del mismo mes vive en el reporte de uso
 (GET /subsidio/reporte-uso, COM-69), que alerta si el consumo supera el stock.
 COM-75 (este archivo): FIX de correspondencia ingrediente->insumo en la lista de
 compras. Ahora busca el insumo vinculado en la equivalencia activa en lugar del
-primer insumo por ID, evitando nombres incorrectos como "Aceite alsol" cuando la
-receta dice "Aceite vegetal".
+primer insumo por ID, evitando nombres incorrectos y precios faltantes. También
+limpia el sufijo "(manual)" de los nombres para presentación.
 Trazabilidad: el formateo anterior sin subsidio queda comentado al final.
 Uso: Registrado en main.py con prefijo /api/v1.
 Referencia: tickets COM-65 / COM-67 / COM-69 / COM-75 (solo trazabilidad).
@@ -169,6 +169,14 @@ def _convertir_a_unidad_compra(cur, unidad_compra_id, gramos, cantidad_total_rec
         return gramos / peso_unidad, um['abreviatura']
     return cantidad_total_receta, um['abreviatura']
 
+def _limpiar_nombre_insumo(nombre: str) -> str:
+    """
+    COM-75: limpia sufijos como '(manual)' del nombre del insumo para presentación.
+    """
+    if not nombre:
+        return nombre
+    return nombre.replace(' (manual)', '').replace('(manual)', '').strip()
+
 @router.get("/{planificacion_id}/lista-compras")
 def generar_lista_compras(
     planificacion_id: int,
@@ -185,7 +193,8 @@ def generar_lista_compras(
     3) conversión a unidad de compra del insumo (kg/L/und) para mostrar cantidades;
     4) agrupación por insumo con días de uso.
     COM-75: FIX de correspondencia ingrediente->insumo. Ahora busca el insumo vinculado
-    en la equivalencia activa en lugar del primer insumo por ID.
+    en la equivalencia activa en lugar del primer insumo por ID. También limpia el
+    sufijo "(manual)" de los nombres para presentación.
     Si no se envía comedor_id, se comporta exactamente como COM-67 v2 (sin subsidio).
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
@@ -262,24 +271,27 @@ def generar_lista_compras(
                     """, (equiv_row['insumo_id'],))
                     insumo = cur.fetchone()
                 else:
-                    # Fallback: si no hay equivalencia, buscar cualquier insumo del ingrediente
+                    # Fallback: buscar insumo con precio disponible
                     cur.execute("""
                         SELECT ins.id AS insumo_id, ins.nombre AS insumo_nombre,
                                ins.unidad_medida_id AS unidad_compra_id
                         FROM insumos ins
+                        LEFT JOIN historial_precios hp ON hp.insumo_id = ins.id
                         WHERE ins.ingrediente_id = %s
-                        ORDER BY ins.id
+                        GROUP BY ins.id, ins.nombre, ins.unidad_medida_id
+                        ORDER BY MAX(hp.fecha) DESC NULLS LAST, ins.id
                         LIMIT 1;
                     """, (ing_id,))
                     insumo = cur.fetchone()
 
                 if insumo:
                     clave = ('insumo', insumo['insumo_id'])
-                    nombre = insumo['insumo_nombre']
+                    # COM-75: limpiar nombre "(manual)" para presentación
+                    nombre = _limpiar_nombre_insumo(insumo['insumo_nombre'])
                     unidad_compra_id = insumo['unidad_compra_id']
                 else:
                     clave = ('ingrediente', ing_id)
-                    nombre = ing['ingrediente_nombre']
+                    nombre = _limpiar_nombre_insumo(ing['ingrediente_nombre'])
                     unidad_compra_id = None
 
                 if clave not in lista_compras:
