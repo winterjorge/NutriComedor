@@ -24,9 +24,9 @@ Regla v1 (documentada): la lista cubre contra el stock mensual COMPLETO; el
 control acumulado entre semanas del mismo mes vive en el reporte de uso
 (GET /subsidio/reporte-uso, COM-69), que alerta si el consumo supera el stock.
 COM-75 (este archivo): FIX de correspondencia ingrediente->insumo en la lista de
-compras. Ahora busca el insumo vinculado en la equivalencia activa en lugar del
-primer insumo por ID, evitando nombres incorrectos y precios faltantes. También
-limpia el sufijo "(manual)" de los nombres para presentación.
+compras. Ahora usa precios_por_gramo_por_insumo() para buscar precios por insumo_id
+específico vinculado en equivalencias activas, en lugar de precios_por_gramo_por_ingrediente()
+que busca por ingrediente_id. También limpia el sufijo "(manual)" de los nombres.
 Trazabilidad: el formateo anterior sin subsidio queda comentado al final.
 Uso: Registrado en main.py con prefijo /api/v1.
 Referencia: tickets COM-65 / COM-67 / COM-69 / COM-75 (solo trazabilidad).
@@ -38,8 +38,8 @@ from psycopg2.extras import RealDictCursor
 from database import get_db
 # COM-69: stock del subsidio del mes (gramos/ml base por ingrediente) y precios por gramo
 from subsidio_motor import subsidio_gramos_del_mes
-from precios_insumos import precios_por_gramo_por_ingrediente
-
+# COM-75: usar precios_por_gramo_por_insumo para buscar por insumo_id específico
+from precios_insumos import precios_por_gramo_por_insumo
 router = APIRouter(prefix="/planificaciones", tags=["Planificaciones"])
 
 @router.get("")
@@ -192,9 +192,9 @@ def generar_lista_compras(
        compra = requerido - cubierto; el costo estimado va SOLO sobre la compra;
     3) conversión a unidad de compra del insumo (kg/L/und) para mostrar cantidades;
     4) agrupación por insumo con días de uso.
-    COM-75: FIX de correspondencia ingrediente->insumo. Ahora busca el insumo vinculado
-    en la equivalencia activa en lugar del primer insumo por ID. También limpia el
-    sufijo "(manual)" de los nombres para presentación.
+    COM-75: FIX de correspondencia ingrediente->insumo. Ahora usa precios_por_gramo_por_insumo()
+    para buscar precios por insumo_id específico vinculado en equivalencias activas.
+    También limpia el sufijo "(manual)" de los nombres para presentación.
     Si no se envía comedor_id, se comporta exactamente como COM-67 v2 (sin subsidio).
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
@@ -297,6 +297,7 @@ def generar_lista_compras(
                 if clave not in lista_compras:
                     lista_compras[clave] = {
                         'ingrediente_id': ing_id,
+                        'insumo_id': insumo['insumo_id'] if insumo else None,
                         'unidad_compra_id': unidad_compra_id,
                         'nombre': nombre,
                         'gramos': 0.0,
@@ -308,7 +309,7 @@ def generar_lista_compras(
                     lista_compras[clave]['dias_uso'].append(dia_plan['dia_nombre'])
 
         # ------------------------------------------------------------------
-        # COM-69: stock del subsidio del mes de la planificación y precios por gramo
+        # COM-69 + COM-75: stock del subsidio del mes y precios por insumo
         # ------------------------------------------------------------------
         stock = {}
         if comedor_id:
@@ -317,12 +318,14 @@ def generar_lista_compras(
             except Exception as e:
                 print(f"[COM-69] No se pudo leer el subsidio del mes: {e}")
                 stock = {}
+        
+        # COM-75: usar precios_por_gramo_por_insumo en lugar de precios_por_gramo_por_ingrediente
         try:
-            ppg_map = precios_por_gramo_por_ingrediente(
+            precios_insumo_map = precios_por_gramo_por_insumo(
                 cur, fecha_ref.isoformat(), fallback_ultima_fecha=True) or {}
         except Exception as e:
-            print(f"[COM-69] No se pudieron leer precios por gramo: {e}")
-            ppg_map = {}
+            print(f"[COM-75] No se pudieron leer precios por insumo: {e}")
+            precios_insumo_map = {}
 
         lista_formateada = []
         items_subsididados = 0
@@ -332,6 +335,7 @@ def generar_lista_compras(
         for (tipo, key), data in sorted(lista_compras.items(), key=lambda x: x[1]['nombre']):
             requerido = data['gramos']
             ing_id = data['ingrediente_id']
+            insumo_id = data.get('insumo_id')
             stock_ing = float(stock.get(ing_id, 0.0) or 0.0)
 
             # COM-69 (Solución B): cobertura topada por el stock del subsidio
@@ -342,7 +346,17 @@ def generar_lista_compras(
             if subsidio_completo or subsidio_parcial:
                 items_subsididados += 1
 
-            ppg = ppg_map.get(ing_id)
+            # COM-75: buscar precio por insumo_id si existe, sino por ingrediente_id
+            ppg = None
+            if insumo_id and insumo_id in precios_insumo_map:
+                ppg = precios_insumo_map[insumo_id].get('ppg')
+            else:
+                # Fallback: buscar en cualquier insumo del ingrediente
+                for ins_id, precio_data in precios_insumo_map.items():
+                    if precio_data.get('ingrediente_id') == ing_id:
+                        ppg = precio_data.get('ppg')
+                        break
+            
             costo_estimado = round(compra * ppg, 2) if (ppg is not None and compra > 0) else None
             ahorro_estimado = round(cubierto * ppg, 2) if (ppg is not None and cubierto > 0) else None
             if costo_estimado:
@@ -374,6 +388,7 @@ def generar_lista_compras(
                 'id': key,
                 'tipo': tipo,
                 'ingrediente_id': ing_id,
+                'insumo_id': insumo_id,
                 'nombre': data['nombre'],
                 'cantidad': _redondear(cant_compra, unidad),
                 'unidad': unidad,
