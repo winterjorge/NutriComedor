@@ -1205,7 +1205,7 @@ export const api = {
         const response = await fetch(`${API_BASE}/scraper/historial?usuario_solicitante_id=${usuarioSolicitanteId}&limite=${limite}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al consultar el historial del scraper'));
         return response.json();
-    }
+    },
 
     // ==========================================
     // COM-77: REPORTES OPERATIVOS DEL COMEDOR (y alcance unificado COM-77/78)
