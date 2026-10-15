@@ -57,6 +57,11 @@ COM-69 (este archivo): tres adiciones marcadas, ninguna línea existente se elim
         del reporte municipal según permisos de lectura de subsidio.
       * getReporteSubsidio (GET /subsidio/reporte-uso): stock vs consumo proyectado
         acumulado del mes por comedor, con estados OK/POR AGOTAR/AGOTADO/SIN CONSUMO.
+COM-43: bloque SCRAPER SISAP (ejecutarScraper, getEstadoScraper, getHistorialScraper).
+COM-77: bloque REPORTES AVANZADOS (alcance unificado + 5 reportes operativos).
+COM-78 (este archivo): bloque REPORTES MUNICIPIO (getDashboardDistrital,
+      getObservatorioPrecios, getCoberturaFocalizacion). Ningún método existente
+      se elimina ni se renombra.
 */
 const API_BASE = '/api/v1';
 
@@ -860,7 +865,7 @@ export const api = {
         return response.json();
     },
     // COM-69: reporte de uso del subsidio por comedor y mes (stock vs consumo
-    // proyectado acumulado de las planificaciones del mes, con estados).
+    // proyectado acumulado del mes, con estados).
     getReporteSubsidio: async (params) => {
         const qs = new URLSearchParams();
         qs.append('usuario_solicitante_id', params.usuario_solicitante_id);
@@ -1206,7 +1211,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al consultar el historial del scraper'));
         return response.json();
     },
-
     // ==========================================
     // COM-77: REPORTES OPERATIVOS DEL COMEDOR (y alcance unificado COM-77/78)
     // ==========================================
@@ -1243,6 +1247,29 @@ export const api = {
         const qs = new URLSearchParams({ usuario_solicitante_id: params.usuario_solicitante_id, comedor_id: params.comedor_id, anio: params.anio, mes: params.mes });
         const response = await fetch(`${API_BASE}/reportes-avanzados/semaforo-nutricional?${qs}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar semáforo nutricional'));
+        return response.json();
+    },
+    // ==========================================
+    // COM-78: REPORTES MACRO DE MUNICIPIO (dashboard / observatorio / cobertura)
+    // ==========================================
+    getDashboardDistrital: async (params) => {
+        const qs = new URLSearchParams({ usuario_solicitante_id: params.usuario_solicitante_id, anio: params.anio, mes: params.mes });
+        if (params.zona) qs.append('zona', params.zona);
+        const response = await fetch(`${API_BASE}/reportes-municipio/dashboard?${qs}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar dashboard distrital'));
+        return response.json();
+    },
+    getObservatorioPrecios: async (params) => {
+        const qs = new URLSearchParams({ usuario_solicitante_id: params.usuario_solicitante_id, dias: params.dias || 90 });
+        const response = await fetch(`${API_BASE}/reportes-municipio/observatorio?${qs}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar observatorio de precios'));
+        return response.json();
+    },
+    getCoberturaFocalizacion: async (params) => {
+        const qs = new URLSearchParams({ usuario_solicitante_id: params.usuario_solicitante_id, anio: params.anio, mes: params.mes });
+        if (params.zona) qs.append('zona', params.zona);
+        const response = await fetch(`${API_BASE}/reportes-municipio/cobertura?${qs}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar cobertura y focalización'));
         return response.json();
     },
 };
