@@ -50,6 +50,7 @@ from routers import (
     reportes_gestion,    # COM-50: resumen ejecutivo y recomendaciones (alcances por perfil)
     subsidio,            # COM-59A: subsidio mensual de víveres por comedor
     precios_venta,       # COM-59A: precios de venta con historial (solo Admin de Sistemas)
+    scraper_admin,       # COM-43: ejecución web/catch-up del scraper SISAP (solo Admin)
 )
 # Asegurado de esquema dinámico (parámetros, planificación, raciones, seguridad,
 # comedores, grupos, gestión de usuarios, permisos por vistas, ubicaciones,
@@ -63,6 +64,13 @@ from db_bootstrap import asegurar_esquema
 async def lifespan(app: FastAPI):
     # Verificar/crear tablas dinámicas antes de atender peticiones.
     asegurar_esquema()
+    # COM-43: catch-up automático de precios faltantes al arrancar (servidor no 24/7).
+    # Nunca bloquea el arranque: cualquier error se degrada a un print de auditoría.
+    try:
+        from routers.scraper_admin import lanzar_catchup_arranque
+        lanzar_catchup_arranque()
+    except Exception as e:
+        print(f"[BOOTSTRAP] COM-43: catch-up de scraper no iniciado: {e}")
     yield
 
 
@@ -97,6 +105,7 @@ app.include_router(ingredientes_admin.router, prefix="/api/v1")  # COM-37
 app.include_router(reportes_gestion.router, prefix="/api/v1")    # COM-50
 app.include_router(subsidio.router, prefix="/api/v1")            # COM-59A
 app.include_router(precios_venta.router, prefix="/api/v1")       # COM-59A
+app.include_router(scraper_admin.router, prefix="/api/v1")   # COM-43
 # COM-39 fix (trazabilidad): posición original del include de directivos, comentada.
 # app.include_router(directivos.router, prefix="/api/v1")     # COM-39 (antes, después de reset_clave)
 app.include_router(parametros.router, prefix="/api/v1")
