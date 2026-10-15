@@ -1,28 +1,41 @@
 """
 precios_insumos.py
 Objetivo: COM-37 v5: resolución unificada de (a) equivalencias unidad de USO -> gramos
-          y (b) precios por gramo de cada insumo/ingrediente en una fecha, combinando
-          las fuentes con precedencia:
-            1) precio scraper del día (historial_precios),
-            2) período manual vigente del insumo (insumos_precios_manuales),
-            3) precio manual legacy por ingrediente (ingredientes_precios_manuales v1).
-          Entre insumos de un mismo ingrediente gana el MENOR costo por gramo.
+y (b) precios por gramo de cada insumo/ingrediente en una fecha, combinando
+las fuentes con precedencia.
 Historial:
- - COM-37 v5: versión original (scraper día + manual insumo + legacy).
- - COM-37 v5-fix: parámetro fallback_ultima_fecha para motores de planificación.
- - COM-49 (este archivo): cada entrada del mapa de precios expone también
-   `unidad_compra_abrev` y `precio_por_unidad` (el precio EN LA UNIDAD DE COMPRA tal
-   como se registró), para que el optimizador pueda auditar el costeo de cada línea
-   (cantidad × gramos_por_unidad × ppg) sin ambigüedad.
+COM-37 v5: versión original (scraper día + manual insumo + legacy).
+COM-37 v5-fix: parámetro fallback_ultima_fecha para motores de planificación.
+COM-49: cada entrada del mapa expone también `unidad_compra_abrev` y
+    `precio_por_unidad` (el precio EN LA UNIDAD DE COMPRA tal como se registró),
+    para que el optimizador pueda auditar el costeo de cada línea sin ambigüedad.
+COM-75 (este archivo): JERARQUÍA DE PRECIOS REDEFINIDA y centralizada (aplica a todo
+    el sistema porque greedy/optimizador/planificacion/kmeans consumen este mapa):
+      1) SCRAPER_DIA      -> precio real de la fecha EXACTA pedida (prioridad máxima).
+      2) MANUAL_PERIODO   -> precio manual vigente (la decisión del usuario pesa más
+                             que la IA); solo insumos sin scraper del día.
+      3) PREDICHO (RF)    -> predicción Random Forest para la fecha; solo insumos sin
+                             scraper del día ni manual (caso típico: planificar futuro).
+      4) SCRAPER_ULTIMO   -> última corrida del scraper, SOLO con fallback_ultima_fecha
+                            =True y únicamente si RF falló (no deja sin precio a
+                             insumos con histórico corto).
+      5) LEGACY ingrediente-> se mantiene al final en mejor_opcion_ingrediente.
+    Antes (COM-37) el scraper "última corrida" ganaba sobre RF para fechas sin corrida,
+    lo que congelaba precios viejos en planificaciones futuras; COM-75 invierte eso:
+    para fechas sin scraper del día, RF proyecta la tendencia.
+    Nuevos helpers de diagnóstico COM-75:
+      * diagnosticar_fuente_precio(): fuente que se usaría para un insumo en una fecha.
+      * ingredientes_requieren_precio_manual(): ingredientes SIN ninguna fuente real o
+        predecible (insumo nuevo sin histórico) para que la UI promptee asignar un
+        precio manual temporal hasta juntar datos suficientes para predecir.
 Modelo de unidades:
-          - USO (ingrediente/receta): pizca, cucharadita, taza, und...
-          - COMPRA (insumo): Kg, L, atado, und...
-Uso: Importado por optimizador.py, ml/kmeans_recetas.py, ml/greedy_search.py y
-     routers/ingredientes_admin.py.
-Referencia: tickets COM-37 / COM-49 (solo trazabilidad).
+- USO (ingrediente/receta): pizca, cucharadita, taza, und...
+- COMPRA (insumo): Kg, L, atado, und...
+Uso: Importado por optimizador.py, ml/kmeans_recetas.py, ml/greedy_search.py,
+routers/planificacion.py y routers/ingredientes_admin.py.
+Referencia: tickets COM-37 / COM-49 / COM-75 (solo trazabilidad).
 """
 from precios_manuales import obtener_precio_manual_por_gramo  # fallback legacy v1
-
 
 # ==========================================
 # CONVERSIONES ESTÁNDAR DE UNIDADES -> GRAMOS
@@ -30,9 +43,9 @@ from precios_manuales import obtener_precio_manual_por_gramo  # fallback legacy 
 def gramos_por_unidad_estandar(abrev, tipo_magnitud, factor_a_base, peso_estimado_g):
     """
     Reglas estándar compartidas (réplica del optimizador Sprint 2):
-      kg/l -> 1000 g | g/ml -> 1 g | tz -> factor (250) | cda -> factor (15) |
-      cdta -> factor (5) | pz -> factor (1) | und/dte/rma -> peso_estimado_g del
-      ingrediente | atd -> 100 g | rdj -> 20 g.
+    kg/l -> 1000 g | g/ml -> 1 g | tz -> factor (250) | cda -> factor (15) |
+    cdta -> factor (5) | pz -> factor (1) | und/dte/rma -> peso_estimado_g del
+    ingrediente | atd -> 100 g | rdj -> 20 g.
     Fallback: masa/volumen -> factor_a_base; discreto/otro -> peso_estimado_g.
     """
     s = (abrev or '').lower().strip()
@@ -111,6 +124,7 @@ def _fecha_scraper_efectiva(cur, fecha):
     COM-37 v5-fix: si la fecha pedida no tiene corrida del scraper, devuelve la última
     fecha con precios disponibles (MAX(fecha)); si no hay historial alguno, devuelve
     la fecha pedida (el mapa quedará vacío y regirán manuales/predicción).
+    COM-75: se usa SOLO para el paso 4 (SCRAPER_ULTIMO) del nuevo orden jerárquico.
     """
     cur.execute("""
         SELECT COUNT(*) AS n FROM historial_precios
@@ -127,21 +141,37 @@ def _fecha_scraper_efectiva(cur, fecha):
     return row['f'] if row and row['f'] else fecha
 
 
+def _query_insumos_unidad(cur):
+    """COM-75: helper: insumos con su unidad de compra y peso estimado del ingrediente."""
+    cur.execute("""
+        SELECT ins.id AS insumo_id, ins.nombre AS insumo_nombre, ins.origen,
+               ins.ingrediente_id,
+               um.abreviatura AS u_abrev, um.tipo_magnitud AS u_tipo,
+               um.factor_a_base AS u_factor, ing.peso_estimado_g
+        FROM insumos ins
+        JOIN unidades_medida um ON um.id = ins.unidad_medida_id
+        JOIN ingredientes ing ON ing.id = ins.ingrediente_id;
+    """)
+    return cur.fetchall()
+
+
 def precios_por_gramo_por_insumo(cur, fecha, fallback_ultima_fecha=False):
     """
-    COM-37 v5/v5-fix/v49: {insumo_id: {'ppg','fuente','detalle','insumo_nombre','origen',
-    'unidad_compra_abrev','precio_por_unidad'}} con la mejor fuente disponible por
-    insumo para la fecha:
-      'SCRAPER_DIA' / 'SCRAPER_ULTIMO' -> mínimo precio_prom del día efectivo,
-      'MANUAL_PERIODO' -> período vigente más reciente de insumos_precios_manuales
-                          (solo si el insumo no tuvo precio scraper efectivo).
+    COM-75: {insumo_id: {'ppg','fuente','detalle','insumo_nombre','origen',
+    'unidad_compra_abrev','precio_por_unidad'}} con la JERARQUÍA central:
+      1) SCRAPER_DIA     -> precio real de la fecha EXACTA (MIN precio_prom del día).
+      2) MANUAL_PERIODO  -> período manual vigente para la fecha (insumos sin scraper día).
+      3) PREDICHO        -> Random Forest para la fecha (insumos sin scraper día ni manual).
+      4) SCRAPER_ULTIMO  -> última corrida, SOLO si fallback_ultima_fecha=True y RF falló.
     COM-49: se exponen unidad_compra_abrev y precio_por_unidad para auditoría del
     costeo (precio_por_unidad / gramos_de_compra = ppg).
+    Trazabilidad COM-37 (orden anterior): scraper(día o última corrida) > manual;
+    RF NO estaba en el mapa (solo greedy lo usaba como último recurso), lo que
+    congelaba precios viejos en planificaciones futuras. COM-75 lo corrige.
     """
     out = {}
-    fecha_scraper = _fecha_scraper_efectiva(cur, fecha) if fallback_ultima_fecha else fecha
 
-    # 1) Precios scraper (del día pedido o de la última corrida, según fallback)
+    # ---- Paso 1: SCRAPER DEL DÍA EXACTO (prioridad máxima, dato real) ----
     cur.execute("""
         SELECT ins.id AS insumo_id, ins.nombre AS insumo_nombre, ins.origen,
                MIN(hp.precio_prom) AS precio_prom,
@@ -154,25 +184,23 @@ def precios_por_gramo_por_insumo(cur, fecha, fallback_ultima_fecha=False):
         WHERE hp.fecha = %s AND hp.precio_prom IS NOT NULL AND hp.precio_prom > 0
         GROUP BY ins.id, ins.nombre, ins.origen,
                  um.abreviatura, um.tipo_magnitud, um.factor_a_base, ing.peso_estimado_g;
-    """, (fecha_scraper,))
+    """, (fecha,))
     for r in cur.fetchall():
         g_compra = gramos_por_unidad_compra(
             r['u_abrev'], r['u_tipo'], r['u_factor'], r['peso_estimado_g'])
         if g_compra <= 0:
             continue
-        fuente = 'SCRAPER_DIA' if fecha_scraper == fecha else 'SCRAPER_ULTIMO'
         out[r['insumo_id']] = {
             'ppg': float(r['precio_prom']) / g_compra,
-            'fuente': fuente,
-            'detalle': f"S/ {r['precio_prom']} por {r['u_abrev']} (scraper {fecha_scraper})",
+            'fuente': 'SCRAPER_DIA',
+            'detalle': f"S/ {r['precio_prom']} por {r['u_abrev']} (scraper {fecha})",
             'insumo_nombre': r['insumo_nombre'],
             'origen': r['origen'],
-            # COM-49: auditoría de la unidad y el precio de compra
             'unidad_compra_abrev': r['u_abrev'],
             'precio_por_unidad': float(r['precio_prom']),
         }
 
-    # 2) Períodos manuales vigentes (solo insumos sin precio scraper efectivo)
+    # ---- Paso 2: MANUAL VIGENTE (decisión del usuario > IA) ----
     cur.execute("""
         SELECT ipm.insumo_id, ipm.precio_por_unidad, ipm.id AS periodo_id, ipm.observacion,
                ins.nombre AS insumo_nombre, ins.origen,
@@ -184,12 +212,12 @@ def precios_por_gramo_por_insumo(cur, fecha, fallback_ultima_fecha=False):
         JOIN ingredientes ing ON ing.id = ins.ingrediente_id
         WHERE ipm.estado_activo = TRUE
           AND (ipm.fecha_inicio IS NULL OR ipm.fecha_inicio <= %s)
-          AND (ipm.fecha_inicio IS NULL OR ipm.fecha_fin IS NULL OR ipm.fecha_fin >= %s)
+          AND (ipm.fecha_fin IS NULL OR ipm.fecha_fin >= %s)
         ORDER BY ipm.fecha_registro DESC;
     """, (fecha, fecha))
     for r in cur.fetchall():
         if r['insumo_id'] in out:
-            continue  # el scraper (del día o última corrida) tiene precedencia
+            continue  # el scraper del día tiene precedencia
         g_compra = gramos_por_unidad_compra(
             r['u_abrev'], r['u_tipo'], r['u_factor'], r['peso_estimado_g'])
         if g_compra <= 0:
@@ -200,10 +228,134 @@ def precios_por_gramo_por_insumo(cur, fecha, fallback_ultima_fecha=False):
             'detalle': f"S/ {r['precio_por_unidad']} por {r['u_abrev']} (precio manual)",
             'insumo_nombre': r['insumo_nombre'],
             'origen': r['origen'],
-            # COM-49: auditoría de la unidad y el precio de compra
             'unidad_compra_abrev': r['u_abrev'],
             'precio_por_unidad': float(r['precio_por_unidad']),
         }
+
+    # ---- Paso 3: PREDICCIÓN RF (solo insumos sin scraper del día ni manual) ----
+    try:
+        from optimizador import predecir_precio_con_confianza
+    except Exception:  # degradación controlada si optimizador no está disponible
+        predecir_precio_con_confianza = None
+    if predecir_precio_con_confianza is not None:
+        faltantes = [r for r in _query_insumos_unidad(cur) if r['insumo_id'] not in out]
+        for ins in faltantes:
+            try:
+                pred, conf, ok = predecir_precio_con_confianza(ins['insumo_id'], fecha, None, cur)
+            except Exception:
+                pred, conf, ok = None, None, False
+            if not (ok and pred):
+                continue
+            g_compra = gramos_por_unidad_compra(
+                ins['u_abrev'], ins['u_tipo'], ins['u_factor'], ins['peso_estimado_g'])
+            if g_compra <= 0:
+                continue
+            out[ins['insumo_id']] = {
+                'ppg': float(pred) / g_compra,
+                'fuente': 'PREDICHO',
+                'detalle': f"S/ {pred} por {ins['u_abrev']} (PREDICHO {conf}%)",
+                'insumo_nombre': ins['insumo_nombre'],
+                'origen': ins['origen'],
+                'unidad_compra_abrev': ins['u_abrev'],
+                'precio_por_unidad': float(pred),
+            }
+
+    # ---- Paso 4: SCRAPER ÚLTIMA CORRIDA (solo fallback y solo si RF falló) ----
+    if fallback_ultima_fecha:
+        fecha_ult = _fecha_scraper_efectiva(cur, fecha)
+        if fecha_ult != fecha:
+            cur.execute("""
+                SELECT ins.id AS insumo_id, ins.nombre AS insumo_nombre, ins.origen,
+                       MIN(hp.precio_prom) AS precio_prom,
+                       um.abreviatura AS u_abrev, um.tipo_magnitud AS u_tipo,
+                       um.factor_a_base AS u_factor, ing.peso_estimado_g
+                FROM historial_precios hp
+                JOIN insumos ins ON ins.id = hp.insumo_id
+                JOIN unidades_medida um ON um.id = ins.unidad_medida_id
+                JOIN ingredientes ing ON ing.id = ins.ingrediente_id
+                WHERE hp.fecha = %s AND hp.precio_prom IS NOT NULL AND hp.precio_prom > 0
+                GROUP BY ins.id, ins.nombre, ins.origen,
+                         um.abreviatura, um.tipo_magnitud, um.factor_a_base, ing.peso_estimado_g;
+            """, (fecha_ult,))
+            for r in cur.fetchall():
+                if r['insumo_id'] in out:
+                    continue
+                g_compra = gramos_por_unidad_compra(
+                    r['u_abrev'], r['u_tipo'], r['u_factor'], r['peso_estimado_g'])
+                if g_compra <= 0:
+                    continue
+                out[r['insumo_id']] = {
+                    'ppg': float(r['precio_prom']) / g_compra,
+                    'fuente': 'SCRAPER_ULTIMO',
+                    'detalle': f"S/ {r['precio_prom']} por {r['u_abrev']} (scraper {fecha_ult})",
+                    'insumo_nombre': r['insumo_nombre'],
+                    'origen': r['origen'],
+                    'unidad_compra_abrev': r['u_abrev'],
+                    'precio_por_unidad': float(r['precio_prom']),
+                }
+    return out
+
+
+# ==========================================
+# COM-75: DIAGNÓSTICO DE FUENTE DE PRECIO (para prompt de precio manual)
+# ==========================================
+def diagnosticar_fuente_precio(cur, insumo_id, fecha):
+    """
+    COM-75: devuelve {'fuente', 'disponible', 'detalle'} con la fuente que se usaría
+    para el insumo en la fecha, siguiendo la jerarquía central. Si ninguna fuente real
+    o predecible existe, disponible=False y fuente='NINGUNA' (insumo nuevo sin
+    histórico): el caller debe promptear al usuario para asignar precio manual temporal.
+    """
+    mapa = precios_por_gramo_por_insumo(cur, fecha, fallback_ultima_fecha=True)
+    opc = mapa.get(insumo_id)
+    if opc:
+        return {'fuente': opc['fuente'], 'disponible': True, 'detalle': opc['detalle']}
+    return {'fuente': 'NINGUNA', 'disponible': False,
+            'detalle': 'Sin scraper del día, sin precio manual y sin predicción RF disponible.'}
+
+
+def ingredientes_requieren_precio_manual(cur, fecha) -> list:
+    """
+    COM-75: lista de {ingrediente_id, ingrediente, insumo_id, insumo, motivo} para los
+    insumos que NO tienen scraper del día, NI manual vigente, NI predicción RF posible
+    (insumos nuevos sin histórico). La UI usa esta lista para PROMPTEAR al usuario a
+    asignar un precio manual temporal hasta juntar datos suficientes para predecir.
+    """
+    try:
+        from optimizador import predecir_precio_con_confianza
+    except Exception:
+        predecir_precio_con_confianza = None
+
+    mapa = precios_por_gramo_por_insumo(cur, fecha, fallback_ultima_fecha=False)
+    # mapa sin fallback: contiene scraper_día, manual y RF. Los que faltan aquí no
+    # tienen ninguna de esas tres fuentes reales/predecibles.
+    faltantes = [r for r in _query_insumos_unidad(cur) if r['insumo_id'] not in mapa]
+    out = []
+    for ins in faltantes:
+        # Doble confirmación de que RF realmente no puede predecir (por si el paso 3
+        # falló por excepción transitoria y no por falta de histórico).
+        rf_ok = False
+        if predecir_precio_con_confianza is not None:
+            try:
+                _p, _c, rf_ok = predecir_precio_con_confianza(ins['insumo_id'], fecha, None, cur)
+            except Exception:
+                rf_ok = False
+        if rf_ok:
+            continue  # sí se puede predecir; no requiere manual
+        out.append({
+            'ingrediente_id': ins['ingrediente_id'],
+            'ingrediente': None,  # se completa abajo si hace falta
+            'insumo_id': ins['insumo_id'],
+            'insumo': ins['insumo_nombre'],
+            'motivo': 'sin_historico_para_predecir',
+        })
+    if out:
+        ids = sorted({x['ingrediente_id'] for x in out if x['ingrediente_id']})
+        if ids:
+            cur.execute("SELECT id, nombre FROM ingredientes WHERE id = ANY(%s);", (ids,))
+            nombres = {r['id']: r['nombre'] for r in cur.fetchall()}
+            for x in out:
+                x['ingrediente'] = nombres.get(x['ingrediente_id'])
     return out
 
 
@@ -212,11 +364,12 @@ def precios_por_gramo_por_insumo(cur, fecha, fallback_ultima_fecha=False):
 # ==========================================
 def mejor_opcion_ingrediente(cur, ingrediente_id, fecha, precios_insumo=None):
     """
-    COM-37 v5: mejor (menor costo por gramo) opción de precio para un ingrediente en
-    una fecha, recorriendo sus insumos. Si ningún insumo tiene precio, cae al manual
-    legacy por ingrediente (COM-37 v1). Retorna dict con:
-      {insumo_id, insumo_nombre, origen, ppg, fuente, detalle,
-       unidad_compra_abrev, precio_por_unidad} o None.
+    COM-37 v5 + COM-75: mejor (menor costo por gramo) opción de precio para un
+    ingrediente en una fecha, recorriendo sus insumos sobre el mapa jerarquizado
+    (scraper día > manual > RF > scraper último). Si ningún insumo tiene precio, cae
+    al manual legacy por ingrediente (COM-37 v1). Retorna dict con:
+    {insumo_id, insumo_nombre, origen, ppg, fuente, detalle,
+     unidad_compra_abrev, precio_por_unidad} o None.
     """
     if precios_insumo is None:
         precios_insumo = precios_por_gramo_por_insumo(cur, fecha)
@@ -241,7 +394,7 @@ def mejor_opcion_ingrediente(cur, ingrediente_id, fecha, precios_insumo=None):
             }
     if mejor:
         return mejor
-    # 3) Fallback legacy: precio manual por ingrediente (COM-37 v1)
+    # 5) Fallback legacy: precio manual por ingrediente (COM-37 v1)
     legacy = obtener_precio_manual_por_gramo(cur, ingrediente_id, fecha)
     if legacy:
         return {
@@ -259,8 +412,8 @@ def mejor_opcion_ingrediente(cur, ingrediente_id, fecha, precios_insumo=None):
 
 def precios_por_gramo_por_ingrediente(cur, fecha, fallback_ultima_fecha=False):
     """
-    COM-37 v5: {ingrediente_id: ppg} con la mejor opción de cada ingrediente
-    (scraper día/último > manual insumo > legacy ingrediente).
+    COM-37 v5 + COM-75: {ingrediente_id: ppg} con la mejor opción de cada ingrediente
+    bajo la jerarquía central (scraper día > manual > RF > scraper último > legacy).
     """
     precios_insumo = precios_por_gramo_por_insumo(cur, fecha, fallback_ultima_fecha)
     cur.execute("""
