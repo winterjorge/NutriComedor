@@ -1,40 +1,39 @@
 /**
- * components/reportes/ReportesView.jsx
- * Objetivo: Pestaña "Reportes" (HU-10) con dos capas:
- *   (A) KPIs operativos del sistema (contadores y ventas del día) — visibles para
- *       todos los perfiles con módulo 'reportes'.
- *   (B) Panel "Resumen ejecutivo y recomendaciones" (COM-50 v3), con alcance por
- *       perfil resuelto por /reportes-gestion/alcance:
- *         * Administrador de Sistemas  -> 403: mensaje amigable (no ve reportes de
- *                                          comedores; HU-10 y matriz COM-50 v3).
- *         * Operativo (Cocinero)       -> 403: mensaje amigable (sin reportería).
- *         * Directivo                  -> nivel 'comedor' forzado: panel de SU
- *                                          comedor, sin selector de nivel/comedor.
- *         * Municipal                  -> selector de nivel (Macro / Zona / Comedor)
- *                                          + selector condicional + tabla agregada
- *                                          `por_comedor` cuando el nivel es macro/zona.
- * Historial:
- *  - Sprint 3/4: versión original (KPIs + ventas del día).
- *  - COM-50 v1/v2: integración del panel ejecutivo (comedor único).
- *  - COM-50 v3 (este archivo): matriz de alcances completa, panel reactivo al
- *    `tipo_alcance` del backend y tabla agregada `por_comedor` en macro/zona.
- *    Lo anterior queda comentado por trazabilidad; nada se elimina.
- * Uso: Renderizado por App.jsx en la pestaña "Reportes" (módulo 'reportes').
- * Referencia: tickets COM-50 / HU-10 (solo trazabilidad).
- */
+components/reportes/ReportesView.jsx
+Objetivo: Pestaña "Reportes" (HU-10) con TRES capas conmutables por segmento:
+(A) KPIs operativos del sistema (contadores y ventas del día) — siempre visibles.
+(B) "Resumen ejecutivo y recomendaciones" (COM-50 v3), con alcance por perfil.
+(C) COM-77: "Reportes operativos del comedor" (5 reportes de ReportesComedorView).
+(D) COM-78: "Supervisión distrital" (3 reportes macro + drill-down,
+    ReportesMunicipioView), visible solo si el alcance avanzado devuelve puede_com78.
+Historial:
+Sprint 3/4: versión original (KPIs + ventas del día).
+COM-50 v1/v2: integración del panel ejecutivo (comedor único).
+COM-50 v3: matriz de alcances completa, panel reactivo al `tipo_alcance` del backend
+    y tabla agregada `por_comedor` en macro/zona.
+COM-77: segmento "Reportes operativos" que monta ReportesComedorView con el alcance
+    unificado de /reportes-avanzados/alcance (Directivo/Operativo de su comedor;
+    municipal y Admin como drill-down).
+COM-78 (este archivo): segmento "Supervisión distrital" que monta
+    ReportesMunicipioView cuando puede_com78=true; el segmento por defecto es el
+    primero disponible (distrital > operativos > ejecutivo). Nada existente se elimina.
+Uso: Renderizado por App.jsx en la pestaña "Reportes" (módulo 'reportes').
+Referencia: tickets COM-50 / HU-10 / COM-77 / COM-78 (solo trazabilidad).
+*/
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
     Store, Users, ChefHat, ClipboardList, Activity, Loader2, AlertCircle,
     TrendingUp, Calendar, Lightbulb, Wallet, Repeat, FileText, RefreshCw,
-    MapPin, Building2, Target, Table2
+    MapPin, Building2, Target, Table2, BarChart3
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
+import { ReportesComedorView } from './ReportesComedorView';
+import { ReportesMunicipioView } from './ReportesMunicipioView';
 
 // Formatos defensivos
 const fmtS = (v) => (v === null || v === undefined || v === '' ? '—' : `S/ ${Number(v).toFixed(2)}`);
 const fmtN = (v) => (v === null || v === undefined || v === '' ? '—' : Number(v).toFixed(2));
-
 const FUENTE_PLAN_LABEL = {
     propuesta_seleccionada: 'Propuesta seleccionada',
     propuesta_ultima: 'Última propuesta generada',
@@ -42,7 +41,6 @@ const FUENTE_PLAN_LABEL = {
     planificacion_ultima: 'Planificación guardada',
     planificacion_indicada: 'Planificación indicada',
 };
-
 // Icono y color por tipo de sugerencia (COM-50)
 const iconoSugerencia = (tipo) => {
     if (tipo === 'ahorro') return <Lightbulb size={15} className="text-emerald-600 shrink-0 mt-0.5" />;
@@ -53,6 +51,11 @@ const iconoSugerencia = (tipo) => {
 export const ReportesView = () => {
     const { usuario } = useAuth();
     const esAdminSistema = usuario?.rol === 'Administrador Sistema';
+
+    // COM-77/78: segmento activo y alcance avanzado
+    const [segmento, setSegmento] = useState(null);
+    const [alcanceAv, setAlcanceAv] = useState(null);
+    const [cargandoAlcanceAv, setCargandoAlcanceAv] = useState(true);
 
     // --- KPIs operativos (A) ---
     const [cargando, setCargando] = useState(true);
@@ -76,6 +79,30 @@ export const ReportesView = () => {
     const [reporte, setReporte] = useState(null);
     const [cargandoReporte, setCargandoReporte] = useState(false);
     const [errorReporte, setErrorReporte] = useState('');
+
+    // =========================================================================
+    // COM-77/78: alcance avanzado (decide segmentos disponibles y default)
+    // =========================================================================
+    useEffect(() => {
+        let vivo = true;
+        const cargar = async () => {
+            setCargandoAlcanceAv(true);
+            try {
+                const av = await api.getAlcanceReportesAvanzados(usuario.id);
+                if (!vivo) return;
+                setAlcanceAv(av);
+                setSegmento(av?.puede_com78 ? 'distrital' : (av?.puede_com77 ? 'operativos' : 'ejecutivo'));
+            } catch (e) {
+                if (!vivo) return;
+                setAlcanceAv(null);
+                setSegmento('ejecutivo');
+            } finally {
+                if (vivo) setCargandoAlcanceAv(false);
+            }
+        };
+        cargar();
+        return () => { vivo = false; };
+    }, [usuario.id]);
 
     // =========================================================================
     // (A) KPIs operativos: comedores, usuarios, recetas, planificaciones, ventas.
@@ -172,7 +199,6 @@ export const ReportesView = () => {
         const comedorId = alcance.tipo_alcance === 'comedor' ? alcance.comedor_fijo : comedorSel;
         if (nivelSel === 'comedor' && !comedorId) return;
         if (nivelSel === 'zona' && !zonaSel) return;
-
         setCargandoReporte(true);
         setErrorReporte('');
         try {
@@ -198,8 +224,8 @@ export const ReportesView = () => {
 
     // Recargar cuando cambien los selectores (Directivo carga automático al entrar)
     useEffect(() => {
-        if (alcance) cargarReporte();
-    }, [cargarReporte, alcance]);
+        if (alcance && segmento === 'ejecutivo') cargarReporte();
+    }, [cargarReporte, alcance, segmento]);
 
     // Derivados de KPIs
     const ventas = kpis.ventasHoy || {};
@@ -211,7 +237,6 @@ export const ReportesView = () => {
         { label: 'Recetas del recetario', value: kpis.recetas, icon: ChefHat, color: 'amber' },
         { label: 'Planificaciones guardadas', value: kpis.planificaciones, icon: ClipboardList, color: 'purple' },
     ];
-
     // Derivados del reporte
     const resumen = reporte?.resumen || null;
     const usoPorDia = reporte?.uso_presupuesto_por_dia || [];
@@ -219,12 +244,16 @@ export const ReportesView = () => {
     const sugerencias = reporte?.sugerencias || [];
     const porComedor = reporte?.por_comedor || [];
     const maxPct = Math.max(100, ...usoPorDia.map(u => u.pct_del_presupuesto || 0));
-
     // Selector de comedor (solo cuando el alcance permite varios)
     const comedoresDisponibles = useMemo(() => alcance?.comedores || [], [alcance]);
-
     const puedeElegirNivel = alcance && alcance.tipo_alcance !== 'comedor';
     const nivelesPermitidos = alcance?.niveles_permitidos || [];
+    // COM-77/78: segmentos disponibles según alcance avanzado + alcance ejecutivo
+    const segmentosDisponibles = [
+        ...(alcanceAv?.puede_com78 ? [{ clave: 'distrital', label: 'Supervisión distrital (COM-78)', icon: Building2 }] : []),
+        ...(alcanceAv?.puede_com77 ? [{ clave: 'operativos', label: 'Reportes operativos (COM-77)', icon: BarChart3 }] : []),
+        ...(!alcanceError ? [{ clave: 'ejecutivo', label: 'Resumen ejecutivo (COM-50)', icon: FileText }] : []),
+    ];
 
     return (
         <div className="animate-in fade-in duration-300">
@@ -242,11 +271,13 @@ export const ReportesView = () => {
                     <Calendar size={12} /> {new Date().toLocaleDateString('es-PE', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
                 </span>
             </div>
+
             {error && (
                 <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-center gap-2 text-sm">
                     <AlertCircle size={16} /> {error}
                 </div>
             )}
+
             {cargando ? (
                 <div className="p-8 text-center text-emerald-600"><Loader2 className="animate-spin mx-auto" size={28} /></div>
             ) : (
@@ -268,7 +299,6 @@ export const ReportesView = () => {
                             );
                         })}
                     </div>
-
                     {/* (A) Ventas del día */}
                     <div className="bg-white border border-slate-200 rounded-xl p-5">
                         <div className="flex flex-wrap justify-between items-center gap-2 mb-4">
@@ -307,222 +337,251 @@ export const ReportesView = () => {
                         )}
                     </div>
 
+                    {/* COM-77/78: selector de segmento */}
+                    {!cargandoAlcanceAv && segmentosDisponibles.length > 0 && (
+                        <div className="inline-flex rounded-lg border border-slate-200 overflow-hidden mt-6 mb-4">
+                            {segmentosDisponibles.map((s, i) => {
+                                const Icon = s.icon;
+                                return (
+                                    <button key={s.clave} onClick={() => setSegmento(s.clave)}
+                                        className={`px-3 py-1.5 text-xs font-semibold flex items-center gap-1 transition-colors ${i > 0 ? 'border-l border-slate-200' : ''} ${segmento === s.clave ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-100'}`}>
+                                        <Icon size={13} /> {s.label}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    )}
+
+                    {/* (C) COM-77: reportes operativos del comedor */}
+                    {segmento === 'operativos' && alcanceAv?.puede_com77 && (
+                        <div className="bg-white border border-slate-200 rounded-xl p-5">
+                            <h3 className="font-bold text-slate-800 flex items-center gap-2 mb-4">
+                                <BarChart3 size={18} className="text-emerald-600" /> Reportes operativos del comedor (COM-77)
+                            </h3>
+                            <ReportesComedorView alcance={alcanceAv} />
+                        </div>
+                    )}
+
+                    {/* (D) COM-78: supervisión distrital macro + drill-down */}
+                    {segmento === 'distrital' && alcanceAv?.puede_com78 && (
+                        <div className="bg-white border border-slate-200 rounded-xl p-5">
+                            <h3 className="font-bold text-slate-800 flex items-center gap-2 mb-4">
+                                <Building2 size={18} className="text-emerald-600" /> Supervisión distrital (COM-78)
+                            </h3>
+                            <ReportesMunicipioView alcance={alcanceAv} />
+                        </div>
+                    )}
+
                     {/* ============================================================
                         (B) RESUMEN EJECUTIVO Y RECOMENDACIONES (COM-50 v3 / HU-10)
                         ============================================================ */}
-                    <div className="bg-white border border-slate-200 rounded-xl p-5 mt-6">
-                        <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
-                            <h3 className="font-bold text-slate-800 flex items-center gap-2">
-                                <FileText size={18} className="text-emerald-600" /> Resumen ejecutivo y recomendaciones
-                            </h3>
-                        </div>
-
-                        {/* Estado: cargando alcance */}
-                        {cargandoAlcance && (
-                            <div className="p-8 text-center text-emerald-600">
-                                <Loader2 className="animate-spin mx-auto" size={26} />
-                                <p className="text-xs text-slate-500 mt-2">Resolviendo su alcance de reportería...</p>
+                    {segmento === 'ejecutivo' && (
+                        <div className="bg-white border border-slate-200 rounded-xl p-5 mt-6">
+                            <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
+                                <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                                    <FileText size={18} className="text-emerald-600" /> Resumen ejecutivo y recomendaciones
+                                </h3>
                             </div>
-                        )}
-
-                        {/* (B.1) Sin acceso: Admin de Sistema u Operativo */}
-                        {!cargandoAlcance && alcanceError && (
-                            <div className={`p-4 rounded-lg border text-sm flex items-start gap-2 ${
-                                alcanceError.status === 403 ? 'bg-slate-50 border-slate-200 text-slate-700' : 'bg-red-50 border-red-200 text-red-700'
-                            }`}>
-                                {alcanceError.status === 403 ? <AlertCircle size={18} className="shrink-0 mt-0.5 text-slate-500" /> : <AlertCircle size={18} className="shrink-0 mt-0.5" />}
-                                <div>
-                                    <p className="font-semibold">
-                                        {alcanceError.status === 403
-                                            ? (esAdminSistema
-                                                ? 'El Administrador de Sistemas no tiene reportes relacionados a comedores.'
-                                                : 'Su perfil no tiene acceso a reportería de comedores.')
-                                            : 'No se pudo determinar su alcance de reportería.'}
-                                    </p>
-                                    <p className="text-xs mt-1 text-slate-500">
-                                        {alcanceError.status === 403
-                                            ? (esAdminSistema
-                                                ? 'Los reportes ejecutivos están reservados a los perfiles Directivo y Municipal.'
-                                                : 'Solo los perfiles Directivo y Municipal pueden consultar reportes de comedores (HU-10).')
-                                            : alcanceError.message}
-                                    </p>
+                            {/* Estado: cargando alcance */}
+                            {cargandoAlcance && (
+                                <div className="p-8 text-center text-emerald-600">
+                                    <Loader2 className="animate-spin mx-auto" size={26} />
+                                    <p className="text-xs text-slate-500 mt-2">Resolviendo su alcance de reportería...</p>
                                 </div>
-                            </div>
-                        )}
-
-                        {/* (B.2) Directivo: nivel 'comedor' forzado, sin selectores de nivel/comedor */}
-                        {!cargandoAlcance && alcance && alcance.tipo_alcance === 'comedor' && (
-                            <div className="space-y-4">
-                                <div className="flex flex-wrap items-center gap-2">
-                                    <span className="px-2.5 py-1 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-full text-xs font-semibold flex items-center gap-1">
-                                        <Target size={12} /> Comedor asignado
-                                    </span>
-                                    <span className="text-sm font-bold text-slate-800">
-                                        {alcance.comedor_nombre || `Comedor #${alcance.comedor_fijo}`}
-                                    </span>
-                                    <select
-                                        value={planSel}
-                                        onChange={(e) => setPlanSel(e.target.value)}
-                                        className="ml-auto px-3 py-1.5 border border-slate-300 rounded-lg text-xs bg-white outline-none focus:ring-2 focus:ring-emerald-500"
-                                    >
-                                        <option value="">Plan vigente (automático)</option>
-                                        <optgroup label="Propuestas de menú">
-                                            {planes.propuestas.map(p => (
-                                                <option key={`c-${p.id}`} value={`candidata:${p.id}`}>
-                                                    #{p.id} · {p.etiqueta || p.variante} · {p.estado || '—'} · {String(p.fecha || '').slice(0, 10)}
-                                                </option>
-                                            ))}
-                                        </optgroup>
-                                        <optgroup label="Planificaciones guardadas">
-                                            {planes.planificaciones.map(p => (
-                                                <option key={`p-${p.id}`} value={`presupuesto:${p.id}`}>
-                                                    #{p.id} · semana {p.fecha_referencia || '—'} · {fmtS(p.costo_total_semana)}
-                                                </option>
-                                            ))}
-                                        </optgroup>
-                                    </select>
-                                    <button
-                                        onClick={cargarReporte}
-                                        disabled={cargandoReporte}
-                                        className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg transition-colors"
-                                        title="Recargar reporte"
-                                    >
-                                        {cargandoReporte ? <Loader2 className="animate-spin" size={15} /> : <RefreshCw size={15} />}
-                                    </button>
-                                </div>
-                                <ContenidoReporte
-                                    reporte={reporte}
-                                    cargandoReporte={cargandoReporte}
-                                    errorReporte={errorReporte}
-                                    resumen={resumen}
-                                    usoPorDia={usoPorDia}
-                                    menu={menu}
-                                    sugerencias={sugerencias}
-                                    maxPct={maxPct}
-                                    mostrarMenu={true}
-                                />
-                            </div>
-                        )}
-
-                        {/* (B.3) Municipal / macro_general: selector de nivel + selectores condicionales */}
-                        {!cargandoAlcance && alcance && alcance.tipo_alcance !== 'comedor' && (
-                            <div className="space-y-4">
-                                {/* Selector de nivel */}
-                                <div className="flex flex-wrap items-center gap-2">
-                                    <div className="inline-flex rounded-lg border border-slate-200 overflow-hidden">
-                                        {nivelesPermitidos.includes('macro') && (
-                                            <button
-                                                onClick={() => { setNivelSel('macro'); setPlanSel(''); }}
-                                                className={`px-3 py-1.5 text-xs font-semibold flex items-center gap-1 transition-colors ${
-                                                    nivelSel === 'macro' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-100'
-                                                }`}
-                                            >
-                                                <Building2 size={13} /> Macro
-                                            </button>
-                                        )}
-                                        {nivelesPermitidos.includes('zona') && (
-                                            <button
-                                                onClick={() => setNivelSel('zona')}
-                                                className={`px-3 py-1.5 text-xs font-semibold flex items-center gap-1 transition-colors border-x border-slate-200 ${
-                                                    nivelSel === 'zona' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-100'
-                                                }`}
-                                            >
-                                                <MapPin size={13} /> Zona
-                                            </button>
-                                        )}
-                                        {nivelesPermitidos.includes('comedor') && (
-                                            <button
-                                                onClick={() => setNivelSel('comedor')}
-                                                className={`px-3 py-1.5 text-xs font-semibold flex items-center gap-1 transition-colors ${
-                                                    nivelSel === 'comedor' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-100'
-                                                }`}
-                                            >
-                                                <Store size={13} /> Comedor
-                                            </button>
-                                        )}
+                            )}
+                            {/* (B.1) Sin acceso: Admin de Sistema u Operativo */}
+                            {!cargandoAlcance && alcanceError && (
+                                <div className={`p-4 rounded-lg border text-sm flex items-start gap-2 ${
+                                    alcanceError.status === 403 ? 'bg-slate-50 border-slate-200 text-slate-700' : 'bg-red-50 border-red-200 text-red-700'
+                                }`}>
+                                    {alcanceError.status === 403 ? <AlertCircle size={18} className="shrink-0 mt-0.5 text-slate-500" /> : <AlertCircle size={18} className="shrink-0 mt-0.5" />}
+                                    <div>
+                                        <p className="font-semibold">
+                                            {alcanceError.status === 403
+                                                ? (esAdminSistema
+                                                    ? 'El Administrador de Sistemas no tiene reportes relacionados a comedores.'
+                                                    : 'Su perfil no tiene acceso a reportería de comedores.')
+                                                : 'No se pudo determinar su alcance de reportería.'}
+                                        </p>
+                                        <p className="text-xs mt-1 text-slate-500">
+                                            {alcanceError.status === 403
+                                                ? (esAdminSistema
+                                                    ? 'Los reportes ejecutivos están reservados a los perfiles Directivo y Municipal.'
+                                                    : 'Solo los perfiles Directivo y Municipal pueden consultar reportes de comedores (HU-10).')
+                                                : alcanceError.message}
+                                        </p>
                                     </div>
-
-                                    {/* Selector de zona (solo nivel=zona) */}
-                                    {nivelSel === 'zona' && (
+                                </div>
+                            )}
+                            {/* (B.2) Directivo: nivel 'comedor' forzado, sin selectores de nivel/comedor */}
+                            {!cargandoAlcance && alcance && alcance.tipo_alcance === 'comedor' && (
+                                <div className="space-y-4">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <span className="px-2.5 py-1 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-full text-xs font-semibold flex items-center gap-1">
+                                            <Target size={12} /> Comedor asignado
+                                        </span>
+                                        <span className="text-sm font-bold text-slate-800">
+                                            {alcance.comedor_nombre || `Comedor #${alcance.comedor_fijo}`}
+                                        </span>
                                         <select
-                                            value={zonaSel}
-                                            onChange={(e) => setZonaSel(e.target.value)}
-                                            className="px-3 py-1.5 border border-slate-300 rounded-lg text-xs bg-white outline-none focus:ring-2 focus:ring-emerald-500"
+                                            value={planSel}
+                                            onChange={(e) => setPlanSel(e.target.value)}
+                                            className="ml-auto px-3 py-1.5 border border-slate-300 rounded-lg text-xs bg-white outline-none focus:ring-2 focus:ring-emerald-500"
                                         >
-                                            <option value="">Seleccionar zona...</option>
-                                            {(alcance.zonas || []).map(z => (
-                                                <option key={z} value={z}>{z}</option>
-                                            ))}
-                                        </select>
-                                    )}
-
-                                    {/* Selector de comedor (solo nivel=comedor) */}
-                                    {nivelSel === 'comedor' && (
-                                        <>
-                                            <select
-                                                value={comedorSel}
-                                                onChange={(e) => { setComedorSel(e.target.value); setPlanSel(''); }}
-                                                className="px-3 py-1.5 border border-slate-300 rounded-lg text-xs bg-white outline-none focus:ring-2 focus:ring-emerald-500"
-                                            >
-                                                <option value="">Seleccionar comedor...</option>
-                                                {comedoresDisponibles.map(c => (
-                                                    <option key={c.id} value={c.id}>
-                                                        {c.nombre}{c.zona ? ` · ${c.zona}` : ''}
+                                            <option value="">Plan vigente (automático)</option>
+                                            <optgroup label="Propuestas de menú">
+                                                {planes.propuestas.map(p => (
+                                                    <option key={`c-${p.id}`} value={`candidata:${p.id}`}>
+                                                        #{p.id} · {p.etiqueta || p.variante} · {p.estado || '—'} · {String(p.fecha || '').slice(0, 10)}
                                                     </option>
                                                 ))}
+                                            </optgroup>
+                                            <optgroup label="Planificaciones guardadas">
+                                                {planes.planificaciones.map(p => (
+                                                    <option key={`p-${p.id}`} value={`presupuesto:${p.id}`}>
+                                                        #{p.id} · semana {p.fecha_referencia || '—'} · {fmtS(p.costo_total_semana)}
+                                                    </option>
+                                                ))}
+                                            </optgroup>
+                                        </select>
+                                        <button
+                                            onClick={cargarReporte}
+                                            disabled={cargandoReporte}
+                                            className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg transition-colors"
+                                            title="Recargar reporte"
+                                        >
+                                            {cargandoReporte ? <Loader2 className="animate-spin" size={15} /> : <RefreshCw size={15} />}
+                                        </button>
+                                    </div>
+                                    <ContenidoReporte
+                                        reporte={reporte}
+                                        cargandoReporte={cargandoReporte}
+                                        errorReporte={errorReporte}
+                                        resumen={resumen}
+                                        usoPorDia={usoPorDia}
+                                        menu={menu}
+                                        sugerencias={sugerencias}
+                                        maxPct={maxPct}
+                                        mostrarMenu={true}
+                                    />
+                                </div>
+                            )}
+                            {/* (B.3) Municipal / macro_general: selector de nivel + selectores condicionales */}
+                            {!cargandoAlcance && alcance && alcance.tipo_alcance !== 'comedor' && (
+                                <div className="space-y-4">
+                                    {/* Selector de nivel */}
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <div className="inline-flex rounded-lg border border-slate-200 overflow-hidden">
+                                            {nivelesPermitidos.includes('macro') && (
+                                                <button
+                                                    onClick={() => { setNivelSel('macro'); setPlanSel(''); }}
+                                                    className={`px-3 py-1.5 text-xs font-semibold flex items-center gap-1 transition-colors ${
+                                                        nivelSel === 'macro' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-100'
+                                                    }`}
+                                                >
+                                                    <Building2 size={13} /> Macro
+                                                </button>
+                                            )}
+                                            {nivelesPermitidos.includes('zona') && (
+                                                <button
+                                                    onClick={() => setNivelSel('zona')}
+                                                    className={`px-3 py-1.5 text-xs font-semibold flex items-center gap-1 transition-colors border-x border-slate-200 ${
+                                                        nivelSel === 'zona' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-100'
+                                                    }`}
+                                                >
+                                                    <MapPin size={13} /> Zona
+                                                </button>
+                                            )}
+                                            {nivelesPermitidos.includes('comedor') && (
+                                                <button
+                                                    onClick={() => setNivelSel('comedor')}
+                                                    className={`px-3 py-1.5 text-xs font-semibold flex items-center gap-1 transition-colors ${
+                                                        nivelSel === 'comedor' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-100'
+                                                    }`}
+                                                >
+                                                    <Store size={13} /> Comedor
+                                                </button>
+                                            )}
+                                        </div>
+                                        {/* Selector de zona (solo nivel=zona) */}
+                                        {nivelSel === 'zona' && (
+                                            <select
+                                                value={zonaSel}
+                                                onChange={(e) => setZonaSel(e.target.value)}
+                                                className="px-3 py-1.5 border border-slate-300 rounded-lg text-xs bg-white outline-none focus:ring-2 focus:ring-emerald-500"
+                                            >
+                                                <option value="">Seleccionar zona...</option>
+                                                {(alcance.zonas || []).map(z => (
+                                                    <option key={z} value={z}>{z}</option>
+                                                ))}
                                             </select>
-                                            {comedorSel && (
+                                        )}
+                                        {/* Selector de comedor (solo nivel=comedor) */}
+                                        {nivelSel === 'comedor' && (
+                                            <>
                                                 <select
-                                                    value={planSel}
-                                                    onChange={(e) => setPlanSel(e.target.value)}
+                                                    value={comedorSel}
+                                                    onChange={(e) => { setComedorSel(e.target.value); setPlanSel(''); }}
                                                     className="px-3 py-1.5 border border-slate-300 rounded-lg text-xs bg-white outline-none focus:ring-2 focus:ring-emerald-500"
                                                 >
-                                                    <option value="">Plan vigente (automático)</option>
-                                                    <optgroup label="Propuestas de menú">
-                                                        {planes.propuestas.map(p => (
-                                                            <option key={`c-${p.id}`} value={`candidata:${p.id}`}>
-                                                                #{p.id} · {p.etiqueta || p.variante} · {p.estado || '—'} · {String(p.fecha || '').slice(0, 10)}
-                                                            </option>
-                                                        ))}
-                                                    </optgroup>
-                                                    <optgroup label="Planificaciones guardadas">
-                                                        {planes.planificaciones.map(p => (
-                                                            <option key={`p-${p.id}`} value={`presupuesto:${p.id}`}>
-                                                                #{p.id} · semana {p.fecha_referencia || '—'} · {fmtS(p.costo_total_semana)}
-                                                            </option>
-                                                        ))}
-                                                    </optgroup>
+                                                    <option value="">Seleccionar comedor...</option>
+                                                    {comedoresDisponibles.map(c => (
+                                                        <option key={c.id} value={c.id}>
+                                                            {c.nombre}{c.zona ? ` · ${c.zona}` : ''}
+                                                        </option>
+                                                    ))}
                                                 </select>
-                                            )}
-                                        </>
-                                    )}
-
-                                    <button
-                                        onClick={cargarReporte}
-                                        disabled={cargandoReporte || (nivelSel === 'comedor' && !comedorSel) || (nivelSel === 'zona' && !zonaSel)}
-                                        className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg transition-colors disabled:opacity-50"
-                                        title="Recargar reporte"
-                                    >
-                                        {cargandoReporte ? <Loader2 className="animate-spin" size={15} /> : <RefreshCw size={15} />}
-                                    </button>
+                                                {comedorSel && (
+                                                    <select
+                                                        value={planSel}
+                                                        onChange={(e) => setPlanSel(e.target.value)}
+                                                        className="px-3 py-1.5 border border-slate-300 rounded-lg text-xs bg-white outline-none focus:ring-2 focus:ring-emerald-500"
+                                                    >
+                                                        <option value="">Plan vigente (automático)</option>
+                                                        <optgroup label="Propuestas de menú">
+                                                            {planes.propuestas.map(p => (
+                                                                <option key={`c-${p.id}`} value={`candidata:${p.id}`}>
+                                                                    #{p.id} · {p.etiqueta || p.variante} · {p.estado || '—'} · {String(p.fecha || '').slice(0, 10)}
+                                                                </option>
+                                                            ))}
+                                                        </optgroup>
+                                                        <optgroup label="Planificaciones guardadas">
+                                                            {planes.planificaciones.map(p => (
+                                                                <option key={`p-${p.id}`} value={`presupuesto:${p.id}`}>
+                                                                    #{p.id} · semana {p.fecha_referencia || '—'} · {fmtS(p.costo_total_semana)}
+                                                                </option>
+                                                            ))}
+                                                        </optgroup>
+                                                    </select>
+                                                )}
+                                            </>
+                                        )}
+                                        <button
+                                            onClick={cargarReporte}
+                                            disabled={cargandoReporte || (nivelSel === 'comedor' && !comedorSel) || (nivelSel === 'zona' && !zonaSel)}
+                                            className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg transition-colors disabled:opacity-50"
+                                            title="Recargar reporte"
+                                        >
+                                            {cargandoReporte ? <Loader2 className="animate-spin" size={15} /> : <RefreshCw size={15} />}
+                                        </button>
+                                    </div>
+                                    <ContenidoReporte
+                                        reporte={reporte}
+                                        cargandoReporte={cargandoReporte}
+                                        errorReporte={errorReporte}
+                                        resumen={resumen}
+                                        usoPorDia={usoPorDia}
+                                        menu={menu}
+                                        sugerencias={sugerencias}
+                                        porComedor={porComedor}
+                                        maxPct={maxPct}
+                                        mostrarMenu={nivelSel === 'comedor'}
+                                        nivelSel={nivelSel}
+                                    />
                                 </div>
-
-                                <ContenidoReporte
-                                    reporte={reporte}
-                                    cargandoReporte={cargandoReporte}
-                                    errorReporte={errorReporte}
-                                    resumen={resumen}
-                                    usoPorDia={usoPorDia}
-                                    menu={menu}
-                                    sugerencias={sugerencias}
-                                    porComedor={porComedor}
-                                    maxPct={maxPct}
-                                    mostrarMenu={nivelSel === 'comedor'}
-                                    nivelSel={nivelSel}
-                                />
-                            </div>
-                        )}
-                    </div>
+                            )}
+                        </div>
+                    )}
                 </>
             )}
         </div>
@@ -551,9 +610,7 @@ const ContenidoReporte = ({
             Aún no hay datos para el nivel seleccionado.
         </p>;
     }
-
     const esNivelComedor = reporte.nivel === 'comedor';
-
     return (
         <div className="space-y-6">
             {/* Fuente y alcance */}
@@ -575,13 +632,11 @@ const ContenidoReporte = ({
                     <span className="px-2 py-0.5 bg-red-100 text-red-700 rounded-full font-bold">Fuera del presupuesto</span>
                 )}
             </div>
-
             {reporte.nota_sugerencias && (
                 <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-sm flex items-center gap-2">
                     <AlertCircle size={15} /> {reporte.nota_sugerencias}
                 </div>
             )}
-
             {/* Tarjetas de resumen ejecutivo */}
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
                 <div className="border border-slate-200 rounded-xl p-3">
@@ -607,7 +662,6 @@ const ContenidoReporte = ({
                     <p className="text-lg font-bold text-slate-800">{fmtS(resumen?.presupuesto_semanal)}</p>
                 </div>
             </div>
-
             {/* Uso del presupuesto por día */}
             <div>
                 <h4 className="text-sm font-bold text-slate-700 mb-3">
@@ -641,7 +695,6 @@ const ContenidoReporte = ({
                     </div>
                 )}
             </div>
-
             {/* Menú del plan (solo cuando el reporte es de un comedor específico) */}
             {mostrarMenu && menu.length > 0 && (
                 <div>
@@ -674,7 +727,6 @@ const ContenidoReporte = ({
                     </div>
                 </div>
             )}
-
             {/* Tabla agregada por_comedor (solo macro/zona) */}
             {!esNivelComedor && porComedor.length > 0 && (
                 <div>
@@ -725,7 +777,6 @@ const ContenidoReporte = ({
                     </div>
                 </div>
             )}
-
             {/* Sugerencias automáticas */}
             <div>
                 <h4 className="text-sm font-bold text-slate-700 mb-2 flex items-center gap-1">
