@@ -46,7 +46,7 @@ COM-61 / HU-11: VARIEDAD ENTRE SEMANAS:
       repeticiones_semana_anterior, variedad_pct (% de días con plato nuevo) y
       permitir_repetidos. Todo viaja en el JSONB resumen/menu (criterio D7: sin DDL).
     * La guarda anti-repetición COM-72 del día forzado ahora prefiere frescas.
-COM-74 (este archivo): COMENSALES PROYECTADOS POR DÍA:
+COM-74: COMENSALES PROYECTADOS POR DÍA:
     * _comensales_por_dia(): para cada día de cocina consulta la PREDICCIÓN IA
       (ai_engine.predecir_demanda_raciones con la fecha real del día) + cocineras
       (PLANIFICACION_COCINERAS, default 20). Si sin_datos=True -> fallback a
@@ -59,12 +59,20 @@ COM-74 (este archivo): COMENSALES PROYECTADOS POR DÍA:
       planificacion_dia.
     * Resumen agrega dias_con_prediccion_ia y total_comensales_dia pasa a ser el
       promedio real de los días generados (clave conservada por compatibilidad).
-    Ningún helper, clave de payload ni bloque de trazabilidad anterior se elimina.
+COM-75 (este archivo): JERARQUÍA ÚNICA DE PRECIOS centralizada en precios_insumos
+    (scraper día > manual > RF > scraper último). El motor la consume automáticamente
+    vía precios_por_gramo_por_insumo / mejor_opcion_ingrediente; aquí solo se:
+    * actualiza el docstring de _opcion_con_prediccion con el nuevo orden,
+    * calcula UNA sola vez por generación el diagnóstico
+      ingredientes_requieren_precio_manual (insumos nuevos sin histórico que no se
+      pueden predecir) y se expone en el payload para que la UI PROMPTEE al usuario
+      asignar un precio manual temporal hasta juntar datos para predecir.
+Ningún helper, clave de payload ni bloque de trazabilidad anterior se elimina.
 Uso: Importado por routers/propuestas_menu.py (generar_tres_propuestas,
-     obtener_candidatas_sesion, obtener_candidata). Todas las funciones reciben un
-     cursor psycopg2 (RealDictCursor); el caller gestiona la transacción.
+obtener_candidatas_sesion, obtener_candidata). Todas las funciones reciben un cursor
+psycopg2 (RealDictCursor); el caller gestiona la transacción.
 Referencia: tickets COM-8 / COM-37 / COM-47 / COM-50 / COM-59 / COM-60 / COM-71 /
-COM-72 / COM-61 / COM-74 (solo trazabilidad).
+COM-72 / COM-61 / COM-74 / COM-75 (solo trazabilidad).
 """
 import json
 import hashlib
@@ -77,6 +85,7 @@ from precios_insumos import (
     mejor_opcion_ingrediente,
     gramos_por_unidad_estandar,
     gramos_por_unidad_compra,
+    ingredientes_requieren_precio_manual,   # COM-75: diagnóstico para prompt de manual
 )
 # COM-37 v7: predicción RF compartida con el optimizador (misma fuente de verdad)
 from optimizador import predecir_precio_con_confianza
@@ -337,9 +346,14 @@ def _cargar_equivalencias(cur):
 
 def _opcion_con_prediccion(cur, ing_id, fecha, precios_insumo, peso_estimado_g):
     """
-    COM-37 v7: mejor opción de precio del ingrediente con la MISMA jerarquía que
-    Evaluar: scraper (día o última corrida) > manual insumo > legacy ingrediente >
-    predicción RF (menor costo entre los insumos del ingrediente).
+    COM-37 v7 + COM-75: mejor opción de precio del ingrediente. Con la jerarquía
+    única centralizada en precios_insumos (scraper día > manual > RF > scraper
+    último), `mejor_opcion_ingrediente` YA devuelve la fuente correcta (incluida
+    RF) desde el mapa. El bloque RF explícito se conserva como DOBLE SEGURO por si
+    el mapa viniera vacío (p.ej. caller pasó precios_insumo pre-filtrado): en ese
+    caso se intenta RF directamente sobre los insumos del ingrediente, respetando
+    que un manual vigente siempre pesa más que la IA (el manual ya estaría en el
+    mapa en el paso 2).
     """
     opc = mejor_opcion_ingrediente(cur, ing_id, fecha, precios_insumo)
     if opc:
@@ -460,12 +474,13 @@ def _recetas_semana_anterior(cur, comedor_id: int, fecha_inicio: date):
 # ==========================================
 def _mapa_costos_dia(cur, recetas, fecha: date, comedor_id=None, stock_override=None):
     """
-    COM-71: cuerpo generalizado del costeo COM-59A/COM-60. Calcula, PARA UNA FECHA
-    DADA, el costo por ración de cada receta y devuelve un mapa
+    COM-71 + COM-75: cuerpo generalizado del costeo COM-59A/COM-60. Calcula, PARA UNA
+    FECHA DADA, el costo por ración de cada receta y devuelve un mapa
     {receta_id: {costo_racion, costo_racion_bruto, ahorro_subsidio_racion,
     lineas_subvencionadas, fe_por_sol, detalle_gramos_racion, ingredientes,
     precio_completo, ingredientes_sin_precio}} SIN mutar `recetas`.
-    * D3: `fecha` es el día real de cocina (precios scraper/predicción de ese día).
+    * D3: `fecha` es el día real de cocina; COM-75: los precios de ese día salen del
+      mapa jerarquizado (scraper día > manual > RF > scraper último).
     * D5: si `stock_override` se provee (gramos remanentes del mes), el descuento de
       subsidio se hace contra ese stock vía costo_con_subsidio(stock_inicial=...);
       si es None, se usa el stock completo del mes (comportamiento COM-59A).
@@ -662,23 +677,19 @@ def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
                            presupuesto_semanal, fecha_inicio, dias,
                            costos_por_dia, comensales_por_dia, permitir_repetidos=False):
     """
-    COM-8 v2 + COM-60 + COM-71 + COM-72 + COM-61 + COM-74: Greedy por DÍA SELECCIONADO.
+    COM-8 v2 + COM-60 + COM-71 + COM-72 + COM-61 + COM-74 + COM-75: Greedy por DÍA.
     * COM-60: cuota anti-anemia por deadline y desempate Fe/S/.
     * COM-71 (D2): solo candidatas costeables y con precio completo ese día.
     * COM-71 (D3): scoring y presupuesto con el costo del día (costos_por_dia[d]).
-    * COM-71 (D4): tope diario = flex × ((límite − acumulado) / días restantes); si no
-      cabe en el tope pero sí en el límite semanal, se permite con flex_excedido=True.
+    * COM-71 (D4): tope diario = flex × ((límite − acumulado) / días restantes).
     * COM-71 (D5): el costo del día ya viene descontado contra stock REMANENTE.
     * COM-72: guarda anti-repetición en día forzado (cluster singleton agotado).
-    * COM-61 (HU-11): con permitir_repetidos=False, el pool diario prefiere recetas
-      FRESCAS (no cocinadas la semana VIGENTE anterior); las repetidas solo entran si
-      el pool del cluster objetivo se queda sin frescas (repetición INEVITABLE,
-      marcada por día). Con permitir_repetidos=True no se filtra, pero se audita.
-    * COM-74: el costo del día se multiplica por el TOTAL PROYECTADO del día
-      (predicción IA + cocineras) y la recolección proyectada usa solo pagantes
-      (Social/Afiliado/Normal) × precios vigentes. Cada día del menú persiste sus
-      comensales por tipo, total, pagantes y fuente_comensales para auditoría y
-      para que la selección los grabe en planificacion_dia.
+    * COM-61 (HU-11): pool diario prefiere recetas FRESCAS; repetidas solo si no hay
+      alternativas (inevitable, auditada) o con permitir_repetidos=True.
+    * COM-74: costo del día × total proyectado (IA + cocineras); recolección solo
+      pagantes; cada día persiste comensales por tipo y fuente_comensales.
+    * COM-75: los precios del día salen del mapa jerarquizado de precios_insumos
+      (scraper día > manual > RF > scraper último), coherente con Recetario y lista.
     Retorna (menu, sobrepaso, conteo_anemia).
     Trazabilidad: firma anterior sin costos_por_dia/comensales_por_dia comentada abajo.
     """
@@ -882,20 +893,19 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
                             permitir_repetidos: bool = False):
     """
     COM-8 v2/v3 + COM-37 + COM-47 v3 + COM-50 v3 + COM-59A + COM-60 + COM-71 +
-    COM-72 + COM-61 + COM-74: Genera y persiste las 3 propuestas de menú semanal para
-    los DÍAS DE COCINA indicados.
-    COM-74: los comensales de cada día vienen de la PREDICCIÓN IA (con cocineras y
-    fallback a parámetros marcado como fuente='parametro'); el costo del día usa el
-    total con cocineras y la recolección solo pagantes.
-    COM-71: (D2) filtra no costeables y las audita; (D3) costeo por día con fecha
-    real; (D5) subsidio contra stock REMANENTE; (D4) tope diario FLEX.
-    COM-72 (HOTFIX): el mapa de costos del primer día (que rellena `ingredientes` y
-    `precio_completo`) se aplica ANTES de la validación R1/R2.
-    COM-61 (HU-11): `permitir_repetidos` (default False, lo pone el checkbox de la UI
-    tras confirmación) controla la exclusión de los platos del menú VIGENTE de la
-    semana anterior (_recetas_semana_anterior, criterio D1/D2). Cada variante audita
-    en su resumen: semana_anterior_fecha, repeticiones_semana_anterior, variedad_pct
-    y permitir_repetidos (criterio D7: todo en JSONB, sin cambios de esquema).
+    COM-72 + COM-61 + COM-74 + COM-75: Genera y persiste las 3 propuestas de menú
+    semanal para los DÍAS DE COCINA indicados.
+    COM-75: los precios de cada día salen de la jerarquía única de precios_insumos
+    (scraper día > manual > RF > scraper último); se expone además la clave
+    'ingredientes_requieren_precio_manual' con los insumos nuevos sin histórico que
+    no se pueden predecir, para que la UI PROMPTEE al usuario a asignar un precio
+    manual temporal hasta juntar datos suficientes para predecir.
+    COM-74: comensales por día = predicción IA + cocineras; costo con cocineras,
+    recolección solo pagantes.
+    COM-71: (D2) filtra no costeables; (D3) costeo por día; (D5) subsidio contra
+    stock REMANENTE; (D4) tope diario FLEX.
+    COM-72 (HOTFIX): primer_mapa ANTES de validar R1/R2.
+    COM-61 (HU-11): permitir_repetidos controla exclusión de platos de la semana anterior.
     COM-60: auditoría de cuota anti-anemia por variante.
     COM-59A: recolección con precios vigentes y validación del margen semanal objetivo.
     """
@@ -919,6 +929,13 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
     fecha_inicio = _lunes_de(fecha_referencia)
     # COM-74 (D1): comensales proyectados por día (IA + cocineras) ANTES del costeo
     comensales_por_dia = _comensales_por_dia(cur, params, fecha_inicio, dias)
+    # COM-75: diagnóstico UNA sola vez por generación (insumos nuevos sin fuente de
+    # precio) para que la UI promptee asignar precio manual temporal.
+    try:
+        requieren_manual = ingredientes_requieren_precio_manual(cur, fecha_inicio)
+    except Exception as e:
+        print(f"[COM-75] No se pudo diagnosticar precios manuales requeridos: {e}")
+        requieren_manual = []
     # COM-71 (D3/D5): stock remanente por mes involucrado y mapa de costos por día
     meses = sorted({((fecha_inicio + timedelta(days=d - 1)).year,
                      (fecha_inicio + timedelta(days=d - 1)).month) for d in dias})
@@ -1124,6 +1141,8 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
         'permitir_repetidos': bool(permitir_repetidos),
         # COM-74: proyección de comensales usada (transparencia para la UI)
         'comensales_por_dia': comensales_por_dia,
+        # COM-75: insumos nuevos sin histórico que requieren precio manual temporal
+        'ingredientes_requieren_precio_manual': requieren_manual,
     }
 
 

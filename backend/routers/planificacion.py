@@ -23,10 +23,19 @@ El resumen incluye el bloque 'subsidio' (mes, comedor, ahorro y costo total).
 Regla v1 (documentada): la lista cubre contra el stock mensual COMPLETO; el
 control acumulado entre semanas del mismo mes vive en el reporte de uso
 (GET /subsidio/reporte-uso, COM-69), que alerta si el consumo supera el stock.
-COM-75 (este archivo): FIX de correspondencia ingrediente->insumo en la lista de
-compras. Ahora usa precios_por_gramo_por_insumo() para buscar precios por insumo_id
-específico vinculado en equivalencias activas, en lugar de precios_por_gramo_por_ingrediente()
-que busca por ingrediente_id. También limpia el sufijo "(manual)" de los nombres.
+COM-75 (este archivo): FIX de correspondencia ingrediente->insumo y de precios:
+    * El insumo de cada ítem se toma de la EQUIVALENCIA ACTIVA (ingrediente + unidad
+      de uso de la receta), no del primer insumo por ID; fallback: insumo con
+      histórico de precio más reciente.
+    * El costo usa el precio del INSUMO ESPECÍFICO vinculado (precios_por_gramo_por_insumo,
+      jerarquía COM-75: scraper día > manual > RF > scraper último); fallback al mejor
+      precio del ingrediente solo si el insumo no está en el mapa.
+    * Los nombres se limpian del sufijo "(manual)" para presentación (_limpiar_nombre_insumo).
+    * Se expone 'ingredientes_requieren_precio_manual' (calculado UNA sola vez, no
+      dentro del bucle) para que la UI promptee asignar precio manual temporal a
+      insumos nuevos sin histórico.
+    * Cada ítem expone 'fuente_precio' para auditoría (SCRAPER_DIA / MANUAL_PERIODO /
+      PREDICHO / SCRAPER_ULTIMO / LEGACY_INGREDIENTE / None).
 Trazabilidad: el formateo anterior sin subsidio queda comentado al final.
 Uso: Registrado en main.py con prefijo /api/v1.
 Referencia: tickets COM-65 / COM-67 / COM-69 / COM-75 (solo trazabilidad).
@@ -36,10 +45,14 @@ from datetime import date, datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from psycopg2.extras import RealDictCursor
 from database import get_db
-# COM-69: stock del subsidio del mes (gramos/ml base por ingrediente) y precios por gramo
+# COM-69: stock del subsidio del mes (gramos/ml base por ingrediente)
 from subsidio_motor import subsidio_gramos_del_mes
-# COM-75: usar precios_por_gramo_por_insumo para buscar por insumo_id específico
-from precios_insumos import precios_por_gramo_por_insumo
+# COM-75: mapa jerarquizado por insumo + diagnóstico de insumos sin fuente de precio
+from precios_insumos import (
+    precios_por_gramo_por_insumo,
+    ingredientes_requieren_precio_manual,
+)
+
 router = APIRouter(prefix="/planificaciones", tags=["Planificaciones"])
 
 @router.get("")
@@ -133,7 +146,6 @@ def _gramos_de_ingrediente(cur, ing_id, unidad_receta_id, cantidad_total_receta)
     row = cur.fetchone()
     if row:
         return cantidad_total_receta * float(row['gramos_por_unidad_uso']), 'equivalencia'
-    
     cur.execute("""
         SELECT um.factor_a_base, um.tipo_magnitud
         FROM unidades_medida um
@@ -142,7 +154,6 @@ def _gramos_de_ingrediente(cur, ing_id, unidad_receta_id, cantidad_total_receta)
     um = cur.fetchone()
     if um and um['tipo_magnitud'] in ('masa', 'volumen'):
         return cantidad_total_receta * float(um['factor_a_base']), 'factor'
-    
     cur.execute("SELECT peso_estimado_g FROM ingredientes WHERE id = %s;", (ing_id,))
     ing = cur.fetchone()
     peso = float(ing['peso_estimado_g']) if ing and ing['peso_estimado_g'] else 10.0
@@ -185,16 +196,16 @@ def generar_lista_compras(
     db=Depends(get_db)
 ):
     """
-    COM-67 v2 + COM-69 + COM-75: lista de compras consolidada (semanal o por día) con unidades
-    reales de mercado y cobertura de SUBSIDIO (Solución B):
+    COM-67 v2 + COM-69 + COM-75: lista de compras consolidada (semanal o por día) con
+    unidades reales de mercado y cobertura de SUBSIDIO (Solución B):
     1) requerido en gramos/ml base por ingrediente (equivalencias -> factor -> peso);
     2) COM-69: cubierto = min(requerido, stock del subsidio del mes del comedor);
        compra = requerido - cubierto; el costo estimado va SOLO sobre la compra;
     3) conversión a unidad de compra del insumo (kg/L/und) para mostrar cantidades;
     4) agrupación por insumo con días de uso.
-    COM-75: FIX de correspondencia ingrediente->insumo. Ahora usa precios_por_gramo_por_insumo()
-    para buscar precios por insumo_id específico vinculado en equivalencias activas.
-    También limpia el sufijo "(manual)" de los nombres para presentación.
+    COM-75: el insumo de cada ítem sale de la EQUIVALENCIA ACTIVA y su precio del mapa
+    jerarquizado por insumo_id (scraper día > manual > RF > scraper último); nombres
+    limpios de "(manual)"; se expone ingredientes_requieren_precio_manual y fuente_precio.
     Si no se envía comedor_id, se comporta exactamente como COM-67 v2 (sin subsidio).
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
@@ -225,7 +236,6 @@ def generar_lista_compras(
         for dia_plan in dias_planificados:
             receta_id = dia_plan['receta_id']
             total_comensales = dia_plan['total_comensales']
-            
             cur.execute("SELECT raciones FROM recetas_almuerzo WHERE id = %s", (receta_id,))
             rec = cur.fetchone()
             raciones_receta = rec['raciones'] if rec and rec['raciones'] and rec['raciones'] > 0 else 1
@@ -248,7 +258,7 @@ def generar_lista_compras(
                 gramos, _origen = _gramos_de_ingrediente(
                     cur, ing_id, ing['unidad_receta_id'], cantidad_total_receta)
 
-                # COM-75: Buscar el insumo vinculado en la equivalencia activa
+                # COM-75: insumo vinculado en la EQUIVALENCIA ACTIVA (ingrediente + unidad de uso)
                 cur.execute("""
                     SELECT ie.insumo_id
                     FROM ingredientes_equivalencias ie
@@ -258,11 +268,9 @@ def generar_lista_compras(
                     ORDER BY ie.fecha_registro DESC
                     LIMIT 1;
                 """, (ing_id, ing['unidad_receta_id']))
-                
                 equiv_row = cur.fetchone()
-                
+
                 if equiv_row:
-                    # Usar el insumo de la equivalencia activa
                     cur.execute("""
                         SELECT ins.id AS insumo_id, ins.nombre AS insumo_nombre,
                                ins.unidad_medida_id AS unidad_compra_id
@@ -271,7 +279,7 @@ def generar_lista_compras(
                     """, (equiv_row['insumo_id'],))
                     insumo = cur.fetchone()
                 else:
-                    # Fallback: buscar insumo con precio disponible
+                    # Fallback COM-75: insumo del ingrediente con histórico de precio más reciente
                     cur.execute("""
                         SELECT ins.id AS insumo_id, ins.nombre AS insumo_nombre,
                                ins.unidad_medida_id AS unidad_compra_id
@@ -286,18 +294,19 @@ def generar_lista_compras(
 
                 if insumo:
                     clave = ('insumo', insumo['insumo_id'])
-                    # COM-75: limpiar nombre "(manual)" para presentación
                     nombre = _limpiar_nombre_insumo(insumo['insumo_nombre'])
                     unidad_compra_id = insumo['unidad_compra_id']
+                    insumo_id = insumo['insumo_id']
                 else:
                     clave = ('ingrediente', ing_id)
                     nombre = _limpiar_nombre_insumo(ing['ingrediente_nombre'])
                     unidad_compra_id = None
+                    insumo_id = None
 
                 if clave not in lista_compras:
                     lista_compras[clave] = {
                         'ingrediente_id': ing_id,
-                        'insumo_id': insumo['insumo_id'] if insumo else None,
+                        'insumo_id': insumo_id,
                         'unidad_compra_id': unidad_compra_id,
                         'nombre': nombre,
                         'gramos': 0.0,
@@ -309,7 +318,7 @@ def generar_lista_compras(
                     lista_compras[clave]['dias_uso'].append(dia_plan['dia_nombre'])
 
         # ------------------------------------------------------------------
-        # COM-69 + COM-75: stock del subsidio del mes y precios por insumo
+        # COM-69 + COM-75: stock del subsidio del mes y mapa jerarquizado de precios
         # ------------------------------------------------------------------
         stock = {}
         if comedor_id:
@@ -318,14 +327,32 @@ def generar_lista_compras(
             except Exception as e:
                 print(f"[COM-69] No se pudo leer el subsidio del mes: {e}")
                 stock = {}
-        
-        # COM-75: usar precios_por_gramo_por_insumo en lugar de precios_por_gramo_por_ingrediente
         try:
             precios_insumo_map = precios_por_gramo_por_insumo(
                 cur, fecha_ref.isoformat(), fallback_ultima_fecha=True) or {}
         except Exception as e:
             print(f"[COM-75] No se pudieron leer precios por insumo: {e}")
             precios_insumo_map = {}
+
+        # COM-75: mejor ppg por ingrediente derivado del MISMO mapa (sin recalcular RF):
+        # para fallback cuando el insumo específico no está en el mapa.
+        cur.execute("SELECT id, ingrediente_id FROM insumos WHERE ingrediente_id IS NOT NULL;")
+        ing_de_insumo = {r['id']: r['ingrediente_id'] for r in cur.fetchall()}
+        mejor_por_ing = {}
+        for ins_id, opc in precios_insumo_map.items():
+            ing_id = ing_de_insumo.get(ins_id)
+            if ing_id is None:
+                continue
+            act = mejor_por_ing.get(ing_id)
+            if act is None or opc['ppg'] < act['ppg']:
+                mejor_por_ing[ing_id] = opc
+
+        # COM-75: diagnóstico UNA sola vez (fuera del bucle de ítems)
+        try:
+            requieren_manual = ingredientes_requieren_precio_manual(cur, fecha_ref)
+        except Exception as e:
+            print(f"[COM-75] No se pudo diagnosticar precios manuales: {e}")
+            requieren_manual = []
 
         lista_formateada = []
         items_subsididados = 0
@@ -346,17 +373,15 @@ def generar_lista_compras(
             if subsidio_completo or subsidio_parcial:
                 items_subsididados += 1
 
-            # COM-75: buscar precio por insumo_id si existe, sino por ingrediente_id
-            ppg = None
-            if insumo_id and insumo_id in precios_insumo_map:
-                ppg = precios_insumo_map[insumo_id].get('ppg')
-            else:
-                # Fallback: buscar en cualquier insumo del ingrediente
-                for ins_id, precio_data in precios_insumo_map.items():
-                    if precio_data.get('ingrediente_id') == ing_id:
-                        ppg = precio_data.get('ppg')
-                        break
-            
+            # COM-75: precio del INSUMO ESPECÍFICO vinculado; fallback al mejor del ingrediente
+            opc = None
+            if insumo_id is not None and insumo_id in precios_insumo_map:
+                opc = precios_insumo_map[insumo_id]
+            elif ing_id in mejor_por_ing:
+                opc = mejor_por_ing[ing_id]
+            ppg = opc['ppg'] if opc else None
+            fuente_precio = opc['fuente'] if opc else None
+
             costo_estimado = round(compra * ppg, 2) if (ppg is not None and compra > 0) else None
             ahorro_estimado = round(cubierto * ppg, 2) if (ppg is not None and cubierto > 0) else None
             if costo_estimado:
@@ -393,6 +418,8 @@ def generar_lista_compras(
                 'cantidad': _redondear(cant_compra, unidad),
                 'unidad': unidad,
                 'dias_uso': data['dias_uso'],
+                # COM-75: fuente del precio usado (auditoría: scraper día/manual/RF/último)
+                'fuente_precio': fuente_precio,
                 # COM-69: campos de subsidio para la UI (badge SUBSIDIADO en rojo)
                 'cantidad_requerida': _redondear(cant_req, unidad),
                 'cantidad_subsidio': _redondear(cant_subsidio, unidad),
@@ -419,6 +446,8 @@ def generar_lista_compras(
                 'ahorro_total_estimado': round(ahorro_total, 2),
                 'costo_total_compra_estimado': round(costo_total_compra, 2),
             },
+            # COM-75: insumos nuevos sin histórico que requieren precio manual temporal
+            'ingredientes_requieren_precio_manual': requieren_manual,
         }
     finally:
         cur.close()
