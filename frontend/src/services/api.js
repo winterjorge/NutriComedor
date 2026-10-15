@@ -1206,4 +1206,43 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al consultar el historial del scraper'));
         return response.json();
     }
+
+    // ==========================================
+    // COM-77: REPORTES OPERATIVOS DEL COMEDOR (y alcance unificado COM-77/78)
+    // ==========================================
+    getAlcanceReportesAvanzados: async (usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/reportes-avanzados/alcance?usuario_solicitante_id=${usuarioSolicitanteId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener alcance de reportes'));
+        return response.json();
+    },
+    getReporteEstadoResultados: async (params) => {
+        const qs = new URLSearchParams({ usuario_solicitante_id: params.usuario_solicitante_id, comedor_id: params.comedor_id, anio: params.anio, mes: params.mes });
+        const response = await fetch(`${API_BASE}/reportes-avanzados/estado-resultados?${qs}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar estado de resultados'));
+        return response.json();
+    },
+    getReporteConsumoSubsidio: async (params) => {
+        const qs = new URLSearchParams({ usuario_solicitante_id: params.usuario_solicitante_id, comedor_id: params.comedor_id, anio: params.anio, mes: params.mes });
+        const response = await fetch(`${API_BASE}/reportes-avanzados/consumo-subsidio?${qs}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar tablero de subsidio'));
+        return response.json();
+    },
+    getReporteInteligenciaCompras: async (params) => {
+        const qs = new URLSearchParams({ usuario_solicitante_id: params.usuario_solicitante_id, comedor_id: params.comedor_id, anio: params.anio, mes: params.mes });
+        const response = await fetch(`${API_BASE}/reportes-avanzados/inteligencia-compras?${qs}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar inteligencia de compras'));
+        return response.json();
+    },
+    getReporteMermaDemanda: async (params) => {
+        const qs = new URLSearchParams({ usuario_solicitante_id: params.usuario_solicitante_id, comedor_id: params.comedor_id, anio: params.anio, mes: params.mes });
+        const response = await fetch(`${API_BASE}/reportes-avanzados/merma-demanda?${qs}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar análisis de merma'));
+        return response.json();
+    },
+    getReporteSemaforoNutricional: async (params) => {
+        const qs = new URLSearchParams({ usuario_solicitante_id: params.usuario_solicitante_id, comedor_id: params.comedor_id, anio: params.anio, mes: params.mes });
+        const response = await fetch(`${API_BASE}/reportes-avanzados/semaforo-nutricional?${qs}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar semáforo nutricional'));
+        return response.json();
+    },
 };

@@ -50,6 +50,7 @@ from routers import (
     reportes_gestion,    # COM-50: resumen ejecutivo y recomendaciones (alcances por perfil)
     subsidio,            # COM-59A: subsidio mensual de víveres por comedor
     precios_venta,       # COM-59A: precios de venta con historial (solo Admin de Sistemas)
+    reportes_avanzados,  # COM-77: reportes operativos del comedor (y alcance COM-78)
     scraper_admin,       # COM-43: ejecución web/catch-up del scraper SISAP (solo Admin)
 )
 # Asegurado de esquema dinámico (parámetros, planificación, raciones, seguridad,
@@ -105,6 +106,7 @@ app.include_router(ingredientes_admin.router, prefix="/api/v1")  # COM-37
 app.include_router(reportes_gestion.router, prefix="/api/v1")    # COM-50
 app.include_router(subsidio.router, prefix="/api/v1")            # COM-59A
 app.include_router(precios_venta.router, prefix="/api/v1")       # COM-59A
+app.include_router(reportes_avanzados.router, prefix="/api/v1")   # COM-77
 app.include_router(scraper_admin.router, prefix="/api/v1")   # COM-43
 # COM-39 fix (trazabilidad): posición original del include de directivos, comentada.
 # app.include_router(directivos.router, prefix="/api/v1")     # COM-39 (antes, después de reset_clave)

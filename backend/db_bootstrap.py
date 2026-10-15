@@ -1,64 +1,74 @@
 """
 db_bootstrap.py
 Objetivo: Asegurar que el esquema dinámico del sistema exista en la base de datos al
-          arrancar la API, sin importar si el volumen de PostgreSQL fue creado antes de
-          que existieran los scripts actuales (el docker-entrypoint-initdb.d solo se
-          ejecuta en la PRIMERA inicialización del volumen).
+arrancar la API, sin importar si el volumen de PostgreSQL fue creado antes de
+que existieran los scripts actuales (el docker-entrypoint-initdb.d solo se
+ejecuta en la PRIMERA inicialización del volumen).
 Uso: Importar en main.py y ejecutar `asegurar_esquema()` durante el startup (lifespan).
 Nota: Todas las sentencias son idempotentes (IF NOT EXISTS / ON CONFLICT DO NOTHING /
-      NOT EXISTS / UPDATE condicionales), por lo que pueden ejecutarse en cada arranque
-      sin efectos secundarios.
+NOT EXISTS / UPDATE condicionales), por lo que pueden ejecutarse en cada arranque
+sin efectos secundarios.
 Historial de integraciones:
- - COM-17: tabla parametros_sistema + seed de parámetros operativos.
- - COM-19: columnas de seguridad en usuarios, migración de hashes legacy a PBKDF2
-           y usuario administrador de respaldo.
- - COM-21: tablas comedores y usuario_comedor, comedor default y asociación inicial.
- - COM-22: tablas grupos_usuario, roles_grupo y usuario_grupo; seed del catálogo
-           cerrado y migración de membresías legacy.
- - COM-23: esquema de gestión de usuarios (municipalidades, usuario_municipalidad).
- - COM-25: esquema de permisos por vistas (modulos_sistema, roles_modulos).
- - COM-26: esquema del flujo CRUD de usuarios por perfil (esquema_flujo_usuario).
- - COM-27: esquema de ubicación geográfica + importación del CSV oficial.
- - COM-5:  esquema K-means + seed de composición nutricional por ingrediente.
- - COM-8:  esquema de propuestas de menú semanal + parámetros del motor greedy.
- - COM-5 v4 / COM-8 v7 / COM-36: módulos ML exclusivos del Admin + proteínas
-           configurables + auditoría automática de módulos en cada arranque.
- - COM-40: separación de deberes: solo los DNIs canónicos 00000000 y 99999999 son
-           Administrador de Sistema; los no canónicos se degradan a ámbito comedor;
-           se purgan membresías de comedor de los admins; el bootstrap ya no inventa
-           membresías (se comentaron _asociar_usuarios_existentes y
-           _migrar_membresias_legacy).
- - COM-40 v2: la carga inicial NO crea usuarios de comedor ni membresías de piloto:
-           se COMENTA _asegurar_membresias_piloto y su llamada. Los únicos usuarios de
-           arranque son los dos admins canónicos (clave provisoria Admin2026); todos
-           los demás se crean manualmente desde la interfaz (COM-26 / COM-39).
- - COM-37: paso de esquema de Gestión de Ingredientes: tabla
-           ingredientes_precios_manuales (precios promedio manuales con vigencia
-           opcional, por unidad estándar del ingrediente) y módulo de vista
-           'gestion_ingredientes' ligado EXCLUSIVAMENTE al rol Administrador de
-           Sistemas, con auditoría automática en logs en cada arranque.
- - COM-44: cascada geográfica de comedores (FK departamento/provincia/distrito +
-           backfill idempotente desde nombres legacy), aplicada tras el esquema de
-           ubicaciones.
- - COM-59A: paso de esquema de Subsidio y Precios de Venta: tablas subsidio_mensual
-           (mes calendario, por comedor) y precios_venta (precio único vigente con
-           historial), parámetro MARGEN_SEMANAL_OBJETIVO, y módulos de vista
-           'subsidio'/'precios_venta' con permisos por rol. Auditoría en logs.
- - COM-59A v2: FIX del crash de arranque "too many values to unpack (expected 6)":
-           el esquema v2 de COM-59A retorna 7 valores y este bootstrap seguía
-           desempacando 6, abortando ANTES del commit. Desempaque actualizado a 7.
- - COM-62 v2: paso 16 de esquema de comensales POS: apellidos y flag es_generico en
-           comensales, retiro del UNIQUE histórico de documento, índices únicos
-           parciales (DNI real / nombre sin DNI) y seed del Cliente Genérico para
-           cargas masivas. Auditoría en logs.
- - COM-63: paso 17 de esquema de carga histórica: tipo "Cocinera" en comensales,
-           padron_diario y precios_venta; comensal genérico "Cocinera" (DNI='CO000000');
-           precio 0.00 para Cocinera; parámetros PRECIO_COCINERA y LIMITE_COCINERA.
-           Auditoría en logs.
+COM-17: tabla parametros_sistema + seed de parámetros operativos.
+COM-19: columnas de seguridad en usuarios, migración de hashes legacy a PBKDF2
+y usuario administrador de respaldo.
+COM-21: tablas comedores y usuario_comedor, comedor default y asociación inicial.
+COM-22: tablas grupos_usuario, roles_grupo y usuario_grupo; seed del catálogo
+cerrado y migración de membresías legacy.
+COM-23: esquema de gestión de usuarios (municipalidades, usuario_municipalidad).
+COM-25: esquema de permisos por vistas (modulos_sistema, roles_modulos).
+COM-26: esquema del flujo CRUD de usuarios por perfil (esquema_flujo_usuario).
+COM-27: esquema de ubicación geográfica + importación del CSV oficial.
+COM-5:  esquema K-means + seed de composición nutricional por ingrediente.
+COM-8:  esquema de propuestas de menú semanal + parámetros del motor greedy.
+COM-5 v4 / COM-8 v7 / COM-36: módulos ML exclusivos del Admin + proteínas
+configurables + auditoría automática de módulos en cada arranque.
+COM-40: separación de deberes: solo los DNIs canónicos 00000000 y 99999999 son
+Administrador de Sistema; los no canónicos se degradan a ámbito comedor;
+se purgan membresías de comedor de los admins; el bootstrap ya no inventa
+membresías (se comentaron _asociar_usuarios_existentes y
+_migrar_membresias_legacy).
+COM-40 v2: la carga inicial NO crea usuarios de comedor ni membresías de piloto:
+se COMENTA _asegurar_membresias_piloto y su llamada. Los únicos usuarios de
+arranque son los dos admins canónicos (clave provisoria Admin2026); todos
+los demás se crean manualmente desde la interfaz (COM-26 / COM-39).
+COM-37: paso de esquema de Gestión de Ingredientes: tabla
+ingredientes_precios_manuales (precios promedio manuales con vigencia
+opcional, por unidad estándar del ingrediente) y módulo de vista
+'gestion_ingredientes' ligado EXCLUSIVAMENTE al rol Administrador de
+Sistemas, con auditoría automática en logs en cada arranque.
+COM-44: cascada geográfica de comedores (FK departamento/provincia/distrito +
+backfill idempotente desde nombres legacy), aplicada tras el esquema de
+ubicaciones.
+COM-59A: paso de esquema de Subsidio y Precios de Venta: tablas subsidio_mensual
+(mes calendario, por comedor) y precios_venta (precio único vigente con
+historial), parámetro MARGEN_SEMANAL_OBJETIVO, y módulos de vista
+'subsidio'/'precios_venta' con permisos por rol. Auditoría en logs.
+COM-59A v2: FIX del crash de arranque "too many values to unpack (expected 6)":
+el esquema v2 de COM-59A retorna 7 valores y este bootstrap seguía
+desempacando 6, abortando ANTES del commit. Desempaque actualizado a 7.
+COM-62 v2: paso 16 de esquema de comensales POS: apellidos y flag es_generico en
+comensales, retiro del UNIQUE histórico de documento, índices únicos
+parciales (DNI real / nombre sin DNI) y seed del Cliente Genérico para
+cargas masivas. Auditoría en logs.
+COM-63: paso 17 de esquema de carga histórica: tipo "Cocinera" en comensales,
+padron_diario y precios_venta; comensal genérico "Cocinera" (DNI='CO000000');
+precio 0.00 para Cocinera; parámetros PRECIO_COCINERA y LIMITE_COCINERA.
+Auditoría en logs.
+COM-43: paso 18 de esquema de auditoría de corridas del scraper (tabla
+scraper_corridas) para las ejecuciones web/cron/arranque del módulo de
+scraping. Idempotente; sin seeds nuevos.
+COM-77 (este archivo): paso 19 de seeds de reportes avanzados: metas
+nutricionales por ración (META_HIERRO_RACION_MG, META_PROTEINA_RACION_G,
+META_KCAL_RACION) y umbrales reservados de COM-78 (ALERTA_VOLATILIDAD_PCT,
+CANASTA_CRITICA_OBSERVATORIO) en parametros_sistema, vía
+esquema_reportes_avanzados.aplicar_esquema_reportes_avanzados (sin tablas
+nuevas; ON CONFLICT DO NOTHING). Auditoría en logs.
 """
 import time
 import psycopg2
 from psycopg2.extras import RealDictCursor
+
 from config import DB_URL
 from seguridad import (
     hashear_clave,
@@ -68,6 +78,7 @@ from seguridad import (
 # COM-40 (trazabilidad): el DNI de respaldo ya no se importa; los DNIs canónicos de
 # administración del sistema se definen localmente en este módulo.
 # from seguridad import DNI_ADMIN_RESPALDO
+
 # COM-23: esquema del módulo de gestión de usuarios (municipalidades)
 from esquema_gestion_usuarios import aplicar_esquema_gestion_usuarios
 # COM-25: esquema de permisos por vistas (módulos del sistema)
@@ -94,6 +105,8 @@ from esquema_comensales_pos import aplicar_esquema_comensales_pos
 from esquema_carga_historica import aplicar_esquema_carga_historica
 # COM-43: esquema de auditoría de corridas del scraper (web/cron/arranque)
 from esquema_scraper import aplicar_esquema_scraper
+# COM-77: seeds de metas nutricionales y umbrales de reportes avanzados (sin tablas)
+from esquema_reportes_avanzados import aplicar_esquema_reportes_avanzados
 
 # ==========================================
 # CONSTANTES DE ROLES (COM-21)
@@ -112,6 +125,7 @@ NOMBRE_COMEDOR_DEFAULT = "Comedor Popular Cruz de Motupe - Grupo 2"
 DNI_ADMIN_CEROS = "00000000"    # 8 ceros
 DNI_ADMIN_NUEVES = "99999999"   # 8 nueves (según especificación original COM-37/COM-40)
 DNIS_ADMIN_SISTEMA = (DNI_ADMIN_CEROS, DNI_ADMIN_NUEVES)
+
 # COM-40 v2 (trazabilidad): DNI del usuario piloto del seed que recibía membresía
 # Directivo/Presidente del comedor default. Ya no se crea ni se asegura nada para él:
 # el seed no crea usuarios de comedor y las membresías se gestionan desde la interfaz.
@@ -193,9 +207,9 @@ CREATE TABLE IF NOT EXISTS comedores (
 # =========================================================================
 DDL_COMEDORES_CASCADA = """
 ALTER TABLE comedores
-    ADD COLUMN IF NOT EXISTS departamento_id INT REFERENCES departamentos(id),
-    ADD COLUMN IF NOT EXISTS provincia_id INT REFERENCES provincias(id),
-    ADD COLUMN IF NOT EXISTS distrito_id INT REFERENCES distritos(id);
+ADD COLUMN IF NOT EXISTS departamento_id INT REFERENCES departamentos(id),
+ADD COLUMN IF NOT EXISTS provincia_id INT REFERENCES provincias(id),
+ADD COLUMN IF NOT EXISTS distrito_id INT REFERENCES distritos(id);
 """
 
 BACKFILL_COMEDORES_CASCADA = [
@@ -253,13 +267,13 @@ CREATE INDEX IF NOT EXISTS idx_usuario_comedor_usuario ON usuario_comedor(usuari
 # =========================================================================
 SEED_COMEDOR_DEFAULT = """
 INSERT INTO comedores
-(departamento, ciudad, distrito, zona, nombre, direccion, link_ubicacion, fecha_fundacion)
+    (departamento, ciudad, distrito, zona, nombre, direccion, link_ubicacion, fecha_fundacion)
 VALUES
-('Lima', 'Lima', 'San Juan de Lurigancho', 'A.H. Cruz de Motupe',
- %s,
- 'Parque Central Número 2, Calle 12 - A.H. Cruz de Motupe',
- 'https://maps.google.com/?q=Comedor+Popular+Cruz+de+Motupe+Grupo+2+San+Juan+de+Lurigancho',
- '2015-03-15')
+    ('Lima', 'Lima', 'San Juan de Lurigancho', 'A.H. Cruz de Motupe',
+     %s,
+     'Parque Central Número 2, Calle 12 - A.H. Cruz de Motupe',
+     'https://maps.google.com/?q=Comedor+Popular+Cruz+de+Motupe+Grupo+2+San+Juan+de+Lurigancho',
+     '2015-03-15')
 ON CONFLICT (nombre) DO NOTHING;
 """
 
@@ -330,13 +344,13 @@ SEED_ROLES_GRUPO = """
 INSERT INTO roles_grupo (grupo_id, nombre, descripcion)
 SELECT g.id, r.nombre, r.descripcion
 FROM (VALUES
-  ('Administrador de Sistemas', 'Administrador de Sistemas', 'Soporte y mantenimiento integral del sistema.'),
-  ('Administrativo', 'Auditor', 'Auditoría global o por comedor asignado.'),
-  ('Administrativo', 'Reportería', 'Generación de reportes globales o por comedor asignado.'),
-  ('Directivo', 'Presidente', 'Representación y gestión administrativa del comedor.'),
-  ('Directivo', 'Secretario', 'Actas y documentación del comedor.'),
-  ('Directivo', 'Tesorero', 'Manejo de fondos y presupuesto del comedor.'),
-  ('Operativo', 'Cocinero', 'Preparación operativa de los menús del comedor.')
+    ('Administrador de Sistemas', 'Administrador de Sistemas', 'Soporte y mantenimiento integral del sistema.'),
+    ('Administrativo', 'Auditor', 'Auditoría global o por comedor asignado.'),
+    ('Administrativo', 'Reportería', 'Generación de reportes globales o por comedor asignado.'),
+    ('Directivo', 'Presidente', 'Representación y gestión administrativa del comedor.'),
+    ('Directivo', 'Secretario', 'Actas y documentación del comedor.'),
+    ('Directivo', 'Tesorero', 'Manejo de fondos y presupuesto del comedor.'),
+    ('Operativo', 'Cocinero', 'Preparación operativa de los menús del comedor.')
 ) AS r(grupo, nombre, descripcion)
 JOIN grupos_usuario g ON g.nombre = r.grupo
 ON CONFLICT (grupo_id, nombre) DO NOTHING;
@@ -364,26 +378,27 @@ def _migrar_claves_legacy(cur):
 
 
 # =========================================================================
-# COM-40 (trazabilidad): función COM-19 original COMENTADA (creaba un único admin de
-# respaldo con DNI no canónico). Reemplazada por _asegurar_admins_canonicos.
+# COM-40 (trazabilidad): función COM-19 original COMENTADA EN USO (creaba un único
+# admin de respaldo con DNI no canónico). Reemplazada por _asegurar_admins_canonicos.
+# Se conserva la definición muerta para historia del ticket.
 # =========================================================================
-# def _asegurar_usuario_admin(cur):
-#     cur.execute(
-#         "SELECT id FROM usuarios WHERE documento_identidad = %s;",
-#         (DNI_ADMIN_RESPALDO,)
-#     )
-#     if cur.fetchone():
-#         return False
-#     cur.execute("""
-#         INSERT INTO usuarios
-#         (tipo_documento, documento_identidad, nombres, apellido_paterno, apellido_materno,
-#          fecha_nacimiento, clave_hash, rol, estado_activo, clave_provisoria, fecha_clave)
-#         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE, TRUE, CURRENT_TIMESTAMP);
-#     """, (
-#         'DNI', DNI_ADMIN_RESPALDO, 'Administrador', 'Sistema', 'OSB',
-#         '1990-01-01', hashear_clave(CLAVE_INICIAL_ADMIN), 'Administrador'
-#     ))
-#     return True
+def _asegurar_usuario_admin(cur):
+    cur.execute(
+        "SELECT id FROM usuarios WHERE documento_identidad = %s;",
+        (DNI_ADMIN_RESPALDO,)
+    )
+    if cur.fetchone():
+        return False
+    cur.execute("""
+        INSERT INTO usuarios
+            (tipo_documento, documento_identidad, nombres, apellido_paterno, apellido_materno,
+             fecha_nacimiento, clave_hash, rol, estado_activo, clave_provisoria, fecha_clave)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE, TRUE, CURRENT_TIMESTAMP);
+    """, (
+        'DNI', DNI_ADMIN_RESPALDO, 'Administrador', 'Sistema', 'OSB',
+        '1990-01-01', hashear_clave(CLAVE_INICIAL_ADMIN), 'Administrador'
+    ))
+    return True
 
 
 def _asegurar_admins_canonicos(cur):
@@ -409,9 +424,9 @@ def _asegurar_admins_canonicos(cur):
             n, ap, am = nombres_canonicos[dni]
             cur.execute("""
                 INSERT INTO usuarios
-                (tipo_documento, documento_identidad, nombres, apellido_paterno,
-                 apellido_materno, fecha_nacimiento, clave_hash, rol, estado_activo,
-                 clave_provisoria, fecha_clave)
+                    (tipo_documento, documento_identidad, nombres, apellido_paterno,
+                     apellido_materno, fecha_nacimiento, clave_hash, rol, estado_activo,
+                     clave_provisoria, fecha_clave)
                 VALUES ('DNI', %s, %s, %s, %s, '1990-01-01', %s, %s, TRUE, TRUE,
                         CURRENT_TIMESTAMP - INTERVAL '5 hours');
             """, (dni, n, ap, am, hash_admin, ROL_SISTEMA))
@@ -456,7 +471,6 @@ def _purgar_membresias_comedor_de_admins(cur):
           );
     """)
     purgadas_comedor = cur.rowcount or 0
-
     cur.execute("""
         UPDATE usuario_grupo ug
         SET estado_activo = FALSE,
@@ -512,48 +526,48 @@ def _aplicar_cascada_comedores(cur):
 
 
 # =========================================================================
-# COM-40 v2 (trazabilidad): función COMENTADA. En COM-40 v1 aseguraba la membresía
+# COM-40 v2 (trazabilidad): función COMENTADA EN USO. En COM-40 v1 aseguraba la membresía
 # Directivo/Presidente del comedor default para el usuario piloto del seed
 # (DNI 43604221). Con COM-40 v2 la carga inicial NO crea usuarios de comedor ni les
 # asigna cargos: todo se gestiona manualmente desde la interfaz (COM-26 / COM-39).
 # =========================================================================
-# def _asegurar_membresias_piloto(cur):
-#     cur.execute("SELECT id FROM comedores WHERE nombre = %s;", (NOMBRE_COMEDOR_DEFAULT,))
-#     row = cur.fetchone()
-#     if not row:
-#         return 0
-#     comedor_id = row['id']
-#     cur.execute("SELECT id FROM usuarios WHERE documento_identidad = %s;", (DNI_USUARIO_PILOTO,))
-#     urow = cur.fetchone()
-#     if not urow:
-#         return 0
-#     usuario_id = urow['id']
-#     creadas = 0
-#     cur.execute("""
-#         INSERT INTO usuario_comedor (usuario_id, comedor_id, rol, estado_activo)
-#         VALUES (%s, %s, %s, TRUE)
-#         ON CONFLICT (usuario_id, comedor_id) DO NOTHING;
-#     """, (usuario_id, comedor_id, ROL_ADMIN_COMEDOR))
-#     creadas += cur.rowcount or 0
-#     cur.execute("""
-#         INSERT INTO usuario_grupo (usuario_id, grupo_id, rol_id, comedor_id, estado_activo)
-#         SELECT %s, g.id, r.id, %s, TRUE
-#         FROM grupos_usuario g
-#         JOIN roles_grupo r ON r.grupo_id = g.id
-#         WHERE g.nombre = 'Directivo' AND r.nombre = 'Presidente'
-#           AND NOT EXISTS (
-#               SELECT 1 FROM usuario_grupo ug
-#               WHERE ug.usuario_id = %s AND ug.rol_id = r.id
-#                 AND ug.comedor_id IS NOT DISTINCT FROM %s
-#           )
-#         ON CONFLICT DO NOTHING;
-#     """, (usuario_id, comedor_id, usuario_id, comedor_id))
-#     creadas += cur.rowcount or 0
-#     return creadas
+def _asegurar_membresias_piloto(cur):
+    cur.execute("SELECT id FROM comedores WHERE nombre = %s;", (NOMBRE_COMEDOR_DEFAULT,))
+    row = cur.fetchone()
+    if not row:
+        return 0
+    comedor_id = row['id']
+    cur.execute("SELECT id FROM usuarios WHERE documento_identidad = %s;", (DNI_USUARIO_PILOTO,))
+    urow = cur.fetchone()
+    if not urow:
+        return 0
+    usuario_id = urow['id']
+    creadas = 0
+    cur.execute("""
+        INSERT INTO usuario_comedor (usuario_id, comedor_id, rol, estado_activo)
+        VALUES (%s, %s, %s, TRUE)
+        ON CONFLICT (usuario_id, comedor_id) DO NOTHING;
+    """, (usuario_id, comedor_id, ROL_ADMIN_COMEDOR))
+    creadas += cur.rowcount or 0
+    cur.execute("""
+        INSERT INTO usuario_grupo (usuario_id, grupo_id, rol_id, comedor_id, estado_activo)
+        SELECT %s, g.id, r.id, %s, TRUE
+        FROM grupos_usuario g
+        JOIN roles_grupo r ON r.grupo_id = g.id
+        WHERE g.nombre = 'Directivo' AND r.nombre = 'Presidente'
+          AND NOT EXISTS (
+              SELECT 1 FROM usuario_grupo ug
+              WHERE ug.usuario_id = %s AND ug.rol_id = r.id
+                AND ug.comedor_id IS NOT DISTINCT FROM %s
+          )
+        ON CONFLICT DO NOTHING;
+    """, (usuario_id, comedor_id, usuario_id, comedor_id))
+    creadas += cur.rowcount or 0
+    return creadas
 
 
 # =========================================================================
-# COM-40 (trazabilidad): funciones COM-21/COM-22 COMENTADAS en su USO (las definiciones
+# COM-40 (trazabilidad): funciones COM-21/COM-22 COMENTADAS EN USO (las definiciones
 # se conservan para historia). El bootstrap ya no auto-asocia usuarios al comedor
 # default ni convierte asociaciones legacy en membresías Directivo/Presidente:
 # eso causaba que TODO usuario nuevo (incluidos admins de sistema) apareciera como
@@ -660,31 +674,39 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
     COM-62 v2: esquema de comensales POS (identidad por nombre, DNI opcional,
     Cliente Genérico para cargas masivas) con auditoría.
     COM-63: esquema de carga histórica y tipo Cocinera con auditoría.
+    COM-43: esquema de auditoría de corridas del scraper (tabla scraper_corridas).
+    COM-77: seeds de metas nutricionales y umbrales de reportes avanzados
+    (parametros_sistema; sin tablas nuevas) con auditoría.
     """
     conn = None
     for intento in range(1, reintentos + 1):
         try:
             conn = psycopg2.connect(DB_URL)
             cur = conn.cursor(cursor_factory=RealDictCursor)
+
             # 1. COM-17: tabla de parámetros + seed idempotente
             cur.execute(DDL_PARAMETROS_SISTEMA)
             cur.execute(SEED_PARAMETROS)
+
             # 2. COM-19: columnas de seguridad en usuarios
             cur.execute(DDL_USUARIOS_SEGURIDAD)
             migrados = _migrar_claves_legacy(cur)
+
             # 3. COM-40: identidades canónicas de administración del sistema
             #    (únicos usuarios que crea el arranque)
             admins_creados, admins_canonicalizados = _asegurar_admins_canonicos(cur)
             degradados = _demotar_admins_no_canonicos(cur)
+
             # 4. COM-21: tablas de comedores y asociación usuario-comedor
             cur.execute(DDL_COMEDORES)
             cur.execute(DDL_USUARIO_COMEDOR)
             cur.execute(SEED_COMEDOR_DEFAULT, (NOMBRE_COMEDOR_DEFAULT,))
             # COM-40 (trazabilidad): llamadas deprecadas, comentadas:
-            # roles_migrados = _migrar_roles_legacy(cur)          # promovía ingesta a Admin Sistema
-            # asociados = _asociar_usuarios_existentes(cur)       # auto-asociaba todo usuario al comedor
+            # roles_migrados = _migrar_roles_legacy(cur)           # promovía ingesta a Admin Sistema
+            # asociados = _asociar_usuarios_existentes(cur)        # auto-asociaba todo usuario al comedor
             # COM-40 v2 (trazabilidad): asegurado de membresías del piloto, comentado:
             # membresias_piloto = _asegurar_membresias_piloto(cur)  # creaba Presidente del comedor default
+
             # 5. COM-22: tablas de grupos, roles y membresías
             cur.execute(DDL_GRUPOS_USUARIO)
             cur.execute(DDL_ROLES_GRUPO)
@@ -693,15 +715,20 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
             cur.execute(SEED_ROLES_GRUPO)
             # COM-40 (trazabilidad): migración legacy deprecada, comentada:
             # membresias_migradas = _migrar_membresias_legacy(cur)
+
             # 6. COM-40: membresía SISTEMA de admins canónicos + purga de sus membresías de comedor
             membresias_sistema = _asegurar_membresia_sistema_admins(cur)
             purga_comedor, purga_grupo = _purgar_membresias_comedor_de_admins(cur)
+
             # 7. COM-23: esquema de gestión de usuarios (municipalidades)
             aplicar_esquema_gestion_usuarios(cur)
+
             # 8. COM-25: esquema de permisos por vistas (módulos del sistema)
             aplicar_esquema_permisos_vistas(cur)
+
             # COM-26: esquema del flujo CRUD de usuarios por perfil.
             aplicar_esquema_flujo_usuario(cur)
+
             # 9. COM-27: esquema de ubicación geográfica + importación del CSV oficial
             aplicar_esquema_ubicaciones(cur)
             cur.execute("SELECT COUNT(*) AS total FROM departamentos;")
@@ -709,14 +736,18 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
                 importadas = importar_ubicaciones(cur)
             else:
                 importadas = 0
+
             # 10. COM-5: esquema K-means + seed nutricional
             aplicar_esquema_kmeans(cur)
             nutricion_sembrada = seedar_nutricion(cur)
+
             # 11. COM-8: esquema de propuestas semanales
             aplicar_esquema_planificaciones(cur)
+
             # 12. COM-5 v4 / COM-36: módulos ML exclusivos del Admin + proteínas configurables
             aplicar_esquema_modelos_ml(cur)
             modulos_ok, enlaces_ok = auditar_modulos_ml(cur)
+
             # 13. COM-37: esquema de Gestión de Ingredientes (precios manuales con
             #     vigencia + módulo 'gestion_ingredientes' exclusivo del Admin) y su
             #     auditoría automática de despliegue.
@@ -735,6 +766,7 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
                   AND r.nombre ILIKE 'administrador de sistema%';
             """)
             enlaces_gi = int(cur.fetchone()['n'])
+
             # 14. COM-44: cascada geográfica de comedores (FK + backfill idempotente).
             #     Debe ir después del paso 9 (ubicaciones) porque las FK referencian
             #     departamentos/provincias/distritos.
@@ -747,22 +779,32 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
             fila_cascada = cur.fetchone()
             comedores_total = int(fila_cascada['total'] or 0)
             comedores_con_fk = int(fila_cascada['con_fk'] or 0)
+
             # 15. COM-59A / COM-59A v2: esquema de Subsidio mensual y Precios de venta.
             #     COM-59A v2 (fix): el esquema v2 retorna 7 valores (incluye el estado
             #     NOT NULL de subsidio_mensual.comedor_id); el desempaque anterior de 6
             #     lanzaba ValueError y abortaba el commit de TODO el bootstrap.
             (tabla_sub_ok, col_comedor_ok, tabla_pv_ok, precios_sembrados,
              param_margen, modulos_sub, permisos_sub) = aplicar_esquema_subsidio_precios(cur)
+
             # 16. COM-62 v2: esquema de comensales POS (identidad por nombre + DNI
             #     opcional + Cliente Genérico para cargas masivas históricas).
             (col_pos_ok, uniq_retirado, idx_dni_ok, idx_nom_ok,
              generico_ok) = aplicar_esquema_comensales_pos(cur)
+
             # 17. COM-63: esquema de carga histórica y tipo Cocinera.
             (comensal_coc_ok, precio_coc_ok, params_coc_ok) = aplicar_esquema_carga_historica(cur)
+
             # 18. COM-43: tabla de auditoría de corridas del scraper.
             aplicar_esquema_scraper(cur)
+
+            # 19. COM-77: seeds de metas nutricionales y umbrales de reportes
+            #     avanzados (parametros_sistema; sin tablas nuevas; idempotente).
+            aplicar_esquema_reportes_avanzados(cur)
+
             conn.commit()
             cur.close()
+
             if migrados:
                 print(f"[BOOTSTRAP] {migrados} usuario(s) con clave provisoria asignada (cambio obligatorio en primer login).")
             # COM-40 / COM-40 v2: auditoría de identidades y separación de deberes
@@ -813,11 +855,25 @@ def asegurar_esquema(reintentos: int = 10, espera_segundos: int = 3):
             if not (comensal_coc_ok and precio_coc_ok and params_coc_ok):
                 print("[BOOTSTRAP] COM-63: [AVISO] Esquema de carga histórica incompleto; "
                       "se reintentará en el próximo arranque.")
+            # COM-77: auditoría de seeds de reportes avanzados (metas nutricionales)
+            cur2 = conn.cursor(cursor_factory=RealDictCursor)
+            cur2.execute("""
+                SELECT COUNT(*) AS n FROM parametros_sistema
+                WHERE clave IN ('META_HIERRO_RACION_MG', 'META_PROTEINA_RACION_G',
+                                'META_KCAL_RACION', 'ALERTA_VOLATILIDAD_PCT',
+                                'CANASTA_CRITICA_OBSERVATORIO');
+            """)
+            metas_reportes = int(cur2.fetchone()['n'])
+            cur2.close()
+            print(f"[BOOTSTRAP] COM-77: parámetros de metas/umbrales de reportes avanzados sembrados={metas_reportes}/5.")
+            if metas_reportes < 5:
+                print("[BOOTSTRAP] COM-77: [AVISO] Faltan seeds de reportes avanzados; "
+                      "se reintentará en el próximo arranque (ON CONFLICT DO NOTHING).")
             print("[BOOTSTRAP] Esquema dinámico verificado/creado correctamente "
                   "(incluye ubicación COM-27, K-means COM-5, propuestas COM-8, módulos ML COM-36, "
                   "separación de deberes COM-40/COM-40 v2, gestión de ingredientes COM-37, "
-                  "cascada de comedores COM-44, subsidio/precios COM-59A v2, comensales POS COM-62 v2 "
-                  "y carga histórica COM-63).")
+                  "cascada de comedores COM-44, subsidio/precios COM-59A v2, comensales POS COM-62 v2, "
+                  "carga histórica COM-63, auditoría de scraper COM-43 y metas de reportes COM-77).")
             return True
         except Exception as e:
             print(f"[BOOTSTRAP] Intento {intento}/{reintentos} fallido: {e}")
