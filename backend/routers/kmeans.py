@@ -13,7 +13,7 @@ COM-5 v4: la vista de Clusters K-Means pasa a ser EXCLUSIVA del Administrador de
 COM-60: K-means v2: /resumen expone medianas por cluster, métricas post-hoc
     (Fe/S/, Prot/S/), scaler, k_evaluados y k_recomendado; /diagnostico-k nuevo con
     curva silhouette/inercia k=2..8; /clusters devuelve las 6 variables del snapshot.
-COM-71 (este archivo): exposición ADITIVA del flag de elegibilidad económica:
+COM-71: exposición ADITIVA del flag de elegibilidad económica:
     * /resumen agrega n_costeables / n_no_costeables globales y por cluster
       (contados sobre recetas_clusters.costeable, migración COM-71).
     * /clusters ya devolvía costeable vía obtener_recetas_por_cluster (Drop 1); se
@@ -21,8 +21,17 @@ COM-71 (este archivo): exposición ADITIVA del flag de elegibilidad económica:
     * /candidatas ya devolvía n_costeables / n_no_costeables vía listar_candidatas
       (Drop 1); se documenta en el docstring.
     Ninguna clave existente se elimina ni se renombra.
+COM-76 (este archivo): sin cambios funcionales de payload (el backend CONSERVA
+    precio_prom/min/max y post-hoc Fe/S/ por cluster como auditoría para tesis y
+    para el flag costeable del greedy); los cambios de COM-76 viven en
+    ml/kmeans_recetas.py (etiquetas de negocio, n_init=25, dataset único y costeo
+    acotado que eliminan el 504 de /entrenar). Aquí solo se actualizan docstrings
+    para documentar: (a) /entrenar ahora reusa un único dataset y acota la RF
+    (fix 504), (b) /resumen y /clusters conservan campos de precio como auditoría
+    pero la UI de clusters ya no los exhibe (COM-76 D3), (c) /diagnostico-k acepta
+    filas pre-construidas internamente (no cambia su contrato HTTP).
 Uso: Registrado en main.py con prefijo /api/v1.
-Referencia: tickets COM-5 / COM-5 v4 / COM-60 / COM-71 (solo trazabilidad).
+Referencia: tickets COM-5 / COM-5 v4 / COM-60 / COM-71 / COM-76 (solo trazabilidad).
 """
 import json
 import unicodedata
@@ -158,11 +167,11 @@ def actualizar_proteinas(data: ProteinasConfigInput, db=Depends(get_db)):
         vetadas = sorted({t for t in (_token(x) for x in data.vetadas) if t})
         if not permitidas:
             raise HTTPException(status_code=400,
-                            detail="Debe existir al menos una proteína permitida.")
+                                detail="Debe existir al menos una proteína permitida.")
         for t in permitidas + vetadas:
             if len(t) < 2 or len(t) > 40:
                 raise HTTPException(status_code=400,
-                                detail=f"Token inválido: '{t}' (use entre 2 y 40 caracteres).")
+                                    detail=f"Token inválido: '{t}' (use entre 2 y 40 caracteres).")
         _guardar_lista(cur, CLAVE_PROTEINAS,
                        'COM-5 v4: listado configurable de proteínas permitidas para el clustering K-means',
                        permitidas)
@@ -203,15 +212,16 @@ def diagnostico(usuario_solicitante_id: int, db=Depends(get_db)):
 
 
 # ==========================================
-# COM-60: DIAGNÓSTICO DE K ÓPTIMO (curva silhouette/inercia)
+# COM-60 + COM-76: DIAGNÓSTICO DE K ÓPTIMO (curva silhouette/inercia)
 # ==========================================
 @router.get("/diagnostico-k")
 def diagnostico_k(usuario_solicitante_id: int, db=Depends(get_db)):
     """
-    COM-60 (criterio D5): curva de silhouette e inercia para k=2..8 sobre el dataset
-    apto (RobustScaler, 6 features nutricionales) y k_recomendado por mejor
-    silhouette. Es INFORMATIVO: no persiste modelos ni cambia el k operativo
-    (KMEANS_K). Útil para el panel ML y para la sección de validación de la tesis.
+    COM-60 (criterio D5) + COM-76: curva de silhouette e inercia para k=2..8 sobre el
+    dataset apto (RobustScaler + log1p, 6 features nutricionales) y k_recomendado por
+    mejor silhouette, con n_init parametrizado (KMEANS_N_INIT, default 25).
+    Es INFORMATIVO: no persiste modelos ni cambia el k operativo (KMEANS_K).
+    Útil para el panel ML y para la sección de validación de la tesis.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -233,12 +243,17 @@ def diagnostico_k(usuario_solicitante_id: int, db=Depends(get_db)):
 @router.post("/entrenar")
 def entrenar_modelo(usuario_solicitante_id: int, db=Depends(get_db)):
     """
-    COM-60 + COM-71: entrena el modelo K-means (k=KMEANS_K, default 4) con las 6
-    variables nutricionales por ración escaladas con RobustScaler, tras aplicar R0-R2;
-    el precio ya NO excluye (R3 informativa) y la completitud de precios es un flag
-    `costeable` (R4) que consume el greedy. Re-etiqueta centroides por medianas reales,
-    calcula métricas post-hoc por cluster (solo costeables) y el diagnóstico de k
-    óptimo, y persiste el modelo activo. Exclusivo Admin.
+    COM-60 + COM-71 + COM-76: entrena el modelo K-means (k=KMEANS_K, default 4) con
+    las 6 variables nutricionales por ración en espacio log1p+RobustScaler, tras
+    aplicar R0-R2; el precio YA NO excluye (R3 informativa) y la completitud de
+    precios es un flag `costeable` (R4) que consume el greedy.
+    COM-76: etiqueta los 4 clusters con las etiquetas de NEGOCIO (Anti-Anemia
+    Premium, Fortalecimiento Balanceado, Ligero y Saludable, All-Rounder) mediante
+    biyección determinista por medianas de las 6 variables; usa n_init=KMEANS_N_INIT
+    (default 25) para mejorar la inercia mínima; construye el dataset UNA sola vez
+    (reusado para la curva de k) y acota la predicción RF a los insumos del recetario,
+    eliminando el HTTP 504 que producían las dos pasadas RF completas del catálogo.
+    Persiste el modelo activo y su asignación receta->cluster. Exclusivo Admin.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -269,6 +284,9 @@ def resumen_modelo(usuario_solicitante_id: int, db=Depends(get_db)):
     medianas y post-hoc por cluster desde parametros/centroides del modelo.
     COM-71 (aditivo): n_costeables / n_no_costeables globales y por cluster, contados
     sobre recetas_clusters.costeable (flag R4). Las claves históricas se conservan.
+    COM-76 (nota): los campos precio_prom/precio_min/precio_max y post_hoc (Fe/S/)
+    se CONSERVAN en el payload como auditoría de backend (tesis + flag del greedy);
+    la UI de clusters (ClusterRecetasView) ya no los exhibe por cluster (D3).
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -333,6 +351,8 @@ def resumen_modelo(usuario_solicitante_id: int, db=Depends(get_db)):
             'n_imputadas': params.get('n_imputadas', 0),
             'post_hoc_por_cluster': post_hoc,
             'medianas_por_cluster': medianas,
+            # COM-76: n_init efectivo del entrenamiento (auditoría D6)
+            'n_init': params.get('n_init'),
             # COM-71: elegibilidad económica del modelo (aditivo)
             'n_costeables': int(tot_cost['n_costeables'] or 0),
             'n_no_costeables': int(tot_cost['n_no_costeables'] or 0),
@@ -359,6 +379,8 @@ def recetas_por_cluster(
     Recetas asignadas al modelo activo con su snapshot de features por ración
     (6 variables COM-60) y, desde COM-71, el flag `costeable` que indica si la receta
     tenía precios completos al entrenar (elegibilidad económica para el greedy).
+    COM-76 (nota): precio_soles/nivel_precio se conservan en el payload como
+    auditoría; la tabla de la UI de clusters ya no los muestra (D3).
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -386,6 +408,7 @@ def recetas_candidatas(usuario_solicitante_id: int, db=Depends(get_db)):
     Recalcula el dataset con los parámetros vigentes sin persistir (auditoría R0-R2).
     COM-71: incluye n_costeables / n_no_costeables y, en cada fila apta, el flag
     `costeable` con sus ingredientes_sin_precio para dirigir la carga de precios.
+    COM-76: heredará el costeo acotado a insumos del recetario (más rápido).
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:

@@ -32,7 +32,7 @@ COM-71: MODELO LIMPIO: R3 (excluir por precio alto) SE ELIMINA del clustering
     (nivel_precio SOLO informativo); R4 pasa a FLAG `costeable` persistido en
     recetas_clusters; post-hoc y mediana de precio solo sobre costeables;
     /candidatas y resumen exponen n_costeables / n_no_costeables.
-COM-72 (este archivo): AFINADO ante clusters singleton y silhouette baja:
+COM-72: AFINADO ante clusters singleton y silhouette baja:
     * Espacio de features log1p + RobustScaler (TRANSFORM): comprime colas de
       micronutrientes sesgados (vitamina A, zinc) que volvían recetas extremas en
       clusters de 1 miembro. Centroides reales vía expm1(inverse_transform(...)).
@@ -41,8 +41,44 @@ COM-72 (este archivo): AFINADO ante clusters singleton y silhouette baja:
       < KMEANS_MIN_CLUSTER_RECETAS miembros) en parametros y en el resumen, para que
       el comité detecte singletons sin que el motor los fusione a ciegas.
     * No se elimina ningún helper, regla ni bloque de trazabilidad de COM-71.
+COM-76 (este archivo): CLUSTERING 100% NUTRICIONAL CON ETIQUETAS DE NEGOCIO Y
+    COSTEO ACOTADO (fix del 504 en /kmeans/entrenar):
+    * D1: CODIGO_ETIQUETA restaura las etiquetas de negocio con códigos ESTABLES:
+      1='Anti-Anemia Premium', 2='Fortalecimiento Balanceado',
+      3='Ligero y Saludable', 4='All-Rounder'. Se conserva el guion en
+      "Anti-Anemia" a propósito: greedy_search.PREFIJO_CLUSTER_ANEMIA='Anti-Anemia'
+      identifica la cuota semanal Anemia Cero por prefijo (COM-60); el seed de
+      PLANIFICACION_ROTACION_CLUSTERS ya documenta esta semántica (1=AntiAnemia,
+      2=Fortalecimiento, 3=Ligero, 4=AllRounder), así que la rotación diaria queda
+      coherente sin tocar el greedy.
+    * D2: etiquetado determinista por MEDIANAS de las 6 variables (biyección):
+      (1) mayor mediana de hierro -> Anti-Anemia Premium (prioridad Anemia Cero);
+      (2) entre restantes, mayor media-z(proteína, zinc, vitamina A) ->
+          Fortalecimiento Balanceado;
+      (3) entre restantes, menor mediana de energía (desempate: menor carbohidratos)
+          -> Ligero y Saludable;
+      (4) restante -> All-Rounder.
+      El etiquetado COM-60 (hierro/energía/proteína/restante) queda COMENTADO.
+    * D4: costeo barato para el flag `costeable`: construir_dataset() acota el mapa
+      de precios (paso RF) a los insumos de los ingredientes REALMENTE usados por las
+      recetas activas (insumo_ids), y entrenar_y_persistir() construye el dataset UNA
+      sola vez y lo reusa para la curva de k (diagnosticar_k acepta filas pre-construidas).
+      Con esto el entrenamiento pasa de 2 pasadas RF completas del catálogo a 1 pasada
+      acotada (elimina el HTTP 504 de /kmeans/entrenar).
+    * D5: se mantiene RobustScaler + log1p (COM-72), k operativo = KMEANS_K (4),
+      diagnóstico k=2..8 informativo, reglas R0/R1/R2, flag costeable y centroides en
+      unidades reales.
+    * D6: N_INIT sube de 10 a 25 (sklearn conserva el mejor run por inercia); el valor
+      efectivo se lee del parámetro opcional KMEANS_N_INIT (default 25) y se persiste
+      en parametros junto con 'best_of'. La curva k ya informa si el comité prefiere
+      otro k (informativo, no operativo).
+    * D7: sin DDL. Las etiquetas viven en JSONB (kmeans_modelos.etiquetas) y en
+      recetas_clusters.cluster_etiqueta (varchar 60); las nuevas caben.
+    * El precio SOLO alimenta el flag `costeable` (R4), nivel_precio informativo y el
+      post-hoc Fe/S/ (auditoría backend); NO es feature de distancia ni de etiquetado.
 Uso: Importado por routers/kmeans.py y por ml/greedy_search.py (reglas R1/R2).
-Referencia: tickets COM-5 / COM-37 / COM-47 / COM-60 / COM-71 / COM-72 (trazabilidad).
+Referencia: tickets COM-5 / COM-37 / COM-47 / COM-60 / COM-71 / COM-72 / COM-76
+(trazabilidad).
 """
 import re
 import json
@@ -75,19 +111,32 @@ from optimizador import predecir_precio_con_confianza
 FEATURES = ['energia_kcal', 'hierro_mg', 'proteina_g',
             'vitamina_a_ug', 'zinc_mg', 'carbohidratos_g']
 
-# COM-60: etiquetas del re-etiquetado por medianas (criterio D4).
-# COM-60 (trazabilidad): etiquetas anteriores comentadas:
+# COM-76 (D1): etiquetas de negocio restauradas con códigos 1..4 ESTABLES.
+# El guion en "Anti-Anemia" es intencional (prefijo usado por el greedy, COM-60).
+CODIGO_ETIQUETA = {
+    1: 'Anti-Anemia Premium',
+    2: 'Fortalecimiento Balanceado',
+    3: 'Ligero y Saludable',
+    4: 'All-Rounder',
+}
+# COM-76 (trazabilidad): etiquetas COM-60 reemplazadas por las de negocio:
+# CODIGO_ETIQUETA = {
+#     1: 'Anti-Anemia (alto hierro)',
+#     2: 'Energético denso',
+#     3: 'Proteico balanceado',
+#     4: 'Ligero complementario',
+# }
+# COM-76 (trazabilidad): etiquetas COM-5 v1 originales:
 # CODIGO_ETIQUETA = {1: 'Anti-Anemia Premium', 2: 'Fortalecimiento Balanceado',
 #                    3: 'Ligero y Saludable', 4: 'All-Rounder Económico'}
-CODIGO_ETIQUETA = {
-    1: 'Anti-Anemia (alto hierro)',
-    2: 'Energético denso',
-    3: 'Proteico balanceado',
-    4: 'Ligero complementario',
-}
 
 RANDOM_STATE = 42
-N_INIT = 10
+# COM-76 (D6): n_init por defecto sube a 25 (mejor inercia mínima); el parámetro
+# opcional KMEANS_N_INIT permite ajustarlo sin redeploy. N_INIT queda como fallback.
+N_INIT = 25
+# COM-76 (trazabilidad): valor anterior de N_INIT:
+# N_INIT = 10
+
 # COM-60: rango del diagnóstico de k óptimo (informativo, no cambia el k operativo)
 K_DIAG_MIN = 2
 K_DIAG_MAX = 8
@@ -166,8 +215,8 @@ def cargar_reglas_proteinas(cur):
     vetadas = INGREDIENTES_VETADOS_DEFAULT
     try:
         parsed = json.loads(p.get('KMEANS_INGREDIENTES_VETADOS') or 'null')
-        if isinstance(parsed, list) and parsed:
-            vetadas = [str(x).lower() for x in parsed]
+        if vetadas is None:
+            vetadas = INGREDIENTES_VETADOS_DEFAULT
     except Exception:
         vetadas = INGREDIENTES_VETADOS_DEFAULT
     return (_regex_de_lista(permitidas, PROTEINAS_PERMITIDAS_DEFAULT),
@@ -308,19 +357,30 @@ def diagnosticar_esquema(cur):
 # ==========================================
 def _parametros_kmeans(cur):
     """
-    Lee k y los umbrales de precio por ración desde parametros_sistema.
+    Lee k, los umbrales de precio por ración y (COM-76) el n_init desde
+    parametros_sistema.
     COM-71: los umbrales YA NO excluyen recetas; solo etiquetan nivel_precio
     (informativo) en el snapshot.
+    COM-76 (D6): KMEANS_N_INIT opcional (default 25, piso 5) para controlar el
+    número de inicializaciones de KMeans (mejor inercia mínima).
+    Retorna (k, bajo, medio, n_init).
     """
     cur.execute("""
         SELECT clave, valor FROM parametros_sistema
-        WHERE clave IN ('KMEANS_K', 'KMEANS_PRECIO_BAJO_MAX', 'KMEANS_PRECIO_MEDIO_MAX');
+        WHERE clave IN ('KMEANS_K', 'KMEANS_PRECIO_BAJO_MAX', 'KMEANS_PRECIO_MEDIO_MAX',
+                        'KMEANS_N_INIT');
     """)
     p = {r['clave']: r['valor'] for r in cur.fetchall()}
     k = int(float(p.get('KMEANS_K', 4)))
     bajo = float(p.get('KMEANS_PRECIO_BAJO_MAX', 2.20))
     medio = float(p.get('KMEANS_PRECIO_MEDIO_MAX', 3.50))
-    return k, bajo, medio
+    try:
+        n_init = int(float(p.get('KMEANS_N_INIT', N_INIT)))
+    except Exception:
+        n_init = N_INIT
+    if n_init < 5:
+        n_init = 5
+    return k, bajo, medio, n_init
 
 
 # =========================================================================
@@ -362,9 +422,12 @@ def _gramos_linea(eq_map, ing_id, insumo_id, unidad_uso_id,
 
 def _opcion_con_prediccion(cur, ing_id, fecha, precios_insumo, peso_estimado_g):
     """
-    COM-37 v7: mejor opción de precio del ingrediente con la MISMA jerarquía que
-    Evaluar: scraper (día o última corrida) > manual insumo > legacy ingrediente >
-    predicción RF (menor costo entre los insumos del ingrediente).
+    COM-37 v7 + COM-75: mejor opción de precio del ingrediente con la MISMA jerarquía
+    que Evaluar (scraper día > manual > RF > scraper último, centralizada en
+    precios_insumos). El bloque RF explícito se conserva como DOBLE SEGURO por si el
+    mapa viniera vacío para un ingrediente concreto.
+    COM-76: el mapa que recibe ya viene ACOTADO a los insumos del recetario activo
+    (ver construir_dataset), por lo que la RF solo se entrena para insumos relevantes.
     """
     opc = mejor_opcion_ingrediente(cur, ing_id, fecha, precios_insumo)
     if opc:
@@ -398,6 +461,21 @@ def _opcion_con_prediccion(cur, ing_id, fecha, precios_insumo, peso_estimado_g):
     return mejor
 
 
+def _precios_insumo_scoped(cur, fecha, insumo_ids):
+    """
+    COM-76 (D4a): mapa de precios acotado a `insumo_ids` (el paso RF de
+    precios_insumos solo se ejecuta para ese conjunto). Si la firma instalada de
+    precios_por_gramo_por_insumo no aceptara `insumo_ids` (volumen antiguo), cae al
+    llamado sin acotar para no romper el entrenamiento (degradación controlada).
+    """
+    conjunto = set(insumo_ids) if insumo_ids else None
+    try:
+        return precios_por_gramo_por_insumo(
+            cur, fecha, fallback_ultima_fecha=True, insumo_ids=conjunto)
+    except TypeError:
+        return precios_por_gramo_por_insumo(cur, fecha, fallback_ultima_fecha=True)
+
+
 def _cargar_unidades(cur):
     """Retorna {unidad_id: simbolo_normalizado} de la tabla de unidades de medida."""
     tabla = _detectar_unidades(cur, _tablas_public(cur))
@@ -420,28 +498,24 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
     """
     Construye el dataset POR RACIÓN de todas las recetas y aplica:
     R0 (COM-60 v2.1): SOLO recetas con los 6 nutrientes COMPLETOS (NOT NULL); las
-       incompletas se EXCLUYEN con motivo auditable 'nutricion_incompleta'.
+        incompletas se EXCLUYEN con motivo auditable 'nutricion_incompleta'.
     R1/R2 (COM-5 v4): proteínas permitidas / veto configurable; EXCLUYEN.
     COM-71 (R3 eliminada): el precio YA NO excluye. nivel_precio es informativo
-       (bajo/medio/alto según umbrales; 'incompleto'/'sin_precio' si no costeable).
+        (bajo/medio/alto según umbrales; 'incompleto'/'sin_precio' si no costeable).
     COM-71 (R4 como flag): si faltan fuentes de precio o el costo es 0, la receta
-       NO se excluye: entra al cluster con costeable=False y el greedy la audita.
+        NO se excluye: entra al cluster con costeable=False y el greedy la audita.
     COM-47 v3: la NUTRICIÓN se toma DIRECTA de recetas_almuerzo (ya por ración).
+    COM-76 (D4a): el mapa de precios (y por tanto el paso RF) se ACOTA a los insumos
+        de los ingredientes que realmente usan las recetas activas, en lugar de todo
+        el catálogo. El orden interno cambia (primero esquema/recetas/líneas, luego
+        precios) pero la lógica de costeo y reglas es idéntica a COM-72.
     Retorna (filas, excluidas).
     """
     re_permitida, re_vetada, _, _ = cargar_reglas_proteinas(cur)
     unidades = _cargar_unidades(cur)
     fecha_hoy = date.today()
-    precios_insumo = precios_por_gramo_por_insumo(cur, fecha_hoy, fallback_ultima_fecha=True)
-    eq_map = _cargar_equivalencias(cur)
-    opciones_cache = {}
 
-    def _opcion(ing_id, peso_estimado_g):
-        if ing_id not in opciones_cache:
-            opciones_cache[ing_id] = _opcion_con_prediccion(
-                cur, ing_id, fecha_hoy, precios_insumo, peso_estimado_g)
-        return opciones_cache[ing_id]
-
+    # ---- Detección de esquema (COM-5) ----
     tablas = _tablas_public(cur)
     puente = _detectar_puente(cur, tablas)
     catalogo = _detectar_catalogo(cur, tablas, puente)
@@ -497,11 +571,13 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
     col_r_vita = _col(cols_r, ['vitamina_a_ug', 'vitamina_a'], contiene='vitamina_a')
     col_r_zinc = _col(cols_r, ['zinc_mg', 'zinc'], contiene='zinc')
     col_r_carb = _col(cols_r, ['carbohidratos_g', 'carbohidratos'], contiene='carbohidr')
+
     sel_nut = (f", {col_r_hie} AS hierro_mg, {col_r_pro} AS proteina_g, {col_r_ene} AS energia_kcal"
                f", {col_r_vita if col_r_vita else 'NULL'} AS vitamina_a_ug"
                f", {col_r_zinc if col_r_zinc else 'NULL'} AS zinc_mg"
                f", {col_r_carb if col_r_carb else 'NULL'} AS carbohidratos_g")
     sel_rac = f"{col_r_rac} AS raciones" if col_r_rac else "NULL AS raciones"
+
     cur.execute(f"SELECT id, {col_r_nom} AS nombre, {sel_rac}{sel_nut} FROM {recetas_tabla}{filtro_estado};")
     recetas = cur.fetchall()
 
@@ -530,11 +606,28 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
             LEFT JOIN unidades_medida um2 ON um2.id = ci.unidad_medida_id
             LEFT JOIN categorias_alimentos ca ON ca.id = ci.categoria_id
         """)
+    lineas_puente = cur.fetchall()
+
+    # ---- COM-76 (D4a): acotar el mapa de precios (paso RF) a insumos relevantes ----
+    ing_ids = sorted({fila['ing_id'] for fila in lineas_puente if fila['ing_id'] is not None})
+    insumo_ids = set()
+    if ing_ids:
+        cur.execute("SELECT id FROM insumos WHERE ingrediente_id = ANY(%s);", (ing_ids,))
+        insumo_ids = {r['id'] for r in cur.fetchall()}
+    precios_insumo = _precios_insumo_scoped(cur, fecha_hoy, insumo_ids)
+    eq_map = _cargar_equivalencias(cur)
+    opciones_cache = {}
+
+    def _opcion(ing_id, peso_estimado_g):
+        if ing_id not in opciones_cache:
+            opciones_cache[ing_id] = _opcion_con_prediccion(
+                cur, ing_id, fecha_hoy, precios_insumo, peso_estimado_g)
+        return opciones_cache[ing_id]
 
     costo_acum = {}
     nombres_acum = {}
     sin_precio_acum = {}
-    for fila in cur.fetchall():
+    for fila in lineas_puente:
         opc = _opcion(fila['ing_id'], fila['peso_estimado_g'])
         if opc is None:
             sin_precio_acum.setdefault(fila['receta_id'], []).append(fila['ing_nombre'])
@@ -625,7 +718,6 @@ def construir_dataset(cur, precio_bajo_max, precio_medio_max):
             'ingredientes': items,
             'campos_imputados': [],
         })
-
     # COM-60 v2.1 (trazabilidad): imputación por MEDIANA de COM-60 v2 RETIRADA.
     # for campo in ('vitamina_a_ug', 'zinc_mg', 'carbohidratos_g'):
     #     presentes = [f[campo] for f in filas if f[campo] is not None]
@@ -648,13 +740,14 @@ def _minmax(recetas) -> dict:
 
 
 # ==========================================
-# COM-60: RE-ETIQUETADO DETERMINISTA POR MEDIANAS REALES
+# COM-60 + COM-76: RE-ETIQUETADO DETERMINISTA POR MEDIANAS REALES
 # ==========================================
 def _medianas_por_indice(filas, labels):
     """
     {indice_cluster: {feature: mediana}} con las 6 variables + precio.
     COM-71: la mediana de precio se calcula SOLO sobre miembros costeables para no
     sesgar con ceros de recetas sin precio; si el cluster no tiene costeables, 0.0.
+    COM-76: estas medianas alimentan el nuevo etiquetado de negocio (D2).
     """
     grupos = {}
     for f, lab in zip(filas, labels):
@@ -678,24 +771,69 @@ def _medianas_por_indice(filas, labels):
 
 def _etiquetar_por_medianas(medianas_por_indice):
     """
-    COM-60 (criterio D4): biyección determinista indice->código sobre MEDIANAS reales:
-    1) mayor mediana de hierro -> Anti-Anemia (alto hierro)
-    2) mayor mediana de energía entre restantes -> Energético denso
-    3) mayor mediana de proteína entre restantes -> Proteico balanceado
-    4) restante -> Ligero complementario
+    COM-76 (D2): biyección determinista indice->código sobre MEDIANAS reales de las
+    6 variables nutricionales (el precio NO participa):
+      1) mayor mediana de hierro                          -> 1 Anti-Anemia Premium
+      2) entre restantes, mayor media-z de
+         (proteína, zinc, vitamina A)                     -> 2 Fortalecimiento Balanceado
+      3) entre restantes, menor mediana de energía
+         (desempate: menor carbohidratos)                 -> 3 Ligero y Saludable
+      4) restante                                         -> 4 All-Rounder
+    La prioridad del paso 1 materializa "Anemia Cero" (COM-60). Si por degeneración
+    (k<4) quedaran índices sin regla, se asignan los códigos restantes en orden
+    creciente para garantizar biyección.
     """
     idx = list(medianas_por_indice.keys())
     asignacion = {}
+    if not idx:
+        return asignacion
+
+    # ---- Paso 1: Anti-Anemia Premium (mayor mediana de hierro) ----
     i_anemia = max(idx, key=lambda i: medianas_por_indice[i]['hierro_mg'])
     asignacion[i_anemia] = 1
     idx.remove(i_anemia)
-    i_energia = max(idx, key=lambda i: medianas_por_indice[i]['energia_kcal'])
-    asignacion[i_energia] = 2
-    idx.remove(i_energia)
-    i_proteina = max(idx, key=lambda i: medianas_por_indice[i]['proteina_g'])
-    asignacion[i_proteina] = 3
-    idx.remove(i_proteina)
-    asignacion[idx[0]] = 4
+
+    # ---- Paso 2: Fortalecimiento Balanceado (media-z de proteína+zinc+vitA) ----
+    if idx:
+        feats = ['proteina_g', 'zinc_mg', 'vitamina_a_ug']
+        # z-score calculado SOBRE LAS MEDIANAS de los clusters restantes (comparables)
+        stats = {}
+        for f in feats:
+            vals = np.array([medianas_por_indice[i][f] for i in idx], dtype=float)
+            mu, sd = float(vals.mean()), float(vals.std())
+            stats[f] = (mu, sd)
+
+        def _score_fort(i):
+            s = 0.0
+            for f in feats:
+                mu, sd = stats[f]
+                v = float(medianas_por_indice[i][f])
+                s += 0.0 if sd == 0 else (v - mu) / sd
+            return s / len(feats)
+
+        i_fort = max(idx, key=_score_fort)
+        asignacion[i_fort] = 2
+        idx.remove(i_fort)
+
+    # ---- Paso 3: Ligero y Saludable (menor energía; desempate menor carbo) ----
+    if idx:
+        i_lig = min(idx, key=lambda i: (medianas_por_indice[i]['energia_kcal'],
+                                        medianas_por_indice[i]['carbohidratos_g']))
+        asignacion[i_lig] = 3
+        idx.remove(i_lig)
+
+    # ---- Paso 4: All-Rounder (restante) ----
+    if idx:
+        asignacion[idx[0]] = 4
+        idx.remove(idx[0] if idx else None) if False else None  # no-op defensivo
+    # Degeneración (k<4): repartir códigos libres en orden para mantener biyección
+    usados = set(asignacion.values())
+    for i in idx:
+        for cod in (1, 2, 3, 4):
+            if cod not in usados:
+                asignacion[i] = cod
+                usados.add(cod)
+                break
     return asignacion
 
 
@@ -703,6 +841,15 @@ def _etiquetar_por_medianas(medianas_por_indice):
 # COM-60 (trazabilidad): etiquetado v1 SOBRE ESPACIO ESTANDARIZADO, COMENTADO.
 # =========================================================================
 # def _etiquetar_centroides(centros_estandarizados): ... (índices fijos de columnas z)
+
+# =========================================================================
+# COM-76 (trazabilidad): etiquetado por medianas COM-60 (hierro/energía/proteína/
+# restante) COMENTADO. Reemplazado por la biyección de negocio de _etiquetar_por_medianas:
+#   i_anemia  = max(idx, key=hierro)            -> 1
+#   i_energia = max(idx, key=energia)           -> 2
+#   i_proteina= max(idx, key=proteina)          -> 3
+#   restante                                      -> 4
+# =========================================================================
 
 
 # ==========================================
@@ -713,6 +860,8 @@ def _post_hoc_por_indice(filas, labels):
     {indice: {precio_mediano, fe_por_sol, proteina_por_sol, n_costeables}}.
     COM-71: se calcula SOLO sobre miembros costeables (guard de división y de conjunto
     vacío -> None), para que el indicador Fe/S/ refleje precios reales del comedor.
+    COM-76: se conserva como AUDITORÍA de backend (la UI de clusters ya no muestra
+    precio por cluster, pero el payload lo conserva para tesis y para el greedy).
     """
     grupos = {}
     for f, lab in zip(filas, labels):
@@ -737,16 +886,23 @@ def _post_hoc_por_indice(filas, labels):
 
 
 # ==========================================
-# COM-60 + COM-72: DIAGNÓSTICO DE K ÓPTIMO (informativo, espacio log1p)
+# COM-60 + COM-72 + COM-76: DIAGNÓSTICO DE K ÓPTIMO (informativo, espacio log1p)
 # ==========================================
-def diagnosticar_k(cur, k_max=K_DIAG_MAX):
+def diagnosticar_k(cur, k_max=K_DIAG_MAX, filas_pre=None, excluidas_pre=None):
     """
     COM-60 (criterio D5) + COM-72: curva silhouette/inercia k=2..k_max sobre el
     dataset apto en espacio log1p+RobustScaler. Devuelve k_recomendado (mejor
     silhouette). NO persiste nada ni cambia el k operativo (KMEANS_K).
+    COM-76 (D4c): acepta `filas_pre`/`excluidas_pre` ya construidos por el caller
+    (entrenar_y_persistir) para NO reconstruir el dataset ni re-ejecutar el costeo/RF
+    una segunda vez dentro de la misma petición.
+    COM-76 (D6): usa el n_init parametrizado (KMEANS_N_INIT, default 25).
     """
-    k_operativo, bajo_max, medio_max = _parametros_kmeans(cur)
-    filas, excluidas = construir_dataset(cur, bajo_max, medio_max)
+    k_operativo, bajo_max, medio_max, n_init = _parametros_kmeans(cur)
+    if filas_pre is not None:
+        filas, excluidas = filas_pre, (excluidas_pre or [])
+    else:
+        filas, excluidas = construir_dataset(cur, bajo_max, medio_max)
     n = len(filas)
     if n < 3:
         raise ValueError(
@@ -758,7 +914,7 @@ def diagnosticar_k(cur, k_max=K_DIAG_MAX):
     tope = min(k_max, n - 1)
     curva = []
     for kk in range(K_DIAG_MIN, tope + 1):
-        km = KMeans(n_clusters=kk, random_state=RANDOM_STATE, n_init=N_INIT)
+        km = KMeans(n_clusters=kk, random_state=RANDOM_STATE, n_init=n_init)
         lab = km.fit_predict(Xs)
         sil = 0.0
         if len(set(lab)) > 1 and n > len(set(lab)):
@@ -774,26 +930,32 @@ def diagnosticar_k(cur, k_max=K_DIAG_MAX):
         'scaler': 'RobustScaler',
         'transform': TRANSFORM,
         'features': FEATURES,
+        'n_init': n_init,
         'nota': ("El k operativo se mantiene por regla de negocio (KMEANS_K); la curva es "
                  "informativa para el comité de menú y la tesis."),
     }
 
 
 # ==========================================
-# ENTRENAMIENTO Y PERSISTENCIA (COM-72: espacio log1p)
+# ENTRENAMIENTO Y PERSISTENCIA (COM-72 + COM-76)
 # ==========================================
 def entrenar_y_persistir(cur):
     """
-    COM-71 + COM-72: pipeline completo: dataset (R0-R2 + flags R3/R4) -> log1p ->
-    RobustScaler -> K-means(k=KMEANS_K) -> re-etiquetado por medianas -> métricas
-    post-hoc (solo costeables) -> diagnóstico de k -> persistencia del modelo activo
+    COM-71 + COM-72 + COM-76: pipeline completo: dataset (R0-R2 + flags R3/R4, costeo
+    ACOTADO a insumos del recetario) -> log1p -> RobustScaler -> K-means(k=KMEANS_K,
+    n_init=KMEANS_N_INIT default 25) -> re-etiquetado de NEGOCIO por medianas de las 6
+    variables (COM-76 D2) -> métricas post-hoc (solo costeables, auditoría) ->
+    diagnóstico de k REUSANDO el dataset (COM-76 D4c) -> persistencia del modelo activo
     y su asignación receta->cluster (incluye costeable).
     COM-5 v6: centroides en UNIDADES REALES (inverse_transform + expm1 en COM-72).
     COM-37 v5-fix: silhouette solo si n_samples > n_clusters.
     COM-72: agrega tamanos_clusters y aviso_clusters_pequenos (singletons auditados).
+    COM-76: persiste en parametros el n_init efectivo y 'best_of' (sklearn conserva el
+    mejor run por inercia), y el criterio de etiquetado de negocio.
     Retorna el resumen del entrenamiento (dict). El caller gestiona el commit.
     """
-    k, bajo_max, medio_max = _parametros_kmeans(cur)
+    k, bajo_max, medio_max, n_init = _parametros_kmeans(cur)
+    # COM-76 (D4c): el dataset se construye UNA sola vez por petición.
     filas, excluidas = construir_dataset(cur, bajo_max, medio_max)
     n_no_costeables = sum(1 for f in filas if not f.get('costeable', True))
     if len(filas) < k:
@@ -802,6 +964,7 @@ def entrenar_y_persistir(cur):
             f"Solo {len(filas)} recetas con nutrición completa para k={k} ({n_nut} "
             f"excluidas por nutrición incompleta). Complete los 6 nutrientes o amplíe "
             f"el recetario. (Las recetas sin precio NO se excluyen: quedan costeable=False.)")
+
     # COM-72: log1p antes de RobustScaler (trazabilidad: antes solo RobustScaler)
     X = _transformar_features(np.array([[f[c] for c in FEATURES] for f in filas], dtype=float))
     scaler = RobustScaler()
@@ -809,17 +972,18 @@ def entrenar_y_persistir(cur):
     # COM-60 (trazabilidad): línea anterior sin log1p:
     # Xs = scaler.fit_transform(np.array([[f[c] for c in FEATURES] for f in filas], dtype=float))
 
-    # COM-60: diagnóstico de k óptimo (informativo, se persiste en parametros)
+    # COM-60 + COM-76 (D4c): diagnóstico de k óptimo REUSANDO el dataset ya construido
     curva_k = []
     k_recomendado = k
     try:
-        diag = diagnosticar_k(cur)
+        diag = diagnosticar_k(cur, filas_pre=filas, excluidas_pre=excluidas)
         curva_k = diag['curva']
         k_recomendado = diag['k_recomendado']
     except Exception as e:
         print(f"[COM-60] No se pudo calcular el diagnóstico de k: {e}")
 
-    km = KMeans(n_clusters=k, random_state=RANDOM_STATE, n_init=N_INIT)
+    # COM-76 (D6): n_init parametrizado (default 25); sklearn conserva el mejor run.
+    km = KMeans(n_clusters=k, random_state=RANDOM_STATE, n_init=n_init)
     labels = km.fit_predict(Xs)
     inercia = float(km.inertia_)
     n_clusters_obtenidos = len(set(labels))
@@ -829,6 +993,7 @@ def entrenar_y_persistir(cur):
         silhouette = 0.0
 
     medianas_idx = _medianas_por_indice(filas, labels)
+    # COM-76 (D2): etiquetado de NEGOCIO por medianas de las 6 variables
     asignacion = _etiquetar_por_medianas(medianas_idx)
     post_hoc_idx = _post_hoc_por_indice(filas, labels)
 
@@ -845,7 +1010,6 @@ def entrenar_y_persistir(cur):
             FEATURES[j]: round(float(km.cluster_centers_[i][j]), 4) for j in range(len(FEATURES))
         }
     etiquetas = {str(c): CODIGO_ETIQUETA[c] for c in asignacion.values()}
-
     medianas_por_codigo = {}
     post_hoc_por_codigo = {}
     for idx, codigo in asignacion.items():
@@ -863,7 +1027,9 @@ def entrenar_y_persistir(cur):
     parametros = {
         'features': FEATURES,
         'random_state': RANDOM_STATE,
-        'n_init': N_INIT,
+        # COM-76 (D6): n_init efectivo y best-of auditables
+        'n_init': n_init,
+        'best_of': n_init,
         'precio_bajo_max': bajo_max,
         'precio_medio_max': medio_max,
         # COM-71: R3 informativa y R4 como flag (antes excluían del dataset)
@@ -883,11 +1049,21 @@ def entrenar_y_persistir(cur):
         # COM-72: auditoría de singletons
         'tamanos_clusters': tamanos,
         'min_cluster_recetas': KMEANS_MIN_CLUSTER_RECETAS,
-        'criterio': 'COM-72: clustering SOLO nutricional en espacio log1p+RobustScaler; '
-                    'el precio no excluye (R3 informativa) y la completitud de precios es '
-                    'un flag de elegibilidad (costeable) que aplica el greedy; prioridad '
-                    'Anemia Cero y desempate Fe/S/ en el greedy (COM-60); holgura semanal '
-                    'y stock remanente del subsidio en el greedy (COM-71).',
+        # COM-76: auditoría del etiquetado de negocio y del costeo acotado
+        'etiquetado': 'COM-76: biyección por medianas de las 6 variables '
+                      '(hierro -> Anti-Anemia Premium; media-z(proteína,zinc,vitA) -> '
+                      'Fortalecimiento Balanceado; menor energía -> Ligero y Saludable; '
+                      'restante -> All-Rounder)',
+        'costeo_acotado_insumos': True,
+        'dataset_reusado_para_curva_k': True,
+        'criterio': 'COM-76: clustering SOLO nutricional en espacio log1p+RobustScaler con '
+                    'etiquetas de negocio (Anti-Anemia Premium, Fortalecimiento Balanceado, '
+                    'Ligero y Saludable, All-Rounder); el precio no es feature ni etiqueta: '
+                    'solo alimenta el flag costeable (R4), nivel_precio informativo y el '
+                    'post-hoc Fe/S/; prioridad Anemia Cero y desempate Fe/S/ en el greedy '
+                    '(COM-60); holgura semanal y stock remanente del subsidio en el greedy '
+                    '(COM-71); costeo del dataset acotado a insumos del recetario y dataset '
+                    reutilizado para la curva de k (COM-76 D4, fix del 504).',
     }
     cur.execute("""
         INSERT INTO kmeans_modelos
@@ -934,6 +1110,7 @@ def entrenar_y_persistir(cur):
     return {
         'modelo_id': modelo_id,
         'k': k,
+        'n_init': n_init,
         'n_recetas': len(filas),
         'n_excluidas': len(excluidas),
         'inercia': round(inercia, 4),
@@ -992,6 +1169,8 @@ def obtener_recetas_por_cluster(cur, modelo_id, cluster_codigo=None):
     if cluster_codigo is not None:
         query += " AND rc.cluster_codigo = %s"
         params.append(cluster_codigo)
+    # COM-76 (trazabilidad): el ORDER BY precio_soles se mantiene solo como orden
+    # interno estable del payload; la UI ya no exhibe precio por cluster.
     query += " ORDER BY rc.cluster_codigo, rc.precio_soles;"
     cur.execute(query, params)
     return cur.fetchall()
@@ -1003,11 +1182,13 @@ def listar_candidatas(cur):
     motivo (R0/R1/R2), recalculadas con los parámetros vigentes (sin persistir nada).
     COM-71: agrega n_costeables / n_no_costeables y el detalle de ingredientes sin
     precio en cada fila apta no costeable.
+    COM-76: heredará el costeo acotado de construir_dataset (misma función).
     """
-    k, bajo_max, medio_max = _parametros_kmeans(cur)
+    k, bajo_max, medio_max, n_init = _parametros_kmeans(cur)
     filas, excluidas = construir_dataset(cur, bajo_max, medio_max)
     return {
         'k': k,
+        'n_init': n_init,
         'aptas': filas,
         'excluidas': excluidas,
         'n_costeables': sum(1 for f in filas if f.get('costeable', True)),
