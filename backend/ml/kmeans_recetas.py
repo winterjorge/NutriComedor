@@ -215,8 +215,8 @@ def cargar_reglas_proteinas(cur):
     vetadas = INGREDIENTES_VETADOS_DEFAULT
     try:
         parsed = json.loads(p.get('KMEANS_INGREDIENTES_VETADOS') or 'null')
-        if vetadas is None:
-            vetadas = INGREDIENTES_VETADOS_DEFAULT
+        if isinstance(parsed, list) and parsed:
+            vetadas = [str(x).lower() for x in parsed]
     except Exception:
         vetadas = INGREDIENTES_VETADOS_DEFAULT
     return (_regex_de_lista(permitidas, PROTEINAS_PERMITIDAS_DEFAULT),
@@ -825,7 +825,7 @@ def _etiquetar_por_medianas(medianas_por_indice):
     # ---- Paso 4: All-Rounder (restante) ----
     if idx:
         asignacion[idx[0]] = 4
-        idx.remove(idx[0] if idx else None) if False else None  # no-op defensivo
+        idx = idx[1:]
     # Degeneración (k<4): repartir códigos libres en orden para mantener biyección
     usados = set(asignacion.values())
     for i in idx:
@@ -1056,14 +1056,14 @@ def entrenar_y_persistir(cur):
                       'restante -> All-Rounder)',
         'costeo_acotado_insumos': True,
         'dataset_reusado_para_curva_k': True,
-        'criterio': 'COM-76: clustering SOLO nutricional en espacio log1p+RobustScaler con '
-                    'etiquetas de negocio (Anti-Anemia Premium, Fortalecimiento Balanceado, '
-                    'Ligero y Saludable, All-Rounder); el precio no es feature ni etiqueta: '
-                    'solo alimenta el flag costeable (R4), nivel_precio informativo y el '
-                    'post-hoc Fe/S/; prioridad Anemia Cero y desempate Fe/S/ en el greedy '
-                    '(COM-60); holgura semanal y stock remanente del subsidio en el greedy '
-                    '(COM-71); costeo del dataset acotado a insumos del recetario y dataset '
-                    reutilizado para la curva de k (COM-76 D4, fix del 504).',
+        'criterio': ('COM-76: clustering SOLO nutricional en espacio log1p+RobustScaler con '
+                     'etiquetas de negocio (Anti-Anemia Premium, Fortalecimiento Balanceado, '
+                     'Ligero y Saludable, All-Rounder); el precio no es feature ni etiqueta: '
+                     'solo alimenta el flag costeable (R4), nivel_precio informativo y el '
+                     'post-hoc Fe/S/; prioridad Anemia Cero y desempate Fe/S/ en el greedy '
+                     '(COM-60); holgura semanal y stock remanente del subsidio en el greedy '
+                     '(COM-71); costeo del dataset acotado a insumos del recetario y dataset '
+                     'reutilizado para la curva de k (COM-76 D4, fix del 504).'),
     }
     cur.execute("""
         INSERT INTO kmeans_modelos
