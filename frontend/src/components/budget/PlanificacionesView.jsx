@@ -19,8 +19,8 @@ Historial:
             Se agrega filtro por día y exportación a PDF de la lista de compras.
   COM-66: Rediseño responsive para móviles/tablets (tooltips, modal de detalles,
             scroll horizontal controlado).
-  COM-69 (este archivo): la lista de compras se solicita CON comedor_id para que el
-            backend aplique la cobertura del subsidio del mes (Solución B):
+  COM-69: la lista de compras se solicita CON comedor_id para que el backend aplique
+            la cobertura del subsidio del mes (Solución B):
             * Nuevas columnas "Subsidio cubre" y "Costo": cuando el ítem queda 100%
               cubierto por el subsidio, el costo se reemplaza por el badge ROJO
               "SUBSIDIADO"; cobertura parcial muestra "SUBS. PARCIAL" + el costo del
@@ -28,17 +28,20 @@ Historial:
             * Franja resumen del subsidio del mes (ítems subsidiados, ahorro
               estimado y costo de compra estimado).
             * El PDF incluye las mismas columnas y el texto SUBSIDIADO en rojo.
-            Trazabilidad: la tabla anterior de 5 columnas queda comentada al final.
   COM-74 (este archivo): muestra tarjeta Cocineras + badge de fuente (IA/parámetro)
             + desglose costo mercado vs post-subsidio y ahorro en el modal de detalles.
+  COM-75 (este archivo): FIX del bug "No hay días planificados" persistente.
+            Se agrega setError('') al inicio de toggleCompras y cambiarDiaFiltro
+            para limpiar errores previos al cambiar de día.
 Permisos: módulo 'planificaciones' (Directivo y Operativo del comedor, COM-25/COM-8).
 Uso: Montada por App.jsx en la pestaña "Planificaciones".
+Referencia: tickets COM-8 / HU-08 / COM-65 / COM-66 / COM-69 / COM-74 / COM-75.
 */
 import React, { useState, useEffect, useCallback } from 'react';
 import {
     ClipboardList, Loader2, AlertCircle, ChevronDown, ChevronUp,
     Wallet, Coins, TrendingUp, Flame, Users, ShoppingCart, History,
-    Droplet, Trash2, FileDown, Calendar, Printer, Info, X, Gift
+    Droplet, Trash2, FileDown, Calendar, Printer, Info, X, Gift, Sparkles
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
@@ -229,13 +232,14 @@ export const PlanificacionesView = () => {
         }
     };
 
-    // ---------- COM-65 + COM-69: Lista de compras (semanal o por día, con subsidio) ----------
+    // ---------- COM-65 + COM-69 + COM-75: Lista de compras (semanal o por día, con subsidio) ----------
     const toggleCompras = async (plan) => {
         if (mostrarCompras[plan.id]) {
             setMostrarCompras({ ...mostrarCompras, [plan.id]: false });
             return;
         }
         setMostrarCompras({ ...mostrarCompras, [plan.id]: true });
+        setError(''); // COM-75: limpiar error al cambiar de día
         const dia = diaFiltro[plan.id] || null;
         const cacheKey = `${plan.id}_${dia || 'all'}`;
         if (compras[cacheKey]) return;
@@ -253,8 +257,9 @@ export const PlanificacionesView = () => {
         }
     };
 
-    // COM-65 + COM-69: cambiar el día de filtro y recargar (con comedor_id)
+    // COM-65 + COM-69 + COM-75: cambiar el día de filtro y recargar (con comedor_id)
     const cambiarDiaFiltro = async (planId, dia) => {
+        setError(''); // COM-75: limpiar error al cambiar de día
         setDiaFiltro(prev => ({ ...prev, [planId]: dia }));
         const cacheKey = `${planId}_${dia || 'all'}`;
         if (compras[cacheKey]) return;
