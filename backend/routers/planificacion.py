@@ -36,12 +36,18 @@ COM-75 (este archivo): FIX de correspondencia ingrediente->insumo y de precios:
       insumos nuevos sin histórico.
     * Cada ítem expone 'fuente_precio' para auditoría (SCRAPER_DIA / MANUAL_PERIODO /
       PREDICHO / SCRAPER_ULTIMO / LEGACY_INGREDIENTE / None).
+COM-75 v2 (este archivo): REGLA DEL DÍA DE COMPRA en la lista: los precios se
+    resuelven UNA sola vez para el MENOR DÍA planificado de la semana
+    (fecha_compra = fecha_referencia + min(dias) - 1) y se replican a todos los
+    ítems, coherente con el motor greedy. La RF se acota a los insumos de la lista
+    (insumo_ids) y el diagnóstico reutiliza el mismo mapa (precios_mapa), por lo que
+    la predicción corre una única vez por petición de lista.
 Trazabilidad: el formateo anterior sin subsidio queda comentado al final.
 Uso: Registrado en main.py con prefijo /api/v1.
-Referencia: tickets COM-65 / COM-67 / COM-69 / COM-75 (solo trazabilidad).
+Referencia: tickets COM-65 / COM-67 / COM-69 / COM-75 / COM-75 v2 (solo trazabilidad).
 """
 import math
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query
 from psycopg2.extras import RealDictCursor
 from database import get_db
@@ -196,8 +202,8 @@ def generar_lista_compras(
     db=Depends(get_db)
 ):
     """
-    COM-67 v2 + COM-69 + COM-75: lista de compras consolidada (semanal o por día) con
-    unidades reales de mercado y cobertura de SUBSIDIO (Solución B):
+    COM-67 v2 + COM-69 + COM-75 + COM-75 v2: lista de compras consolidada (semanal o
+    por día) con unidades reales de mercado y cobertura de SUBSIDIO (Solución B):
     1) requerido en gramos/ml base por ingrediente (equivalencias -> factor -> peso);
     2) COM-69: cubierto = min(requerido, stock del subsidio del mes del comedor);
        compra = requerido - cubierto; el costo estimado va SOLO sobre la compra;
@@ -206,6 +212,9 @@ def generar_lista_compras(
     COM-75: el insumo de cada ítem sale de la EQUIVALENCIA ACTIVA y su precio del mapa
     jerarquizado por insumo_id (scraper día > manual > RF > scraper último); nombres
     limpios de "(manual)"; se expone ingredientes_requieren_precio_manual y fuente_precio.
+    COM-75 v2: los precios se resuelven UNA sola vez para el MENOR DÍA planificado de
+    la semana (fecha_compra) y se replican a todos los ítems; la RF se acota a los
+    insumos de la lista y el diagnóstico reutiliza el mismo mapa.
     Si no se envía comedor_id, se comporta exactamente como COM-67 v2 (sin subsidio).
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
@@ -230,6 +239,10 @@ def generar_lista_compras(
         dias_planificados = cur.fetchall()
         if not dias_planificados:
             raise HTTPException(status_code=404, detail="No hay días planificados")
+
+        # COM-75 v2: fecha de compra = menor día planificado de la semana
+        dias_sel = sorted({d['dia'] for d in dias_planificados})
+        fecha_compra = fecha_ref + timedelta(days=min(dias_sel) - 1) if dias_sel else fecha_ref
 
         lista_compras = {}
 
@@ -318,7 +331,8 @@ def generar_lista_compras(
                     lista_compras[clave]['dias_uso'].append(dia_plan['dia_nombre'])
 
         # ------------------------------------------------------------------
-        # COM-69 + COM-75: stock del subsidio del mes y mapa jerarquizado de precios
+        # COM-69 + COM-75 + COM-75 v2: stock del subsidio y mapa de precios
+        # del DÍA DE COMPRA (menor día planificado), acotado a insumos relevantes
         # ------------------------------------------------------------------
         stock = {}
         if comedor_id:
@@ -327,9 +341,18 @@ def generar_lista_compras(
             except Exception as e:
                 print(f"[COM-69] No se pudo leer el subsidio del mes: {e}")
                 stock = {}
+
+        # COM-75 v2: insumos relevantes = todos los insumos de los ingredientes de la lista
+        ing_ids_lista = sorted({data['ingrediente_id'] for data in lista_compras.values()})
+        insumos_relevantes = set()
+        if ing_ids_lista:
+            cur.execute("SELECT id FROM insumos WHERE ingrediente_id = ANY(%s);", (ing_ids_lista,))
+            insumos_relevantes = {r['id'] for r in cur.fetchall()}
+
         try:
             precios_insumo_map = precios_por_gramo_por_insumo(
-                cur, fecha_ref.isoformat(), fallback_ultima_fecha=True) or {}
+                cur, fecha_compra.isoformat(), fallback_ultima_fecha=True,
+                insumo_ids=insumos_relevantes or None) or {}
         except Exception as e:
             print(f"[COM-75] No se pudieron leer precios por insumo: {e}")
             precios_insumo_map = {}
@@ -347,9 +370,11 @@ def generar_lista_compras(
             if act is None or opc['ppg'] < act['ppg']:
                 mejor_por_ing[ing_id] = opc
 
-        # COM-75: diagnóstico UNA sola vez (fuera del bucle de ítems)
+        # COM-75 + COM-75 v2: diagnóstico UNA sola vez reutilizando el mapa (sin 2ª RF)
         try:
-            requieren_manual = ingredientes_requieren_precio_manual(cur, fecha_ref)
+            requieren_manual = ingredientes_requieren_precio_manual(
+                cur, fecha_compra, insumo_ids=insumos_relevantes or None,
+                precios_mapa=precios_insumo_map)
         except Exception as e:
             print(f"[COM-75] No se pudo diagnosticar precios manuales: {e}")
             requieren_manual = []
@@ -435,6 +460,8 @@ def generar_lista_compras(
             'dia_especifico': dia,
             'total_dias': len(dias_planificados),
             'total_ingredientes': len(lista_formateada),
+            # COM-75 v2: transparencia de la regla del día de compra
+            'fecha_precios_compra': fecha_compra.isoformat(),
             'lista_compras': lista_formateada,
             # COM-69: resumen de subsidio aplicado a esta lista
             'subsidio': {
