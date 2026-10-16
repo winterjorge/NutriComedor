@@ -10,8 +10,12 @@ COM-59A: bloque "SUBVENCIONADO VS COMPRADO": re-costea la semana del plan
 con y sin el subsidio mensual de víveres del comedor (stock del mes vs
 consumo proyectado por día y comensal), y valida el MARGEN SEMANAL OBJETIVO
 contra la recolección proyectada.
-COM-78: las sugerencias usan el margen proyectado (el que se muestra en las
-tarjetas) en lugar del margen con subsidio, evitando contradicciones visuales.
+COM-78 v2 FIX:
+  * _resolver_plan ya NO hace fallback al último plan global cuando el comedor
+    no tiene plan propio (evita que un comedor sin datos "herede" los números
+    de otro).
+  * Se elimina la alerta "margen con subsidio" que contradecía la tarjeta
+    "Margen proy." positiva; la alerta de margen proyectado ya cubre el caso.
 Uso: Importado por routers/reportes_gestion.py. Recibe cursor psycopg2 (RealDictCursor).
 Referencia: tickets COM-50 / COM-59 / HU-10 / COM-78 (solo trazabilidad).
 """
@@ -199,7 +203,9 @@ def _cumple_reglas_vigentes(nombres, re_permitida, re_vetada):
 # ==========================================
 def _resolver_plan(cur, comedor_id, candidata_id=None, presupuesto_id=None):
     """(fuente, dias, resumen_base, presupuesto_total, plan_id) con precedencia:
-    candidata indicada -> última seleccionada -> última candidata -> planificación."""
+    candidata indicada -> última seleccionada -> última candidata -> planificación.
+    COM-78 v2 FIX: ya NO hace fallback al último plan global cuando el comedor
+    no tiene plan propio (evita datos fantasma)."""
     cand = None
     fuente = None
     if candidata_id:
@@ -243,17 +249,27 @@ def _resolver_plan(cur, comedor_id, candidata_id=None, presupuesto_id=None):
                 'cluster_etiqueta': d.get('cluster_etiqueta'),
             })
         return fuente, dias, resumen_base, resumen_base.get('presupuesto_semanal'), cand['id']
+
+    # COM-78 v2 FIX: buscar SOLO planificaciones del comedor (no fallback global).
     pres = None
     if presupuesto_id:
-        cur.execute("SELECT * FROM presupuesto_semanal WHERE id = %s;", (presupuesto_id,))
+        cur.execute("SELECT * FROM presupuesto_semanal WHERE id = %s AND comedor_id = %s;", (presupuesto_id, comedor_id))
         pres = cur.fetchone()
         fuente = 'planificacion_indicada'
-    else:
-        cur.execute("SELECT * FROM presupuesto_semanal ORDER BY id DESC LIMIT 1;")
+    if pres is None:
+        cur.execute("""
+            SELECT * FROM presupuesto_semanal
+            WHERE comedor_id = %s ORDER BY id DESC LIMIT 1;
+        """, (comedor_id,))
         pres = cur.fetchone()
         fuente = 'planificacion_ultima'
+
+    # COM-78 v2 FIX: si el comedor no tiene plan propio, retornar None (no heredar
+    # el plan de otro comedor). Esto evita que comedores sin datos aparezcan con
+    # números "fantasma" en el agregado macro/zona.
     if pres is None:
         return None, [], {}, None, None
+
     cur.execute("""
         SELECT pd.dia, pd.dia_nombre, pd.receta_id, pd.nombre_receta,
                pd.costo_racion, pd.costo_total, pd.recoleccion_proyectada, pd.total_comensales
@@ -452,21 +468,15 @@ def _reporte_un_comedor(cur, comedor_id, candidata_id=None, presupuesto_id=None)
                     traceback.print_exc()
                     continue
 
-            # COM-78: alerta de margen usa el margen PROYECTADO (el de las tarjetas)
+            # COM-78 v2 FIX: alerta de margen usa SOLO el margen proyectado (el de
+            # las tarjetas). Se elimina la alerta "margen con subsidio" que usaba
+            # subsidio_bloque['margen_semanal_pct'] y generaba contradicciones
+            # visuales (tarjeta verde + alerta roja).
             if margen < 0:
                 sugerencias.append({
                     'tipo': 'alerta',
                     'texto': (f"La recolección proyectada (S/ {recoleccion:.2f}) NO cubre el costo semanal "
                               f"(S/ {costo_total:.2f}): margen negativo de S/ {abs(margen):.2f}."),
-                })
-
-            # COM-78: alerta de subsidio solo si el margen con subsidio está bajo el objetivo
-            if subsidio_bloque and not subsidio_bloque['cumple_margen_semanal']:
-                sugerencias.append({
-                    'tipo': 'alerta',
-                    'texto': (f"El margen semanal con subsidio ({subsidio_bloque['margen_semanal_pct']}%) está por "
-                              f"debajo del objetivo ({subsidio_bloque['margen_semanal_objetivo_pct']}%): el comedor "
-                              f"quedaría expuesto si un día vende menos de lo proyectado."),
                 })
 
             if _f(presupuesto_total) and costo_total > _f(presupuesto_total):
@@ -567,6 +577,7 @@ def generar_reporte_gestion(cur, comedores_alcance, nivel='comedor', zona=None,
     for c in objetivos:
         rep = _reporte_un_comedor(cur, c['id'])
         if rep is None:
+            # COM-78 v2 FIX: saltar comedores sin plan propio (no heredan datos)
             continue
         por_comedor.append({
             'comedor_id': c['id'],
@@ -645,11 +656,13 @@ def listar_planes_disponibles(cur, comedor_id):
         LIMIT 10;
     """, (comedor_id,))
     candidatas = cur.fetchall()
+    # COM-78 v2 FIX: agregar WHERE comedor_id = %s para consistencia
     cur.execute("""
         SELECT id, fecha_referencia, fondo_total, costo_total_semana, viable
         FROM presupuesto_semanal
+        WHERE comedor_id = %s
         ORDER BY id DESC
         LIMIT 10;
-    """)
+    """, (comedor_id,))
     planificaciones = cur.fetchall()
     return {'propuestas': candidatas, 'planificaciones': planificaciones}
