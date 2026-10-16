@@ -39,15 +39,15 @@ administrativo y ocultar "Módulo Predictivo Activo" para usuarios regulares.
 */
 import React, { useState, useEffect } from 'react';
 import {
-ChefHat, Calculator, ShoppingCart, Activity, Users, ClipboardList,
-LogOut, Store, UserCog, Loader2, MapPin, Contact, BarChart3, PieChart,
-Sparkles,  // COM-8: ícono de la pestaña "Propuestas de Menú"
-LineChart, // COM-5 v4: ícono de la pestaña "Modelos ML"
-Package,   // COM-37: ícono de la pestaña "Gestión de Ingredientes"
-Gift,      // COM-59A: ícono de la pestaña "Subsidio de Víveres"
-Coins,     // COM-59A: ícono de la pestaña "Precios de Venta"
-ClipboardCheck, // COM-69: ícono de la pestaña "Reporte Subsidio"
-Database    // COM-43: ícono de la pestaña "Scraper SISAP"
+    ChefHat, Calculator, ShoppingCart, Activity, Users, ClipboardList,
+    LogOut, Store, UserCog, Loader2, MapPin, Contact, BarChart3, PieChart,
+    Sparkles,  // COM-8: ícono de la pestaña "Propuestas de Menú"
+    LineChart, // COM-5 v4: ícono de la pestaña "Modelos ML"
+    Package,   // COM-37: ícono de la pestaña "Gestión de Ingredientes"
+    Gift,      // COM-59A: ícono de la pestaña "Subsidio de Víveres"
+    Coins,     // COM-59A: ícono de la pestaña "Precios de Venta"
+    ClipboardCheck, // COM-69: ícono de la pestaña "Reporte Subsidio"
+    Database    // COM-43: ícono de la pestaña "Scraper SISAP"
 } from 'lucide-react';
 import { RecipesView } from './components/recipes/RecipesView';
 import { ClusterRecetasView } from './components/recipes/ClusterRecetasView';
@@ -87,39 +87,39 @@ import { ScraperAdminView } from './components/scraper/ScraperAdminView';
 const MODULOS_ADMIN = ['municipalidades', 'roles', 'bloqueos', 'vistas'];
 // COM-25 + COM-5 + COM-8 + COM-5 v4 + COM-37 + COM-59A + COM-69 + COM-43: catálogo de pestañas
 const TABS_BASE = [
-{ id: 'recipes', label: 'Recetario', icon: ChefHat, color: 'emerald', modulo: 'recetario' },
-// COM-5 v4 (trazabilidad): línea ANTERIOR comentada. Hasta COM-5 v3 la pestaña de
-// clusters se gateaba por el módulo 'recetario' (visible para Directivo/Operativo);
-// desde COM-5 v4 es exclusiva del Admin de Sistemas vía módulo 'clusters'.
-// { id: 'clusters', label: 'Clusters K-Means', icon: PieChart, color: 'emerald', modulo: 'recetario' }, // COM-5 v1
-{ id: 'clusters', label: 'Clusters K-Means', icon: PieChart, color: 'emerald', modulo: 'clusters' }, // COM-5 v4: solo Admin
-// COM-5 v4: panel de gráficos de validación de los modelos ML (solo Admin)
-{ id: 'modelos_ml', label: 'Modelos ML', icon: LineChart, color: 'blue', modulo: 'modelos_ml' },
-// COM-43: ejecución web y auditoría del scraper SISAP. Gateada por el módulo
-// 'modelos_ml' (sembrado solo para el Admin de Sistemas); el backend re-valida.
-{ id: 'scraper', label: 'Scraper SISAP', icon: Database, color: 'blue', modulo: 'modelos_ml' },
-// COM-37: gestión de ingredientes y precios manuales con vigencia (solo Admin)
-{ id: 'gestion_ingredientes', label: 'Gestión de Ingredientes', icon: Package, color: 'amber', modulo: 'gestion_ingredientes' },
-// COM-59A: subsidio mensual de víveres (módulo 'subsidio': Admin gestiona todo;
-// Directivos gestionan su comedor; municipales/auditoría solo lectura vía backend)
-{ id: 'subsidio', label: 'Subsidio de Víveres', icon: Gift, color: 'emerald', modulo: 'subsidio' },
-// COM-69: reporte de uso del subsidio por comedor y mes (misma puerta 'subsidio';
-// el backend filtra comedores visibles según alcance del usuario)
-{ id: 'reporte_subsidio', label: 'Reporte Subsidio', icon: ClipboardCheck, color: 'blue', modulo: 'subsidio' },
-// COM-59A: precios de venta con historial (módulo 'precios_venta': solo Admin)
-{ id: 'precios_venta', label: 'Precios de Venta', icon: Coins, color: 'amber', modulo: 'precios_venta' },
-// COM-8 v2: pestaña RETIRADA (se comenta, no se borra): su esquema de generación
-// aleatoria de menús fue reemplazado por el motor greedy de "Propuestas de Menú".
-// { id: 'budget', label: 'Presupuesto', icon: Calculator, color: 'emerald', modulo: 'presupuesto' },
-{ id: 'planificaciones', label: 'Planificaciones', icon: ClipboardList, color: 'blue', modulo: 'planificaciones' },
-// COM-8: propuestas del motor greedy; módulo 'propuestas' sembrado para
-// Directivo (Presidente/Tesorero/Secretario) y Operativo (Cocinero)
-{ id: 'propuestas', label: 'Propuestas de Menú', icon: Sparkles, color: 'emerald', modulo: 'propuestas' },
-{ id: 'comedores', label: 'Comedores', icon: Store, color: 'emerald', modulo: 'comedores' },
-{ id: 'grupos', label: 'Grupos', icon: UserCog, color: 'blue', modulo: 'grupos' },
-{ id: 'reportes', label: 'Reportes', icon: BarChart3, color: 'blue', modulo: 'reportes' },
-{ id: 'catalog', label: 'Catálogo', icon: ShoppingCart, color: 'emerald', modulo: 'catalogo' },
-{ id: 'pos', label: 'Ventas y Demanda', icon: Users, color: 'blue', modulo: 'ventas' },
+    { id: 'recipes', label: 'Recetario', icon: ChefHat, color: 'emerald', modulo: 'recetario' },
+    // COM-5 v4 (trazabilidad): línea ANTERIOR comentada. Hasta COM-5 v3 la pestaña de
+    // clusters se gateaba por el módulo 'recetario' (visible para Directivo/Operativo);
+    // desde COM-5 v4 es exclusiva del Admin de Sistemas vía módulo 'clusters'.
+    // { id: 'clusters', label: 'Clusters K-Means', icon: PieChart, color: 'emerald', modulo: 'recetario' }, // COM-5 v1
+    { id: 'clusters', label: 'Clusters K-Means', icon: PieChart, color: 'emerald', modulo: 'clusters' }, // COM-5 v4: solo Admin
+    // COM-5 v4: panel de gráficos de validación de los modelos ML (solo Admin)
+    { id: 'modelos_ml', label: 'Modelos ML', icon: LineChart, color: 'blue', modulo: 'modelos_ml' },
+    // COM-43: ejecución web y auditoría del scraper SISAP. Gateada por el módulo
+    // 'modelos_ml' (sembrado solo para el Admin de Sistemas); el backend re-valida.
+    { id: 'scraper', label: 'Scraper SISAP', icon: Database, color: 'blue', modulo: 'modelos_ml' },
+    // COM-37: gestión de ingredientes y precios manuales con vigencia (solo Admin)
+    { id: 'gestion_ingredientes', label: 'Gestión de Ingredientes', icon: Package, color: 'amber', modulo: 'gestion_ingredientes' },
+    // COM-59A: subsidio mensual de víveres (módulo 'subsidio': Admin gestiona todo;
+    // Directivos gestionan su comedor; municipales/auditoría solo lectura vía backend)
+    { id: 'subsidio', label: 'Subsidio de Víveres', icon: Gift, color: 'emerald', modulo: 'subsidio' },
+    // COM-69: reporte de uso del subsidio por comedor y mes (misma puerta 'subsidio';
+    // el backend filtra comedores visibles según alcance del usuario)
+    { id: 'reporte_subsidio', label: 'Reporte Subsidio', icon: ClipboardCheck, color: 'blue', modulo: 'subsidio' },
+    // COM-59A: precios de venta con historial (módulo 'precios_venta': solo Admin)
+    { id: 'precios_venta', label: 'Precios de Venta', icon: Coins, color: 'amber', modulo: 'precios_venta' },
+    // COM-8 v2: pestaña RETIRADA (se comenta, no se borra): su esquema de generación
+    // aleatoria de menús fue reemplazado por el motor greedy de "Propuestas de Menú".
+    // { id: 'budget', label: 'Presupuesto', icon: Calculator, color: 'emerald', modulo: 'presupuesto' },
+    { id: 'planificaciones', label: 'Planificaciones', icon: ClipboardList, color: 'blue', modulo: 'planificaciones' },
+    // COM-8: propuestas del motor greedy; módulo 'propuestas' sembrado para
+    // Directivo (Presidente/Tesorero/Secretario) y Operativo (Cocinero)
+    { id: 'propuestas', label: 'Propuestas de Menú', icon: Sparkles, color: 'emerald', modulo: 'propuestas' },
+    { id: 'comedores', label: 'Comedores', icon: Store, color: 'emerald', modulo: 'comedores' },
+    { id: 'grupos', label: 'Grupos', icon: UserCog, color: 'blue', modulo: 'grupos' },
+    { id: 'reportes', label: 'Reportes', icon: BarChart3, color: 'blue', modulo: 'reportes' },
+    { id: 'catalog', label: 'Catálogo', icon: ShoppingCart, color: 'emerald', modulo: 'catalogo' },
+    { id: 'pos', label: 'Ventas y Demanda', icon: Users, color: 'blue', modulo: 'ventas' },
 ];
 // COM-25: pestaña de gestión de usuarios (panel global o de comedor)
 const TAB_USUARIOS = { id: 'usuarios', label: 'Usuarios', icon: Contact, color: 'blue', modulo: null };
@@ -127,265 +127,265 @@ const TAB_USUARIOS = { id: 'usuarios', label: 'Usuarios', icon: Contact, color: 
 COM-20: describe el contexto de trabajo activo para exhibirlo en el header.
 */
 const descripcionContexto = (seleccion) => {
-if (!seleccion) return '';
-if (seleccion.perfil === 'SISTEMA') return 'Administración del Sistema';
-if (seleccion.perfil === 'ADMINISTRATIVO') {
-return `Alcance municipal: ${seleccion.distrito}, ${seleccion.ciudad} (${seleccion.departamento})`;
-}
-return seleccion.comedor_nombre || 'Comedor';
+    if (!seleccion) return '';
+    if (seleccion.perfil === 'SISTEMA') return 'Administración del Sistema';
+    if (seleccion.perfil === 'ADMINISTRATIVO') {
+        return `Alcance municipal: ${seleccion.distrito}, ${seleccion.ciudad} (${seleccion.departamento})`;
+    }
+    return seleccion.comedor_nombre || 'Comedor';
 };
 function AppContent() {
-const [activeTab, setActiveTab] = useState('pos');
-const { usuario, pendienteCambio, completarCambioClave, cerrarSesion, seleccion, validando } = useAuth();
-// COM-25: módulos efectivos del usuario en sesión
-const [misModulos, setMisModulos] = useState([]);
-const [cargandoModulos, setCargandoModulos] = useState(true);
-// COM-23: perfil de gestión de comedor (panel de usuarios por comedor)
-const [perfilGestion, setPerfilGestion] = useState(null);
-// COM-78: información municipal para el header
-const [infoMunicipal, setInfoMunicipal] = useState(null);
-useEffect(() => {
-if (!usuario) {
-setMisModulos([]);
-return;
-}
-let vivo = true;
-const cargar = async () => {
-setCargandoModulos(true);
-try {
-const res = await api.getMisModulos(usuario.id);
-if (vivo) setMisModulos(res.modulos || []);
-} catch (e) {
-if (vivo) setMisModulos([]);
-} finally {
-if (vivo) setCargandoModulos(false);
-}
-};
-cargar();
-return () => { vivo = false; };
-}, [usuario]);
-useEffect(() => {
-if (!usuario) {
-setPerfilGestion(null);
-return;
-}
-const determinar = async () => {
-try {
-const membresias = await api.getGruposDeUsuario(usuario.id);
-const ROLES_GESTION = ['Presidente', 'Tesorero'];
-const cubreComedores = membresias.some(m =>
-m.estado_activo && (
-m.ambito === 'GLOBAL' ||
-(m.ambito === 'COMEDOR' && m.grupo === 'Directivo' && ROLES_GESTION.includes(m.rol))
-)
-);
-setPerfilGestion(cubreComedores ? 'COMEDOR_ADMIN' : null);
-} catch (e) {
-setPerfilGestion(null);
-}
-};
-determinar();
-}, [usuario]);
-// COM-78: Cargar información municipal para usuarios administrativos
-useEffect(() => {
-if (usuario?.rol === 'Administrador Sistema') {
-setInfoMunicipal(null);
-return;
-}
-const cargar = async () => {
-try {
-const membresias = await api.getGruposDeUsuario(usuario.id);
-const mun = membresias.find(m => m.grupo === 'Administrativo' && m.estado_activo);
-if (mun && mun.municipalidad_nombre) {
-setInfoMunicipal({
-nombre: mun.municipalidad_nombre,
-distrito: mun.distrito || 'Sin distrito asignado'
-});
-}
-} catch (e) {
-// Silencioso
-}
-};
-cargar();
-}, [usuario?.id]);
-// COM-19: sin sesión -> login
-if (!usuario) {
-return <LoginView />;
-}
-// COM-20: verificando comedor recordado
-if (validando) {
-return (
-<div className="min-h-screen bg-gradient-to-br from-emerald-700 to-emerald-900 flex flex-col items-center justify-center gap-3">
-<Loader2 className="animate-spin text-white" size={44} />
-<p className="text-emerald-100 text-sm">Verificando su comedor de trabajo...</p>
-</div>
-);
-}
-// COM-20: con sesión pero sin selección => pantalla de selección
-if (!seleccion) {
-return (
-<>
-<SeleccionComedorView />
-{pendienteCambio && (
-<ModalCambioClave usuario={usuario} onExito={completarCambioClave} onSalir={cerrarSesion} />
-)}
-</>
-);
-}
-// COM-25: pestañas visibles según módulos permitidos
-const tieneModulosAdmin = MODULOS_ADMIN.some(m => misModulos.includes(m));
-const puedeVerUsuarios = tieneModulosAdmin || perfilGestion === 'COMEDOR_ADMIN';
-// COM-8 v2: compatibilidad de módulos. La pestaña "Presupuesto" fue retirada y
-// reemplazada por "Propuestas de Menú"; quien conservaba el módulo 'presupuesto'
-// mantiene visibilidad de propuestas aunque el seed 'propuestas' no se le aplicara.
-const modulosEfectivos = (misModulos.includes('presupuesto') && !misModulos.includes('propuestas'))
-? [...misModulos, 'propuestas']
-: misModulos;
-// COM-8 v2: el filtro usa modulosEfectivos (línea anterior comentada abajo).
-// const tabs = TABS_BASE.filter(t => misModulos.includes(t.modulo));  // COM-8 v2: reemplazada
-const tabs = TABS_BASE.filter(t => modulosEfectivos.includes(t.modulo));
-if (puedeVerUsuarios) {
-const idx = tabs.findIndex(t => t.id === 'comedores');
-tabs.splice(idx === -1 ? tabs.length : idx, 0, TAB_USUARIOS);
-}
-// Mantiene activa una pestaña visible
-if (tabs.length > 0 && !tabs.some(t => t.id === activeTab)) {
-setTimeout(() => setActiveTab(tabs[0].id), 0);
-}
-// Sin módulos asignados
-if (!cargandoModulos && tabs.length === 0) {
-return (
-<div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
-<div className="bg-white border border-slate-200 rounded-2xl shadow-sm p-8 max-w-md text-center">
-<Activity size={36} className="text-emerald-600 mx-auto mb-3" />
-<h2 className="text-lg font-bold text-slate-800 mb-2">Sin módulos asignados</h2>
-<p className="text-sm text-slate-600">
-Su usuario no tiene módulos permitidos en este momento. Consulte con el
-administrador del sistema para que le asigne los accesos correspondientes.
-</p>
-<button
-onClick={cerrarSesion}
-className="mt-4 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium transition-colors"
->
-Cerrar sesión
-</button>
-</div>
-</div>
-);
-}
-return (
-<>
-<div className="min-h-screen bg-slate-50 text-slate-800 font-sans pb-10">
-{/* Header */}
-<header className="bg-emerald-700 text-white p-4 shadow-md">
-<div className="max-w-6xl mx-auto flex items-center gap-3">
-<Activity size={28} />
-<div className="flex-1">
-<h1 className="text-2xl font-bold tracking-tight">NutriComedor OSB</h1>
-<p className="text-xs text-emerald-100">
-{usuario.nombres} {usuario.apellido_paterno} · {usuario.tipo_documento} {usuario.documento_identidad}
-{usuario.rol === 'Administrador Sistema' && ' · Admin Sistema'}
-{infoMunicipal && ` · ${infoMunicipal.nombre} (${infoMunicipal.distrito})`}
-</p>
-</div>
-<span
-className="text-xs bg-emerald-800 px-3 py-1 rounded-full border border-emerald-600 shadow-inner items-center gap-1 hidden md:flex max-w-[260px]"
-title={descripcionContexto(seleccion)}
->
-<MapPin size={12} className="shrink-0" />
-<span className="truncate">{descripcionContexto(seleccion)}</span>
-</span>
-{usuario.rol === 'Administrador Sistema' && (
-<span className="text-sm bg-emerald-800 px-3 py-1 rounded-full border border-emerald-600 shadow-inner hidden lg:inline-block">
-Módulo Predictivo Activo
-</span>
-)}
-<button
-onClick={cerrarSesion}
-className="flex items-center gap-2 bg-emerald-800 hover:bg-emerald-900 px-3 py-2 rounded-lg text-sm font-medium transition-colors border border-emerald-600"
-title="Cerrar sesión"
->
-<LogOut size={16} />
-<span className="hidden sm:inline">Salir</span>
-</button>
-</div>
-</header>
-<main className="max-w-6xl mx-auto mt-8 p-4">
-{cargandoModulos ? (
-<div className="p-16 text-center text-emerald-600">
-<Loader2 className="animate-spin mx-auto" size={32} />
-<p className="text-sm mt-2 text-slate-500">Cargando sus módulos permitidos...</p>
-</div>
-) : (
-<>
-{/* Barra de pestañas */}
-<div className="flex gap-2 mb-6 border-b border-slate-200 pb-2 overflow-x-auto">
-{tabs.map(tab => {
-const Icon = tab.icon;
-const isActive = activeTab === tab.id;
-return (
-<button
-key={tab.id}
-onClick={() => setActiveTab(tab.id)}
-className={`flex shrink-0 items-center gap-2 px-4 py-2 font-medium rounded-t-lg transition-colors ${isActive
-? `bg-white text-${tab.color}-700 shadow-sm border-t border-x border-slate-200`
-: 'text-slate-500 hover:bg-slate-100'
-}`}
->
-<Icon size={18} /> {tab.label}
-</button>
-);
-})}
-</div>
-{/* Contenedor de vistas */}
-<div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 min-h-[500px]">
-{activeTab === 'recipes' && <RecipesView />}
-{activeTab === 'clusters' && <ClusterRecetasView />} {/* COM-5 / COM-5 v4: módulo 'clusters' */}
-{activeTab === 'modelos_ml' && <ModelosMLView />} {/* COM-5 v4: panel ML solo Admin */}
-{activeTab === 'scraper' && <ScraperAdminView />} {/* COM-43 */}
-{/* COM-37: gestión de ingredientes y precios manuales (solo Admin) */}
-{activeTab === 'gestion_ingredientes' && <GestionIngredientesView />}
-{/* COM-59A: subsidio mensual de víveres por comedor */}
-{activeTab === 'subsidio' && <SubsidioView />}
-{/* COM-69: reporte de uso del subsidio por comedor y mes */}
-{activeTab === 'reporte_subsidio' && <ReporteSubsidioView />}
-{/* COM-59A: precios de venta con historial (solo Admin) */}
-{activeTab === 'precios_venta' && <PreciosVentaView />}
-{/* COM-8 v2: render COMENTADO de la vista Presupuesto retirada.
+    const [activeTab, setActiveTab] = useState('pos');
+    const { usuario, pendienteCambio, completarCambioClave, cerrarSesion, seleccion, validando } = useAuth();
+    // COM-25: módulos efectivos del usuario en sesión
+    const [misModulos, setMisModulos] = useState([]);
+    const [cargandoModulos, setCargandoModulos] = useState(true);
+    // COM-23: perfil de gestión de comedor (panel de usuarios por comedor)
+    const [perfilGestion, setPerfilGestion] = useState(null);
+    // COM-78: información municipal para el header
+    const [infoMunicipal, setInfoMunicipal] = useState(null);
+    useEffect(() => {
+        if (!usuario) {
+            setMisModulos([]);
+            return;
+        }
+        let vivo = true;
+        const cargar = async () => {
+            setCargandoModulos(true);
+            try {
+                const res = await api.getMisModulos(usuario.id);
+                if (vivo) setMisModulos(res.modulos || []);
+            } catch (e) {
+                if (vivo) setMisModulos([]);
+            } finally {
+                if (vivo) setCargandoModulos(false);
+            }
+        };
+        cargar();
+        return () => { vivo = false; };
+    }, [usuario]);
+    useEffect(() => {
+        if (!usuario) {
+            setPerfilGestion(null);
+            return;
+        }
+        const determinar = async () => {
+            try {
+                const membresias = await api.getGruposDeUsuario(usuario.id);
+                const ROLES_GESTION = ['Presidente', 'Tesorero'];
+                const cubreComedores = membresias.some(m =>
+                    m.estado_activo && (
+                        m.ambito === 'GLOBAL' ||
+                        (m.ambito === 'COMEDOR' && m.grupo === 'Directivo' && ROLES_GESTION.includes(m.rol))
+                    )
+                );
+                setPerfilGestion(cubreComedores ? 'COMEDOR_ADMIN' : null);
+            } catch (e) {
+                setPerfilGestion(null);
+            }
+        };
+        determinar();
+    }, [usuario]);
+    // COM-78: Cargar información municipal para usuarios administrativos
+    useEffect(() => {
+        if (usuario?.rol === 'Administrador Sistema') {
+            setInfoMunicipal(null);
+            return;
+        }
+        const cargar = async () => {
+            try {
+                const membresias = await api.getGruposDeUsuario(usuario.id);
+                const mun = membresias.find(m => m.grupo === 'Administrativo' && m.estado_activo);
+                if (mun && mun.municipalidad_nombre) {
+                    setInfoMunicipal({
+                        nombre: mun.municipalidad_nombre,
+                        distrito: mun.distrito || 'Sin distrito asignado'
+                    });
+                }
+            } catch (e) {
+                // Silencioso
+            }
+        };
+        cargar();
+    }, [usuario?.id]);
+    // COM-19: sin sesión -> login
+    if (!usuario) {
+        return <LoginView />;
+    }
+    // COM-20: verificando comedor recordado
+    if (validando) {
+        return (
+            <div className="min-h-screen bg-gradient-to-br from-emerald-700 to-emerald-900 flex flex-col items-center justify-center gap-3">
+                <Loader2 className="animate-spin text-white" size={44} />
+                <p className="text-emerald-100 text-sm">Verificando su comedor de trabajo...</p>
+            </div>
+        );
+    }
+    // COM-20: con sesión pero sin selección => pantalla de selección
+    if (!seleccion) {
+        return (
+            <>
+                <SeleccionComedorView />
+                {pendienteCambio && (
+                    <ModalCambioClave usuario={usuario} onExito={completarCambioClave} onSalir={cerrarSesion} />
+                )}
+            </>
+        );
+    }
+    // COM-25: pestañas visibles según módulos permitidos
+    const tieneModulosAdmin = MODULOS_ADMIN.some(m => misModulos.includes(m));
+    const puedeVerUsuarios = tieneModulosAdmin || perfilGestion === 'COMEDOR_ADMIN';
+    // COM-8 v2: compatibilidad de módulos. La pestaña "Presupuesto" fue retirada y
+    // reemplazada por "Propuestas de Menú"; quien conservaba el módulo 'presupuesto'
+    // mantiene visibilidad de propuestas aunque el seed 'propuestas' no se le aplicara.
+    const modulosEfectivos = (misModulos.includes('presupuesto') && !misModulos.includes('propuestas'))
+        ? [...misModulos, 'propuestas']
+        : misModulos;
+    // COM-8 v2: el filtro usa modulosEfectivos (línea anterior comentada abajo).
+    // const tabs = TABS_BASE.filter(t => misModulos.includes(t.modulo));  // COM-8 v2: reemplazada
+    const tabs = TABS_BASE.filter(t => modulosEfectivos.includes(t.modulo));
+    if (puedeVerUsuarios) {
+        const idx = tabs.findIndex(t => t.id === 'comedores');
+        tabs.splice(idx === -1 ? tabs.length : idx, 0, TAB_USUARIOS);
+    }
+    // Mantiene activa una pestaña visible
+    if (tabs.length > 0 && !tabs.some(t => t.id === activeTab)) {
+        setTimeout(() => setActiveTab(tabs[0].id), 0);
+    }
+    // Sin módulos asignados
+    if (!cargandoModulos && tabs.length === 0) {
+        return (
+            <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+                <div className="bg-white border border-slate-200 rounded-2xl shadow-sm p-8 max-w-md text-center">
+                    <Activity size={36} className="text-emerald-600 mx-auto mb-3" />
+                    <h2 className="text-lg font-bold text-slate-800 mb-2">Sin módulos asignados</h2>
+                    <p className="text-sm text-slate-600">
+                        Su usuario no tiene módulos permitidos en este momento. Consulte con el
+                        administrador del sistema para que le asigne los accesos correspondientes.
+                    </p>
+                    <button
+                        onClick={cerrarSesion}
+                        className="mt-4 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium transition-colors"
+                    >
+                        Cerrar sesión
+                    </button>
+                </div>
+            </div>
+        );
+    }
+    return (
+        <>
+            <div className="min-h-screen bg-slate-50 text-slate-800 font-sans pb-10">
+                {/* Header */}
+                <header className="bg-emerald-700 text-white p-4 shadow-md">
+                    <div className="max-w-6xl mx-auto flex items-center gap-3">
+                        <Activity size={28} />
+                        <div className="flex-1">
+                            <h1 className="text-2xl font-bold tracking-tight">NutriComedor OSB</h1>
+                            <p className="text-xs text-emerald-100">
+                                {usuario.nombres} {usuario.apellido_paterno} · {usuario.tipo_documento} {usuario.documento_identidad}
+                                {usuario.rol === 'Administrador Sistema' && ' · Admin Sistema'}
+                                {infoMunicipal && ` · ${infoMunicipal.nombre} (${infoMunicipal.distrito})`}
+                            </p>
+                        </div>
+                        <span
+                            className="text-xs bg-emerald-800 px-3 py-1 rounded-full border border-emerald-600 shadow-inner items-center gap-1 hidden md:flex max-w-[260px]"
+                            title={descripcionContexto(seleccion)}
+                        >
+                            <MapPin size={12} className="shrink-0" />
+                            <span className="truncate">{descripcionContexto(seleccion)}</span>
+                        </span>
+                        {usuario.rol === 'Administrador Sistema' && (
+                            <span className="text-sm bg-emerald-800 px-3 py-1 rounded-full border border-emerald-600 shadow-inner hidden lg:inline-block">
+                                Módulo Predictivo Activo
+                            </span>
+                        )}
+                        <button
+                            onClick={cerrarSesion}
+                            className="flex items-center gap-2 bg-emerald-800 hover:bg-emerald-900 px-3 py-2 rounded-lg text-sm font-medium transition-colors border border-emerald-600"
+                            title="Cerrar sesión"
+                        >
+                            <LogOut size={16} />
+                            <span className="hidden sm:inline">Salir</span>
+                        </button>
+                    </div>
+                </header>
+                <main className="max-w-6xl mx-auto mt-8 p-4">
+                    {cargandoModulos ? (
+                        <div className="p-16 text-center text-emerald-600">
+                            <Loader2 className="animate-spin mx-auto" size={32} />
+                            <p className="text-sm mt-2 text-slate-500">Cargando sus módulos permitidos...</p>
+                        </div>
+                    ) : (
+                        <>
+                            {/* Barra de pestañas */}
+                            <div className="flex gap-2 mb-6 border-b border-slate-200 pb-2 overflow-x-auto">
+                                {tabs.map(tab => {
+                                    const Icon = tab.icon;
+                                    const isActive = activeTab === tab.id;
+                                    return (
+                                        <button
+                                            key={tab.id}
+                                            onClick={() => setActiveTab(tab.id)}
+                                            className={`flex shrink-0 items-center gap-2 px-4 py-2 font-medium rounded-t-lg transition-colors ${isActive
+                                                ? `bg-white text-${tab.color}-700 shadow-sm border-t border-x border-slate-200`
+                                                : 'text-slate-500 hover:bg-slate-100'
+                                                }`}
+                                        >
+                                            <Icon size={18} /> {tab.label}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                            {/* Contenedor de vistas */}
+                            <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 min-h-[500px]">
+                                {activeTab === 'recipes' && <RecipesView />}
+                                {activeTab === 'clusters' && <ClusterRecetasView />} {/* COM-5 / COM-5 v4: módulo 'clusters' */}
+                                {activeTab === 'modelos_ml' && <ModelosMLView />} {/* COM-5 v4: panel ML solo Admin */}
+                                {activeTab === 'scraper' && <ScraperAdminView />} {/* COM-43 */}
+                                {/* COM-37: gestión de ingredientes y precios manuales (solo Admin) */}
+                                {activeTab === 'gestion_ingredientes' && <GestionIngredientesView />}
+                                {/* COM-59A: subsidio mensual de víveres por comedor */}
+                                {activeTab === 'subsidio' && <SubsidioView />}
+                                {/* COM-69: reporte de uso del subsidio por comedor y mes */}
+                                {activeTab === 'reporte_subsidio' && <ReporteSubsidioView />}
+                                {/* COM-59A: precios de venta con historial (solo Admin) */}
+                                {activeTab === 'precios_venta' && <PreciosVentaView />}
+                                {/* COM-8 v2: render COMENTADO de la vista Presupuesto retirada.
 Su esquema de generación aleatoria fue reemplazado por el
 motor greedy de Propuestas de Menú. */}
-{/* {activeTab === 'budget' && <BudgetView />} */}
-{activeTab === 'planificaciones' && <PlanificacionesView />}
-{activeTab === 'propuestas' && <GenerarPropuestasView />} {/* COM-8 */}
-{activeTab === 'comedores' && <ComedoresView />}
-{activeTab === 'grupos' && <GruposView />}
-{activeTab === 'reportes' && <ReportesView />}
-{activeTab === 'catalog' && <CatalogView />}
-{activeTab === 'pos' && <POSView />}
-{activeTab === 'usuarios' && tieneModulosAdmin && (
-<GestionUsuariosSistemaView modulosPermitidos={misModulos} />
-)}
-{activeTab === 'usuarios' && !tieneModulosAdmin && perfilGestion === 'COMEDOR_ADMIN' && (
-<GestionUsuariosComedorView />
-)}
-</div>
-</>
-)}
-</main>
-</div>
-{/* COM-19: cambio obligatorio de clave */}
-{pendienteCambio && (
-<ModalCambioClave usuario={usuario} onExito={completarCambioClave} onSalir={cerrarSesion} />
-)}
-</>
-);
+                                {/* {activeTab === 'budget' && <BudgetView />} */}
+                                {activeTab === 'planificaciones' && <PlanificacionesView />}
+                                {activeTab === 'propuestas' && <GenerarPropuestasView />} {/* COM-8 */}
+                                {activeTab === 'comedores' && <ComedoresView />}
+                                {activeTab === 'grupos' && <GruposView />}
+                                {activeTab === 'reportes' && <ReportesView />}
+                                {activeTab === 'catalog' && <CatalogView />}
+                                {activeTab === 'pos' && <POSView />}
+                                {activeTab === 'usuarios' && tieneModulosAdmin && (
+                                    <GestionUsuariosSistemaView modulosPermitidos={misModulos} />
+                                )}
+                                {activeTab === 'usuarios' && !tieneModulosAdmin && perfilGestion === 'COMEDOR_ADMIN' && (
+                                    <GestionUsuariosComedorView />
+                                )}
+                            </div>
+                        </>
+                    )}
+                </main>
+            </div>
+            {/* COM-19: cambio obligatorio de clave */}
+            {pendienteCambio && (
+                <ModalCambioClave usuario={usuario} onExito={completarCambioClave} onSalir={cerrarSesion} />
+            )}
+        </>
+    );
 }
 export default function App() {
-return (
-<AuthProvider>
-<ParametrosProvider>
-<AppContent />
-</ParametrosProvider>
-</AuthProvider>
-);
+    return (
+        <AuthProvider>
+            <ParametrosProvider>
+                <AppContent />
+            </ParametrosProvider>
+        </AuthProvider>
+    );
 }
