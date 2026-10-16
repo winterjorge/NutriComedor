@@ -9,6 +9,9 @@ Objetivo: COM-77: vista de los 5 REPORTES OPERATIVOS del comedor (Directiva/Teso
         E) Semáforo Nutricional y Anemia Cero (metas parametrizables).
 Historial:
 COM-77 (este archivo): versión original.
+COM-78 v2: Tooltip re-estilizado con paleta coherente (fondo blanco, borde slate,
+      texto multi-línea). Reemplaza el anterior bg-slate-800/whitespace-nowrap que
+      cortaba el texto y contrastaba mal con el resto de la UI.
 Permisos: el backend valida el alcance (403); la vista recibe `alcance` ya resuelto.
 Uso: Montada por ReportesView.jsx en el segmento "Reportes operativos".
 Referencia: ticket COM-77 (solo trazabilidad).
@@ -41,16 +44,18 @@ const badgeSemaforo = (estado) => {
   return <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${map[estado] || map.SIN_DATOS}`}>{estado}</span>;
 };
 
-// Tooltip component
+// COM-78 v2: Tooltip re-estilizado con paleta coherente (fondo blanco, borde slate,
+// texto multi-línea). Reemplaza el anterior bg-slate-800/whitespace-nowrap que
+// cortaba el texto y contrastaba mal con el resto de la UI.
 const Tooltip = ({ children, content }) => {
   const [show, setShow] = useState(false);
   return (
     <div className="relative inline-block" onMouseEnter={() => setShow(true)} onMouseLeave={() => setShow(false)}>
       {children}
       {show && (
-        <div className="absolute z-50 bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-slate-800 text-white text-xs rounded-lg shadow-lg whitespace-nowrap max-w-xs">
+        <div className="absolute z-50 bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-white text-slate-700 text-xs rounded-lg shadow-lg border border-slate-200 max-w-[280px] leading-snug">
           {content}
-          <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-slate-800"></div>
+          <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-white"></div>
         </div>
       )}
     </div>
@@ -155,7 +160,7 @@ export const ReportesComedorView = ({ alcance, comedorForzado = null }) => {
               <td>${fmtS(s.costo_ejecutado)}</td>
               <td>${fmtS(s.margen_ejecutado)}</td>
               <td>${fmtN(s.margen_pct_ejecutado)}%</td>
-              <td>${s.cumple_objetivo ? '✅' : '️'}</td>
+              <td>${s.cumple_objetivo ? '✅' : '⚠️'}</td>
             </tr>
           `).join('')}
         </table>
