@@ -1,20 +1,16 @@
 /**
 components/reportes/ReportesMunicipioView.jsx
 Objetivo: COM-78: vista macro de la MUNICIPALIDAD / Admin de Sistemas con 3 reportes
-      distritales + drill-down a un comedor (reutiliza los 5 reportes COM-77 en modo
-      focalizado/solo lectura):
-        1) Dashboard Distrital de Seguridad Alimentaria: por comedor, ¿menú VIGENTE
-           esta semana?, margen verde/rojo vs objetivo, estado de subsidio (peor
-           insumo), % cumplimiento nutricional y raciones de la semana; KPIs
-           distritales y filtro/orden por zona.
-        2) Observatorio de Volatilidad de Precios: canasta crítica SISAP con serie,
-           variación 7d/30d, volatilidad y alertas tempranas (ALERTA_VOLATILIDAD_PCT).
-        3) Cobertura y Focalización Social (Ley 31315): raciones reales POS vs
-           proyectadas vs padrón declarado, % gratuito, brecha de focalización,
-           tendencia 6 meses y agregado por zona.
-        4) Drill-down: selector de comedor -> ReportesComedorView con comedorForzado.
+      distritales (Dashboard, Observatorio, Cobertura). El drill-down a un comedor
+      específico se hace desde la pestaña "Reportes operativos" (COM-77), evitando
+      duplicidad de rutas.
 Historial:
-COM-78 (este archivo): versión original.
+COM-78 v1: versión original con 4 sub-pestañas (incluía "Focalizar Comedor").
+COM-78 v2 (este archivo): se RETIRA la sub-pestaña "Focalizar Comedor" porque
+      duplica exactamente la vista "Reportes operativos" del segmento superior.
+      El usuario municipal accede al drill-down cambiando de segmento, no dentro
+      del mismo. Tooltips re-estilizados con paleta coherente (fondo blanco,
+      borde slate, texto multi-línea).
 Permisos: el backend exige puede_com78 (municipal con módulo reportes/subsidio o
       Admin de Sistemas); la vista recibe el alcance ya resuelto por ReportesView.
 Uso: Montada por ReportesView.jsx en el segmento "Supervisión distrital".
@@ -22,13 +18,12 @@ Referencia: ticket COM-78 (solo trazabilidad).
 */
 import React, { useState, useCallback } from 'react';
 import {
-  Loader2, AlertCircle, Building2, LineChart, Users, Target,
-  TrendingUp, TrendingDown, AlertTriangle, CheckCircle2, MapPin, Store, Calendar,
+  Loader2, AlertCircle, Building2, LineChart, Users,
+  TrendingUp, TrendingDown, AlertTriangle, CheckCircle2, MapPin, Calendar,
   Info
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
-import { ReportesComedorView } from './ReportesComedorView';
 
 const MESES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
   'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
@@ -48,16 +43,18 @@ const badgeEstado = (estado) => {
   return <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${map[estado] || map.SIN_SUBSIDIO}`}>{estado}</span>;
 };
 
-// Tooltip component
+// COM-78 v2: Tooltip re-estilizado con paleta coherente (fondo blanco, borde slate,
+// texto multi-línea). Reemplaza el anterior bg-slate-800/whitespace-nowrap que
+// cortaba el texto y contrastaba mal con el resto de la UI.
 const Tooltip = ({ children, content }) => {
   const [show, setShow] = useState(false);
   return (
     <div className="relative inline-block" onMouseEnter={() => setShow(true)} onMouseLeave={() => setShow(false)}>
       {children}
       {show && (
-        <div className="absolute z-50 bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-slate-800 text-white text-xs rounded-lg shadow-lg whitespace-nowrap max-w-xs">
+        <div className="absolute z-50 bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-white text-slate-700 text-xs rounded-lg shadow-lg border border-slate-200 max-w-[280px] leading-snug">
           {content}
-          <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-slate-800"></div>
+          <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-white"></div>
         </div>
       )}
     </div>
@@ -83,11 +80,12 @@ const Sparkline = ({ serie, color = '#059669' }) => {
   );
 };
 
+// COM-78 v2: solo 3 sub-pestañas macro. El drill-down a comedor se hace desde el
+// segmento "Reportes operativos" (COM-77), evitando duplicidad de rutas.
 const SUBTABS = [
   { clave: 'dashboard', label: 'Dashboard Distrital', icon: Building2 },
   { clave: 'observatorio', label: 'Observatorio de Precios', icon: LineChart },
   { clave: 'cobertura', label: 'Cobertura y Focalización', icon: Users },
-  { clave: 'drill', label: 'Focalizar Comedor', icon: Target },
 ];
 
 export const ReportesMunicipioView = ({ alcance }) => {
@@ -101,7 +99,6 @@ export const ReportesMunicipioView = ({ alcance }) => {
   const [data, setData] = useState(null);
   const [cargando, setCargando] = useState(false);
   const [error, setError] = useState('');
-  const [comedorFocal, setComedorFocal] = useState('');
 
   const generar = useCallback(async () => {
     setCargando(true); setError(''); setData(null);
@@ -119,54 +116,52 @@ export const ReportesMunicipioView = ({ alcance }) => {
 
   return (
     <div className="space-y-4">
-      {/* Selectores globales - solo mostrar si NO estamos en drill-down */}
-      {sub !== 'drill' && (
-        <div className="bg-white border border-slate-200 rounded-xl p-4 grid grid-cols-2 md:grid-cols-5 gap-3 items-end">
-          <div>
-            <label className="text-xs font-semibold text-slate-600 block mb-1">Mes</label>
-            <select value={mes} onChange={(e) => { setMes(Number(e.target.value)); setData(null); }}
-              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-emerald-500">
-              {MESES.map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="text-xs font-semibold text-slate-600 block mb-1">Año</label>
-            <input type="number" min="2020" max="2100" value={anio}
-              onChange={(e) => { setAnio(Number(e.target.value)); setData(null); }}
-              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
-          </div>
-          <div>
-            <label className="text-xs font-semibold text-slate-600 block mb-1 flex items-center gap-1">
-              <MapPin size={11} /> Zona
-            </label>
-            <select value={zonaSel} onChange={(e) => { setZonaSel(e.target.value); setData(null); }}
-              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-emerald-500">
-              <option value="">Todas las zonas</option>
-              {(alcance?.zonas || []).map(z => <option key={z} value={z}>{z}</option>)}
-            </select>
-          </div>
-          {sub === 'observatorio' && (
-            <div>
-              <label className="text-xs font-semibold text-slate-600 block mb-1">Ventana (días)</label>
-              <select value={diasObs} onChange={(e) => { setDiasObs(Number(e.target.value)); setData(null); }}
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-emerald-500">
-                <option value={30}>30 días</option>
-                <option value={90}>90 días</option>
-                <option value={180}>180 días</option>
-              </select>
-            </div>
-          )}
-          <div className="col-span-2 md:col-span-1">
-            <button onClick={generar} disabled={cargando || sub === 'drill'}
-              className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50">
-              {cargando ? <Loader2 className="animate-spin" size={15} /> : <Calendar size={15} />}
-              Generar
-            </button>
-          </div>
+      {/* Selectores globales */}
+      <div className="bg-white border border-slate-200 rounded-xl p-4 grid grid-cols-2 md:grid-cols-5 gap-3 items-end">
+        <div>
+          <label className="text-xs font-semibold text-slate-600 block mb-1">Mes</label>
+          <select value={mes} onChange={(e) => { setMes(Number(e.target.value)); setData(null); }}
+            className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-emerald-500">
+            {MESES.map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
+          </select>
         </div>
-      )}
+        <div>
+          <label className="text-xs font-semibold text-slate-600 block mb-1">Año</label>
+          <input type="number" min="2020" max="2100" value={anio}
+            onChange={(e) => { setAnio(Number(e.target.value)); setData(null); }}
+            className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
+        </div>
+        <div>
+          <label className="text-xs font-semibold text-slate-600 block mb-1 flex items-center gap-1">
+            <MapPin size={11} /> Zona
+          </label>
+          <select value={zonaSel} onChange={(e) => { setZonaSel(e.target.value); setData(null); }}
+            className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-emerald-500">
+            <option value="">Todas las zonas</option>
+            {(alcance?.zonas || []).map(z => <option key={z} value={z}>{z}</option>)}
+          </select>
+        </div>
+        {sub === 'observatorio' && (
+          <div>
+            <label className="text-xs font-semibold text-slate-600 block mb-1">Ventana (días)</label>
+            <select value={diasObs} onChange={(e) => { setDiasObs(Number(e.target.value)); setData(null); }}
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-emerald-500">
+              <option value={30}>30 días</option>
+              <option value={90}>90 días</option>
+              <option value={180}>180 días</option>
+            </select>
+          </div>
+        )}
+        <div className="col-span-2 md:col-span-1">
+          <button onClick={generar} disabled={cargando}
+            className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50">
+            {cargando ? <Loader2 className="animate-spin" size={15} /> : <Calendar size={15} />}
+            Generar
+          </button>
+        </div>
+      </div>
 
-      {/* Sub-pestañas */}
+      {/* Sub-pestañas macro (sin "Focalizar Comedor" — ver COM-78 v2) */}
       <div className="flex flex-wrap gap-1.5">
         {SUBTABS.map(s => {
           const Icon = s.icon;
@@ -247,7 +242,7 @@ export const ReportesMunicipioView = ({ alcance }) => {
                       {c.subsidio_peor_ingrediente && <span className="block text-[9px] text-slate-500">{c.subsidio_peor_ingrediente}</span>}
                     </td>
                     <td className="p-2 text-right">{fmtN(c.pct_cumplimiento_nutricional, 0)}%</td>
-                    <td className="p-2 text-center">{c.cumple_cuota_anemia ? '✅' : '️'}</td>
+                    <td className="p-2 text-center">{c.cumple_cuota_anemia ? '✅' : '⚠️'}</td>
                     <td className="p-2 text-center">{c.en_riesgo ? '🚨' : '—'}</td>
                   </tr>
                 ))}
@@ -256,6 +251,11 @@ export const ReportesMunicipioView = ({ alcance }) => {
           </div>
           <p className="text-[11px] text-slate-400">
             Objetivo de margen semanal: {fmtN(data.margen_objetivo_pct)}% · Período subsidio/nutrición: {MESES[data.mes - 1]} {data.anio}
+          </p>
+          {/* COM-78 v2: ayuda contextual para acceder al drill-down */}
+          <p className="text-[11px] text-slate-500 bg-slate-50 border border-slate-200 rounded-lg p-2 flex items-center gap-2">
+            <Info size={12} className="text-slate-400 shrink-0" />
+            Para ver los 5 reportes operativos de un comedor específico, cambie al segmento <b>"Reportes operativos"</b> en la pestaña superior.
           </p>
         </div>
       )}
@@ -387,30 +387,7 @@ export const ReportesMunicipioView = ({ alcance }) => {
         </div>
       )}
 
-      {/* ===== 4) DRILL-DOWN A COMEDOR ===== */}
-      {sub === 'drill' && (
-        <div className="space-y-4">
-          <div className="flex items-center gap-2">
-            <Store size={15} className="text-emerald-600" />
-            <select value={comedorFocal} onChange={(e) => setComedorFocal(e.target.value)}
-              className="px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-emerald-500">
-              <option value="">Seleccionar comedor...</option>
-              {(alcance?.comedores || []).map(c => (
-                <option key={c.id} value={c.id}>{c.nombre}{c.zona ? ` · ${c.zona}` : ''}</option>
-              ))}
-            </select>
-          </div>
-          {comedorFocal ? (
-            <ReportesComedorView alcance={alcance} comedorForzado={Number(comedorFocal)} />
-          ) : (
-            <p className="text-sm text-slate-400 text-center py-8">
-              Seleccione un comedor para ver sus 5 reportes operativos en modo solo lectura.
-            </p>
-          )}
-        </div>
-      )}
-
-      {!cargando && !data && sub !== 'drill' && !error && (
+      {!cargando && !data && !error && (
         <div className="p-10 text-center bg-slate-50 border border-slate-200 rounded-xl">
           <Building2 size={28} className="text-emerald-600 mx-auto mb-2" />
           <p className="text-sm text-slate-500">Configure el período y pulse "Generar".</p>
