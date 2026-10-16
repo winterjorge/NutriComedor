@@ -1,22 +1,23 @@
 """
 ml/reporte_gestion.py
 Objetivo: COM-50 (HU-10) + COM-59A: motor del reporte "Resumen ejecutivo y
-          recomendaciones" con tres niveles de alcance (comedor / zona / macro):
-            1) Resumen ejecutivo: costo total, costo por ración, recolección, margen.
-            2) Uso de presupuesto por día (gráfico de barras).
-            3) Sugerencias automáticas (ahorro dentro del mismo cluster K-means,
-               alertas de margen/presupuesto y variedad).
-          COM-59A: bloque "SUBVENCIONADO VS COMPRADO": re-costea la semana del plan
-          con y sin el subsidio mensual de víveres del comedor (stock del mes vs
-          consumo proyectado por día y comensal), y valida el MARGEN SEMANAL OBJETIVO
-          contra la recolección proyectada.
+recomendaciones" con tres niveles de alcance (comedor / zona / macro):
+1) Resumen ejecutivo: costo total, costo por ración, recolección, margen.
+2) Uso de presupuesto por día (gráfico de barras).
+3) Sugerencias automáticas (ahorro dentro del mismo cluster K-means,
+alertas de margen/presupuesto y variedad).
+COM-59A: bloque "SUBVENCIONADO VS COMPRADO": re-costea la semana del plan
+con y sin el subsidio mensual de víveres del comedor (stock del mes vs
+consumo proyectado por día y comensal), y valida el MARGEN SEMANAL OBJETIVO
+contra la recolección proyectada.
+COM-78: las sugerencias usan el margen proyectado (el que se muestra en las
+tarjetas) en lugar del margen con subsidio, evitando contradicciones visuales.
 Uso: Importado por routers/reportes_gestion.py. Recibe cursor psycopg2 (RealDictCursor).
-Referencia: tickets COM-50 / COM-59 / HU-10 (solo trazabilidad).
+Referencia: tickets COM-50 / COM-59 / HU-10 / COM-78 (solo trazabilidad).
 """
 import json
 import traceback
 from datetime import date
-
 from precios_insumos import (
     precios_por_gramo_por_insumo,
     gramos_por_unidad_estandar,
@@ -31,7 +32,7 @@ from subsidio_motor import (
     precio_venta_vigente,
 )
 
-# Ahorro mínimo (%) para que un reemplazo se reporte como sugerencia (HU-10: ej. 5%)
+# Umbral mínimo (%) para que un reemplazo se reporte como sugerencia (HU-10: ej. 5%)
 UMBRAL_SUGERENCIA_PCT = 5.0
 
 
@@ -242,7 +243,6 @@ def _resolver_plan(cur, comedor_id, candidata_id=None, presupuesto_id=None):
                 'cluster_etiqueta': d.get('cluster_etiqueta'),
             })
         return fuente, dias, resumen_base, resumen_base.get('presupuesto_semanal'), cand['id']
-
     pres = None
     if presupuesto_id:
         cur.execute("SELECT * FROM presupuesto_semanal WHERE id = %s;", (presupuesto_id,))
@@ -319,7 +319,6 @@ def _reporte_un_comedor(cur, comedor_id, candidata_id=None, presupuesto_id=None)
             (d['total_comensales'] for d in dias if d['total_comensales']), None)
         costo_racion_prom = _f(resumen_base.get('costo_racion_promedio')) or (
             round(sum(d['costo_racion'] for d in dias) / len(dias), 2) if dias else 0)
-
         uso_por_dia = []
         for d in dias:
             pct = round((d['costo_total_dia'] / _f(presupuesto_total)) * 100, 2) if _f(presupuesto_total) else None
@@ -453,12 +452,15 @@ def _reporte_un_comedor(cur, comedor_id, candidata_id=None, presupuesto_id=None)
                     traceback.print_exc()
                     continue
 
+            # COM-78: alerta de margen usa el margen PROYECTADO (el de las tarjetas)
             if margen < 0:
                 sugerencias.append({
                     'tipo': 'alerta',
                     'texto': (f"La recolección proyectada (S/ {recoleccion:.2f}) NO cubre el costo semanal "
                               f"(S/ {costo_total:.2f}): margen negativo de S/ {abs(margen):.2f}."),
                 })
+
+            # COM-78: alerta de subsidio solo si el margen con subsidio está bajo el objetivo
             if subsidio_bloque and not subsidio_bloque['cumple_margen_semanal']:
                 sugerencias.append({
                     'tipo': 'alerta',
@@ -466,12 +468,14 @@ def _reporte_un_comedor(cur, comedor_id, candidata_id=None, presupuesto_id=None)
                               f"debajo del objetivo ({subsidio_bloque['margen_semanal_objetivo_pct']}%): el comedor "
                               f"quedaría expuesto si un día vende menos de lo proyectado."),
                 })
+
             if _f(presupuesto_total) and costo_total > _f(presupuesto_total):
                 sugerencias.append({
                     'tipo': 'alerta',
                     'texto': (f"El costo semanal (S/ {costo_total:.2f}) supera el presupuesto declarado "
                               f"(S/ {_f(presupuesto_total):.2f})."),
                 })
+
             conteo = {}
             for d in dias:
                 if d['receta_nombre']:
@@ -549,6 +553,7 @@ def generar_reporte_gestion(cur, comedores_alcance, nivel='comedor', zona=None,
             objetivos = [c for c in comedores_alcance if zona.strip().lower() in (c.get('zona') or '').strip().lower()]
     else:
         objetivos = list(comedores_alcance)
+
     if not objetivos:
         return {'error': 'sin_datos', 'detalle': 'No hay comedores en el nivel seleccionado.'}
 
@@ -558,6 +563,7 @@ def generar_reporte_gestion(cur, comedores_alcance, nivel='comedor', zona=None,
     uso_agregado = {}
     tot_costo = tot_rec = tot_pres = tot_ahorro_sub = 0.0
     todos_dentro = True
+
     for c in objetivos:
         rep = _reporte_un_comedor(cur, c['id'])
         if rep is None:
