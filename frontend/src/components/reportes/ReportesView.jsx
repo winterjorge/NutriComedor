@@ -5,18 +5,18 @@ Objetivo: Pestaña "Reportes" (HU-10) con TRES capas conmutables por segmento:
 (B) "Resumen ejecutivo y recomendaciones" (COM-50 v3), con alcance por perfil.
 (C) COM-77: "Reportes operativos del comedor" (5 reportes de ReportesComedorView).
 (D) COM-78: "Supervisión distrital" (3 reportes macro + drill-down,
-    ReportesMunicipioView), visible solo si el alcance avanzado devuelve puede_com78.
+ReportesMunicipioView), visible solo si el alcance avanzado devuelve puede_com78.
 Historial:
 Sprint 3/4: versión original (KPIs + ventas del día).
 COM-50 v1/v2: integración del panel ejecutivo (comedor único).
 COM-50 v3: matriz de alcances completa, panel reactivo al `tipo_alcance` del backend
-    y tabla agregada `por_comedor` en macro/zona.
+y tabla agregada `por_comedor` en macro/zona.
 COM-77: segmento "Reportes operativos" que monta ReportesComedorView con el alcance
-    unificado de /reportes-avanzados/alcance (Directivo/Operativo de su comedor;
-    municipal y Admin como drill-down).
+unificado de /reportes-avanzados/alcance (Directivo/Operativo de su comedor;
+municipal y Admin como drill-down).
 COM-78 (este archivo): segmento "Supervisión distrital" que monta
-    ReportesMunicipioView cuando puede_com78=true; el segmento por defecto es el
-    primero disponible (distrital > operativos > ejecutivo). Nada existente se elimina.
+ReportesMunicipioView cuando puede_com78=true; el segmento por defecto es el
+primero disponible (distrital > operativos > ejecutivo). Nada existente se elimina.
 Uso: Renderizado por App.jsx en la pestaña "Reportes" (módulo 'reportes').
 Referencia: tickets COM-50 / HU-10 / COM-77 / COM-78 (solo trazabilidad).
 */
@@ -30,7 +30,6 @@ import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { ReportesComedorView } from './ReportesComedorView';
 import { ReportesMunicipioView } from './ReportesMunicipioView';
-
 // Formatos defensivos
 const fmtS = (v) => (v === null || v === undefined || v === '' ? '—' : `S/ ${Number(v).toFixed(2)}`);
 const fmtN = (v) => (v === null || v === undefined || v === '' ? '—' : Number(v).toFixed(2));
@@ -47,16 +46,13 @@ const iconoSugerencia = (tipo) => {
     if (tipo === 'alerta') return <AlertCircle size={15} className="text-red-600 shrink-0 mt-0.5" />;
     return <Repeat size={15} className="text-amber-600 shrink-0 mt-0.5" />;
 };
-
 export const ReportesView = () => {
     const { usuario } = useAuth();
     const esAdminSistema = usuario?.rol === 'Administrador Sistema';
-
     // COM-77/78: segmento activo y alcance avanzado
     const [segmento, setSegmento] = useState(null);
     const [alcanceAv, setAlcanceAv] = useState(null);
     const [cargandoAlcanceAv, setCargandoAlcanceAv] = useState(true);
-
     // --- KPIs operativos (A) ---
     const [cargando, setCargando] = useState(true);
     const [error, setError] = useState('');
@@ -67,7 +63,6 @@ export const ReportesView = () => {
         planificaciones: 0,
         ventasHoy: null
     });
-
     // --- Alcance y panel ejecutivo (B) COM-50 v3 ---
     const [cargandoAlcance, setCargandoAlcance] = useState(true);
     const [alcance, setAlcance] = useState(null);          // null = aún cargando
@@ -79,7 +74,6 @@ export const ReportesView = () => {
     const [reporte, setReporte] = useState(null);
     const [cargandoReporte, setCargandoReporte] = useState(false);
     const [errorReporte, setErrorReporte] = useState('');
-
     // =========================================================================
     // COM-77/78: alcance avanzado (decide segmentos disponibles y default)
     // =========================================================================
@@ -103,7 +97,6 @@ export const ReportesView = () => {
         cargar();
         return () => { vivo = false; };
     }, [usuario.id]);
-
     // =========================================================================
     // (A) KPIs operativos: comedores, usuarios, recetas, planificaciones, ventas.
     // El contador de usuarios SOLO lo consulta el Admin de Sistema (COM-50 v2).
@@ -140,7 +133,6 @@ export const ReportesView = () => {
         };
         cargar();
     }, [esAdminSistema, usuario?.id]);
-
     // =========================================================================
     // (B) Alcance de reportería (COM-50 v3). 403 -> alcanceError, alcance=null.
     // =========================================================================
@@ -175,7 +167,6 @@ export const ReportesView = () => {
         cargar();
         return () => { vivo = false; };
     }, [usuario?.id]);
-
     // Planes disponibles del comedor seleccionado (solo aplica en nivel 'comedor')
     const [planes, setPlanes] = useState({ propuestas: [], planificaciones: [] });
     useEffect(() => {
@@ -189,7 +180,6 @@ export const ReportesView = () => {
             .catch(() => { if (vivo) setPlanes({ propuestas: [], planificaciones: [] }); });
         return () => { vivo = false; };
     }, [comedorSel, usuario.id]);
-
     // =========================================================================
     // Carga del reporte: params dependen del nivel y del alcance
     // =========================================================================
@@ -221,12 +211,10 @@ export const ReportesView = () => {
             setCargandoReporte(false);
         }
     }, [alcance, nivelSel, comedorSel, zonaSel, planSel, usuario.id]);
-
     // Recargar cuando cambien los selectores (Directivo carga automático al entrar)
     useEffect(() => {
         if (alcance && segmento === 'ejecutivo') cargarReporte();
     }, [cargarReporte, alcance, segmento]);
-
     // Derivados de KPIs
     const ventas = kpis.ventasHoy || {};
     const totalVentas = (ventas.social || 0) + (ventas.afiliado || 0) + (ventas.normal || 0);
@@ -249,12 +237,12 @@ export const ReportesView = () => {
     const puedeElegirNivel = alcance && alcance.tipo_alcance !== 'comedor';
     const nivelesPermitidos = alcance?.niveles_permitidos || [];
     // COM-77/78: segmentos disponibles según alcance avanzado + alcance ejecutivo
+    // COM-78: nombres sin números de ticket (limpio para UI)
     const segmentosDisponibles = [
-        ...(alcanceAv?.puede_com78 ? [{ clave: 'distrital', label: 'Supervisión distrital (COM-78)', icon: Building2 }] : []),
-        ...(alcanceAv?.puede_com77 ? [{ clave: 'operativos', label: 'Reportes operativos (COM-77)', icon: BarChart3 }] : []),
-        ...(!alcanceError ? [{ clave: 'ejecutivo', label: 'Resumen ejecutivo (COM-50)', icon: FileText }] : []),
+        ...(alcanceAv?.puede_com78 ? [{ clave: 'distrital', label: 'Supervisión distrital', icon: Building2 }] : []),
+        ...(alcanceAv?.puede_com77 ? [{ clave: 'operativos', label: 'Reportes operativos', icon: BarChart3 }] : []),
+        ...(!alcanceError ? [{ clave: 'ejecutivo', label: 'Resumen ejecutivo', icon: FileText }] : []),
     ];
-
     return (
         <div className="animate-in fade-in duration-300">
             {/* Encabezado */}
@@ -271,13 +259,11 @@ export const ReportesView = () => {
                     <Calendar size={12} /> {new Date().toLocaleDateString('es-PE', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
                 </span>
             </div>
-
             {error && (
                 <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-center gap-2 text-sm">
                     <AlertCircle size={16} /> {error}
                 </div>
             )}
-
             {cargando ? (
                 <div className="p-8 text-center text-emerald-600"><Loader2 className="animate-spin mx-auto" size={28} /></div>
             ) : (
@@ -336,7 +322,6 @@ export const ReportesView = () => {
                             </div>
                         )}
                     </div>
-
                     {/* COM-77/78: selector de segmento */}
                     {!cargandoAlcanceAv && segmentosDisponibles.length > 0 && (
                         <div className="inline-flex rounded-lg border border-slate-200 overflow-hidden mt-6 mb-4">
@@ -351,30 +336,27 @@ export const ReportesView = () => {
                             })}
                         </div>
                     )}
-
                     {/* (C) COM-77: reportes operativos del comedor */}
                     {segmento === 'operativos' && alcanceAv?.puede_com77 && (
                         <div className="bg-white border border-slate-200 rounded-xl p-5">
                             <h3 className="font-bold text-slate-800 flex items-center gap-2 mb-4">
-                                <BarChart3 size={18} className="text-emerald-600" /> Reportes operativos del comedor (COM-77)
+                                <BarChart3 size={18} className="text-emerald-600" /> Reportes operativos del comedor
                             </h3>
                             <ReportesComedorView alcance={alcanceAv} />
                         </div>
                     )}
-
                     {/* (D) COM-78: supervisión distrital macro + drill-down */}
                     {segmento === 'distrital' && alcanceAv?.puede_com78 && (
                         <div className="bg-white border border-slate-200 rounded-xl p-5">
                             <h3 className="font-bold text-slate-800 flex items-center gap-2 mb-4">
-                                <Building2 size={18} className="text-emerald-600" /> Supervisión distrital (COM-78)
+                                <Building2 size={18} className="text-emerald-600" /> Supervisión distrital
                             </h3>
                             <ReportesMunicipioView alcance={alcanceAv} />
                         </div>
                     )}
-
                     {/* ============================================================
-                        (B) RESUMEN EJECUTIVO Y RECOMENDACIONES (COM-50 v3 / HU-10)
-                        ============================================================ */}
+(B) RESUMEN EJECUTIVO Y RECOMENDACIONES (COM-50 v3 / HU-10)
+============================================================ */}
                     {segmento === 'ejecutivo' && (
                         <div className="bg-white border border-slate-200 rounded-xl p-5 mt-6">
                             <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
@@ -391,9 +373,8 @@ export const ReportesView = () => {
                             )}
                             {/* (B.1) Sin acceso: Admin de Sistema u Operativo */}
                             {!cargandoAlcance && alcanceError && (
-                                <div className={`p-4 rounded-lg border text-sm flex items-start gap-2 ${
-                                    alcanceError.status === 403 ? 'bg-slate-50 border-slate-200 text-slate-700' : 'bg-red-50 border-red-200 text-red-700'
-                                }`}>
+                                <div className={`p-4 rounded-lg border text-sm flex items-start gap-2 ${alcanceError.status === 403 ? 'bg-slate-50 border-slate-200 text-slate-700' : 'bg-red-50 border-red-200 text-red-700'
+                                    }`}>
                                     {alcanceError.status === 403 ? <AlertCircle size={18} className="shrink-0 mt-0.5 text-slate-500" /> : <AlertCircle size={18} className="shrink-0 mt-0.5" />}
                                     <div>
                                         <p className="font-semibold">
@@ -475,9 +456,8 @@ export const ReportesView = () => {
                                             {nivelesPermitidos.includes('macro') && (
                                                 <button
                                                     onClick={() => { setNivelSel('macro'); setPlanSel(''); }}
-                                                    className={`px-3 py-1.5 text-xs font-semibold flex items-center gap-1 transition-colors ${
-                                                        nivelSel === 'macro' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-100'
-                                                    }`}
+                                                    className={`px-3 py-1.5 text-xs font-semibold flex items-center gap-1 transition-colors ${nivelSel === 'macro' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-100'
+                                                        }`}
                                                 >
                                                     <Building2 size={13} /> Macro
                                                 </button>
@@ -485,9 +465,8 @@ export const ReportesView = () => {
                                             {nivelesPermitidos.includes('zona') && (
                                                 <button
                                                     onClick={() => setNivelSel('zona')}
-                                                    className={`px-3 py-1.5 text-xs font-semibold flex items-center gap-1 transition-colors border-x border-slate-200 ${
-                                                        nivelSel === 'zona' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-100'
-                                                    }`}
+                                                    className={`px-3 py-1.5 text-xs font-semibold flex items-center gap-1 transition-colors border-x border-slate-200 ${nivelSel === 'zona' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-100'
+                                                        }`}
                                                 >
                                                     <MapPin size={13} /> Zona
                                                 </button>
@@ -495,9 +474,8 @@ export const ReportesView = () => {
                                             {nivelesPermitidos.includes('comedor') && (
                                                 <button
                                                     onClick={() => setNivelSel('comedor')}
-                                                    className={`px-3 py-1.5 text-xs font-semibold flex items-center gap-1 transition-colors ${
-                                                        nivelSel === 'comedor' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-100'
-                                                    }`}
+                                                    className={`px-3 py-1.5 text-xs font-semibold flex items-center gap-1 transition-colors ${nivelSel === 'comedor' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-100'
+                                                        }`}
                                                 >
                                                     <Store size={13} /> Comedor
                                                 </button>
@@ -587,7 +565,6 @@ export const ReportesView = () => {
         </div>
     );
 };
-
 // ============================================================================
 // Subcomponente: cuerpo del reporte (comedor único vs agregado macro/zona)
 // ============================================================================
@@ -682,11 +659,10 @@ const ContenidoReporte = ({
                                 </div>
                                 <div className="w-full bg-slate-100 rounded-full h-3">
                                     <div
-                                        className={`h-3 rounded-full transition-all ${
-                                            (u.pct_del_presupuesto || 0) > (100 / Math.max(usoPorDia.length, 1)) * 1.35
+                                        className={`h-3 rounded-full transition-all ${(u.pct_del_presupuesto || 0) > (100 / Math.max(usoPorDia.length, 1)) * 1.35
                                                 ? 'bg-amber-500'
                                                 : 'bg-emerald-500'
-                                        }`}
+                                            }`}
                                         style={{ width: `${Math.min(100, ((u.pct_del_presupuesto || 0) / maxPct) * 100)}%` }}
                                     />
                                 </div>
@@ -763,9 +739,8 @@ const ContenidoReporte = ({
                                                 {fmtS(margen)}
                                             </td>
                                             <td className="p-2 text-center">
-                                                <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                                                    r.dentro_de_presupuesto ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'
-                                                }`}>
+                                                <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${r.dentro_de_presupuesto ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'
+                                                    }`}>
                                                     {r.dentro_de_presupuesto ? 'OK' : 'Excede'}
                                                 </span>
                                             </td>
@@ -792,13 +767,12 @@ const ContenidoReporte = ({
                         {sugerencias.map((s, i) => (
                             <div
                                 key={i}
-                                className={`p-3 rounded-lg border text-sm flex items-start gap-2 ${
-                                    s.tipo === 'alerta'
+                                className={`p-3 rounded-lg border text-sm flex items-start gap-2 ${s.tipo === 'alerta'
                                         ? 'bg-red-50 border-red-200 text-red-700'
                                         : s.tipo === 'variedad'
                                             ? 'bg-amber-50 border-amber-200 text-amber-800'
                                             : 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                                }`}
+                                    }`}
                             >
                                 {iconoSugerencia(s.tipo)}
                                 <span>

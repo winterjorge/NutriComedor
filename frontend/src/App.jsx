@@ -1,36 +1,41 @@
 /**
 App.jsx
 Objetivo: Componente raíz de la aplicación. Orquesta la navegación por pestañas,
-      el proveedor de parámetros dinámicos, la capa de autenticación (COM-19),
-      la selección de comedor post-login (COM-20), el módulo multi-comedor
-      (COM-21), grupos de usuario (COM-22), gestión de usuarios (COM-23), la
-      diferenciación de vistas por grupo/rol (COM-25), la pestaña de clusters
-      K-means del recetario (COM-5), la pestaña de propuestas de menú semanal
-      del motor greedy (COM-8) y el panel de gráficos de ML (COM-5 v4),
-      todas filtradas por los módulos permitidos del usuario.
+el proveedor de parámetros dinámicos, la capa de autenticación (COM-19),
+la selección de comedor post-login (COM-20), el módulo multi-comedor
+(COM-21), grupos de usuario (COM-22), gestión de usuarios (COM-23), la
+diferenciación de vistas por grupo/rol (COM-25), la pestaña de clusters
+K-means del recetario (COM-5), la pestaña de propuestas de menú semanal
+del motor greedy (COM-8) y el panel de gráficos de ML (COM-5 v4),
+todas filtradas por los módulos permitidos del usuario.
 Uso: Montado en main.jsx mediante <React.StrictMode>. Envuelve toda la app con
- AuthProvider y ParametrosProvider.
+AuthProvider y ParametrosProvider.
 Historial de cambios:
 COM-19/20/21/22/23/25: flujo de login, selección de comedor, pestañas y permisos.
 COM-27: pestañas filtradas por módulos y formularios con cascada de ubicación.
 COM-5: nueva pestaña "Clusters K-Means" ligada al módulo 'recetario'.
 COM-8: nueva pestaña "Propuestas de Menú" ligada al módulo 'propuestas'.
 COM-8 v2: la pestaña "Presupuesto" (generación aleatoria) se RETIRA y se comenta;
-        su función es reemplazada por "Propuestas de Menú" (motor greedy).
+su función es reemplazada por "Propuestas de Menú" (motor greedy).
 COM-5 v4 / COM-8 v7: "Clusters K-Means" pasa al módulo 'clusters' (solo Admin) y
-        se agrega "Modelos ML" (módulo 'modelos_ml', solo Admin).
+se agrega "Modelos ML" (módulo 'modelos_ml', solo Admin).
 COM-37: se AGREGA la pestaña "Gestión de Ingredientes" (módulo 'gestion_ingredientes').
 COM-59A: se AGREGAN dos pestañas del modelo de autogestión:
-        * "Subsidio de Víveres" (módulo 'subsidio'): Admin de Sistemas y Directivos
-          gestionan; perfiles municipales/auditoría solo lectura (gate backend).
-        * "Precios de Venta" (módulo 'precios_venta'): exclusivo Admin de Sistemas.
-        Solo hay 4 adiciones marcadas COM-59A (2 íconos, 2 imports, 2 entradas en
-        TABS_BASE y 2 líneas de render); ninguna línea existente se elimina.
+* "Subsidio de Víveres" (módulo 'subsidio'): Admin de Sistemas y Directivos
+gestionan; perfiles municipales/auditoría solo lectura (gate backend).
+* "Precios de Venta" (módulo 'precios_venta'): exclusivo Admin de Sistemas.
+Solo hay 4 adiciones marcadas COM-59A (2 íconos, 2 imports, 2 entradas en
+TABS_BASE y 2 líneas de render); ninguna línea existente se elimina.
 COM-69 (este archivo): se AGREGA la pestaña "Reporte Subsidio" (módulo 'subsidio'):
-        vista de rendición mensual de uso del subsidio por comedor para el
-        administrativo municipal (3 adiciones: import del ícono ClipboardCheck,
-        import de ReporteSubsidioView, entrada en TABS_BASE y línea de render).
-        Ninguna línea existente se elimina.
+vista de rendición mensual de uso del subsidio por comedor para el
+administrativo municipal (3 adiciones: import del ícono ClipboardCheck,
+import de ReporteSubsidioView, entrada en TABS_BASE y línea de render).
+Ninguna línea existente se elimina.
+COM-43: se AGREGA la pestaña "Scraper SISAP" (módulo 'modelos_ml'):
+ejecución web y auditoría del scraper (3 adiciones: import Database,
+import ScraperAdminView, entrada en TABS_BASE y línea de render).
+COM-78 (este archivo): header mejorado para mostrar municipalidad del usuario
+administrativo y ocultar "Módulo Predictivo Activo" para usuarios regulares.
 */
 import React, { useState, useEffect } from 'react';
 import {
@@ -78,11 +83,9 @@ import { SeleccionComedorView } from './components/auth/SeleccionComedorView';
 import { api } from './services/api';
 // COM-43: panel de ejecución/auditoría del scraper SISAP (solo Admin de Sistemas)
 import { ScraperAdminView } from './components/scraper/ScraperAdminView';
-
 // COM-25: módulos de administración que abren el panel global de usuarios
 const MODULOS_ADMIN = ['municipalidades', 'roles', 'bloqueos', 'vistas'];
-
-// COM-25 + COM-5 + COM-8 + COM-5 v4 + COM-37 + COM-59A + COM-69: catálogo de pestañas
+// COM-25 + COM-5 + COM-8 + COM-5 v4 + COM-37 + COM-59A + COM-69 + COM-43: catálogo de pestañas
 const TABS_BASE = [
     { id: 'recipes', label: 'Recetario', icon: ChefHat, color: 'emerald', modulo: 'recetario' },
     // COM-5 v4 (trazabilidad): línea ANTERIOR comentada. Hasta COM-5 v3 la pestaña de
@@ -118,10 +121,8 @@ const TABS_BASE = [
     { id: 'catalog', label: 'Catálogo', icon: ShoppingCart, color: 'emerald', modulo: 'catalogo' },
     { id: 'pos', label: 'Ventas y Demanda', icon: Users, color: 'blue', modulo: 'ventas' },
 ];
-
 // COM-25: pestaña de gestión de usuarios (panel global o de comedor)
 const TAB_USUARIOS = { id: 'usuarios', label: 'Usuarios', icon: Contact, color: 'blue', modulo: null };
-
 /**
 COM-20: describe el contexto de trabajo activo para exhibirlo en el header.
 */
@@ -133,7 +134,6 @@ const descripcionContexto = (seleccion) => {
     }
     return seleccion.comedor_nombre || 'Comedor';
 };
-
 function AppContent() {
     const [activeTab, setActiveTab] = useState('pos');
     const { usuario, pendienteCambio, completarCambioClave, cerrarSesion, seleccion, validando } = useAuth();
@@ -142,7 +142,8 @@ function AppContent() {
     const [cargandoModulos, setCargandoModulos] = useState(true);
     // COM-23: perfil de gestión de comedor (panel de usuarios por comedor)
     const [perfilGestion, setPerfilGestion] = useState(null);
-
+    // COM-78: información municipal para el header
+    const [infoMunicipal, setInfoMunicipal] = useState(null);
     useEffect(() => {
         if (!usuario) {
             setMisModulos([]);
@@ -163,7 +164,6 @@ function AppContent() {
         cargar();
         return () => { vivo = false; };
     }, [usuario]);
-
     useEffect(() => {
         if (!usuario) {
             setPerfilGestion(null);
@@ -186,7 +186,28 @@ function AppContent() {
         };
         determinar();
     }, [usuario]);
-
+    // COM-78: Cargar información municipal para usuarios administrativos
+    useEffect(() => {
+        if (usuario?.rol === 'Administrador Sistema') {
+            setInfoMunicipal(null);
+            return;
+        }
+        const cargar = async () => {
+            try {
+                const membresias = await api.getGruposDeUsuario(usuario.id);
+                const mun = membresias.find(m => m.grupo === 'Administrativo' && m.estado_activo);
+                if (mun && mun.municipalidad_nombre) {
+                    setInfoMunicipal({
+                        nombre: mun.municipalidad_nombre,
+                        distrito: mun.distrito || 'Sin distrito asignado'
+                    });
+                }
+            } catch (e) {
+                // Silencioso
+            }
+        };
+        cargar();
+    }, [usuario?.id]);
     // COM-19: sin sesión -> login
     if (!usuario) {
         return <LoginView />;
@@ -211,7 +232,6 @@ function AppContent() {
             </>
         );
     }
-
     // COM-25: pestañas visibles según módulos permitidos
     const tieneModulosAdmin = MODULOS_ADMIN.some(m => misModulos.includes(m));
     const puedeVerUsuarios = tieneModulosAdmin || perfilGestion === 'COMEDOR_ADMIN';
@@ -253,7 +273,6 @@ function AppContent() {
             </div>
         );
     }
-
     return (
         <>
             <div className="min-h-screen bg-slate-50 text-slate-800 font-sans pb-10">
@@ -266,6 +285,7 @@ function AppContent() {
                             <p className="text-xs text-emerald-100">
                                 {usuario.nombres} {usuario.apellido_paterno} · {usuario.tipo_documento} {usuario.documento_identidad}
                                 {usuario.rol === 'Administrador Sistema' && ' · Admin Sistema'}
+                                {infoMunicipal && ` · ${infoMunicipal.nombre} (${infoMunicipal.distrito})`}
                             </p>
                         </div>
                         <span
@@ -275,9 +295,11 @@ function AppContent() {
                             <MapPin size={12} className="shrink-0" />
                             <span className="truncate">{descripcionContexto(seleccion)}</span>
                         </span>
-                        <span className="text-sm bg-emerald-800 px-3 py-1 rounded-full border border-emerald-600 shadow-inner hidden lg:inline-block">
-                            Módulo Predictivo Activo
-                        </span>
+                        {usuario.rol === 'Administrador Sistema' && (
+                            <span className="text-sm bg-emerald-800 px-3 py-1 rounded-full border border-emerald-600 shadow-inner hidden lg:inline-block">
+                                Módulo Predictivo Activo
+                            </span>
+                        )}
                         <button
                             onClick={cerrarSesion}
                             className="flex items-center gap-2 bg-emerald-800 hover:bg-emerald-900 px-3 py-2 rounded-lg text-sm font-medium transition-colors border border-emerald-600"
@@ -288,7 +310,6 @@ function AppContent() {
                         </button>
                     </div>
                 </header>
-
                 <main className="max-w-6xl mx-auto mt-8 p-4">
                     {cargandoModulos ? (
                         <div className="p-16 text-center text-emerald-600">
@@ -331,8 +352,8 @@ function AppContent() {
                                 {/* COM-59A: precios de venta con historial (solo Admin) */}
                                 {activeTab === 'precios_venta' && <PreciosVentaView />}
                                 {/* COM-8 v2: render COMENTADO de la vista Presupuesto retirada.
-                                    Su esquema de generación aleatoria fue reemplazado por el
-                                    motor greedy de Propuestas de Menú. */}
+Su esquema de generación aleatoria fue reemplazado por el
+motor greedy de Propuestas de Menú. */}
                                 {/* {activeTab === 'budget' && <BudgetView />} */}
                                 {activeTab === 'planificaciones' && <PlanificacionesView />}
                                 {activeTab === 'propuestas' && <GenerarPropuestasView />} {/* COM-8 */}
@@ -359,7 +380,6 @@ function AppContent() {
         </>
     );
 }
-
 export default function App() {
     return (
         <AuthProvider>
