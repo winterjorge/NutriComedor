@@ -1,7 +1,8 @@
 /**
 components/ingredients/GestionIngredientesView.jsx
-Objetivo: COM-37 v5/v6 + COM-57 + COM-68: pestaña "Gestión de Ingredientes" (exclusiva
-Admin de Sistemas) sobre el modelo de DOS CONCEPTOS (ingrediente=uso / insumo=compra).
+Objetivo: COM-37 v5/v6 + COM-57 + COM-68 + COM-80: pestaña "Gestión de Ingredientes"
+(exclusiva Admin de Sistemas) sobre el modelo de DOS CONCEPTOS (ingrediente=uso /
+insumo=compra).
 Secciones:
 A) Catálogo de ingredientes (crear/editar sin borrado, con advertencia).
 A2) COM-57: "Sinónimos obsoletos": ingredientes [OBSOLETO] (fusionados en
@@ -15,6 +16,9 @@ activo quitándole el prefijo, con confirmación) y filtro
 "Mostrar solo con referencias atrapadas" (default activado) para
 ocultar el ruido de obsoletos vacíos.
 B) Emparejamiento ingrediente <-> insumo con precio vigente hoy y fuente.
+COM-80: columna "Principal" con estrella: marca el insumo canónico del
+ingrediente (PUT /insumos/{id}/principal); el motor de costeo lo
+prefiere cuando tiene precio en la fecha.
 C) Equivalencias unidad de USO -> gramos (CRUD + desactivar).
 D) Precios manuales POR INSUMO (períodos con vigencia opcional).
 Historial:
@@ -27,21 +31,25 @@ COM-79: FIX del bug de validación HTML5 al capturar precios (min="0.01"
 step="0.10" rechazaba enteros como 20). Se cambió a min="0" step="0.01"
 en el modal de insumo manual y en Sección D, con validación cliente > 0
 en submitInsumoManual y submitPer.
-COM-79 v2 (este archivo): FIX de fuga de estado entre ingredientes. Al cambiar
-de ingrediente el panel mostraba datos del anterior (insumos, períodos y
-select de Sección D) mientras cargaba la respuesta, y los conservaba si la
-carga fallaba. Ahora seleccionarIngrediente limpia síncronamente las
-secciones B/C/D, los cargadores usan tokens de petición para descartar
-respuestas obsoletas (guarda de carrera), los catch limpian su estado, y
-los modales de vinculación/insumo manual resetean formularios al abrir.
+COM-79 v2: FIX de fuga de estado entre ingredientes. Al cambiar de ingrediente el
+panel mostraba datos del anterior (insumos, períodos y select de Sección D)
+mientras cargaba la respuesta, y los conservaba si la carga fallaba. Ahora
+seleccionarIngrediente limpia síncronamente las secciones B/C/D, los cargadores
+usan tokens de petición para descartar respuestas obsoletas (guarda de carrera),
+los catch limpian su estado, y los modales de vinculación/insumo manual resetean
+formularios al abrir.
+COM-80 (este archivo): columna "Principal" en la Sección B con botón estrella y
+confirmación (ModalConfirmacion); al marcar, se recargan insumos y equivalencias
+para reflejar la herencia de equivalencias que aplica el backend.
 Nada existente se elimina; lo ajustado queda comentado por trazabilidad.
 Uso: Montada por App.jsx en la pestaña "Gestión de Ingredientes".
-Referencia: tickets COM-37 / COM-57 / COM-68 / COM-79 (solo trazabilidad).
+Referencia: tickets COM-37 / COM-57 / COM-68 / COM-79 / COM-80 (solo trazabilidad).
 */
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
     Plus, Edit3, Database, RefreshCw, Loader2, AlertCircle, Coins, Power,
-    Sprout, Search, Link2, Package, Scale, Archive, RotateCcw
+    Sprout, Search, Link2, Package, Scale, Archive, RotateCcw,
+    Star   // COM-80: ícono de insumo principal
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
@@ -96,6 +104,9 @@ export const GestionIngredientesView = () => {
     const [confReactivar, setConfReactivar] = useState(null); // obs a reactivar
     const [reactivando, setReactivando] = useState(false);
     const [soloConReferencias, setSoloConReferencias] = useState(true);
+
+    // ===== COM-80: confirmación de marcado de insumo principal =====
+    const [confPrincipal, setConfPrincipal] = useState(null); // insumo a marcar principal
 
     // Modal crear/editar ingrediente
     const [modalIng, setModalIng] = useState(null);
@@ -321,6 +332,20 @@ export const GestionIngredientesView = () => {
             setError(e.message);
         } finally {
             setReactivando(false);
+        }
+    };
+
+    // ---------- COM-80: marcado de insumo principal ----------
+    const confirmarPrincipal = async () => {
+        const ins = confPrincipal;
+        setConfPrincipal(null);
+        setErrorSeccion('');
+        try {
+            const res = await api.marcarInsumoPrincipal(ins.id, usuario.id);
+            setExito(res.message || `Insumo "${ins.nombre}" marcado como principal del ingrediente.`);
+            if (ingSel) { cargarInsumos(ingSel); cargarEquivalencias(ingSel); }
+        } catch (e) {
+            setErrorSeccion(e.message);
         }
     };
 
@@ -827,6 +852,13 @@ export const GestionIngredientesView = () => {
                     {/* ----- Sección B: insumos vinculados ----- */}
                     <div>
                         <p className="text-xs font-bold text-slate-700 mb-2 flex items-center gap-1"><Link2 size={13} /> Insumos vinculados (unidad de compra) y precio vigente hoy</p>
+                        {/* COM-80: ayuda contextual del insumo principal */}
+                        <p className="text-[11px] text-slate-500 mb-2 flex items-center gap-1">
+                            <Star size={11} className="text-amber-500" />
+                            El insumo <b>PRINCIPAL</b> es el que el motor de costeo (Recetario, propuestas,
+                            lista de compras y reportes) usa preferentemente cuando tiene precio en la fecha.
+                            Si el principal no tiene precio, se conserva el criterio legacy del más barato.
+                        </p>
                         {cargandoInsumos ? (
                             <div className="p-6 text-center text-blue-600"><Loader2 className="animate-spin mx-auto" size={20} /></div>
                         ) : insumos.length === 0 ? (
@@ -844,6 +876,8 @@ export const GestionIngredientesView = () => {
                                             <th className="p-2 font-semibold">Último precio scraper</th>
                                             <th className="p-2 text-center">Períodos man.</th>
                                             <th className="p-2 text-center">Equiv.</th>
+                                            {/* COM-80: columna de principalidad */}
+                                            <th className="p-2 text-center">Principal</th>
                                             <th className="p-2 text-right">Acciones</th>
                                         </tr>
                                     </thead>
@@ -866,8 +900,8 @@ export const GestionIngredientesView = () => {
                                                     {ins.fuente_precio_hoy ? (
                                                         <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
                                                             ins.fuente_precio_hoy === 'MANUAL_PERIODO' ? 'bg-red-100 text-red-700'
-                                                                : ins.fuente_precio_hoy === 'SCRAPER_DIA' ? 'bg-emerald-100 text-emerald-700'
-                                                                    : 'bg-amber-100 text-amber-700'}`}>
+                                                            : ins.fuente_precio_hoy === 'SCRAPER_DIA' ? 'bg-emerald-100 text-emerald-700'
+                                                            : 'bg-amber-100 text-amber-700'}`}>
                                                             {ins.fuente_precio_hoy}
                                                         </span>
                                                     ) : (
@@ -879,6 +913,21 @@ export const GestionIngredientesView = () => {
                                                 </td>
                                                 <td className="p-2 text-center text-slate-600">{ins.n_precios_manuales}</td>
                                                 <td className="p-2 text-center text-slate-600">{ins.n_equivalencias}</td>
+                                                {/* COM-80: celda de principalidad (badge o botón estrella) */}
+                                                <td className="p-2 text-center">
+                                                    {ins.es_principal ? (
+                                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-amber-100 text-amber-700 rounded-full text-[10px] font-black"
+                                                            title="Insumo principal: el costeo lo prefiere cuando tiene precio">
+                                                            <Star size={10} fill="currentColor" /> PRINCIPAL
+                                                        </span>
+                                                    ) : (
+                                                        <button onClick={() => setConfPrincipal(ins)}
+                                                            className="p-1 bg-slate-100 text-slate-400 hover:bg-amber-100 hover:text-amber-700 rounded transition-colors"
+                                                            title="Marcar como insumo principal del ingrediente">
+                                                            <Star size={13} />
+                                                        </button>
+                                                    )}
+                                                </td>
                                                 <td className="p-2">
                                                     <div className="flex justify-end gap-1">
                                                         <button onClick={() => { setInsumoPreciosSel(String(ins.id)); cargarPeriodos(ins.id); }}
@@ -1333,6 +1382,16 @@ export const GestionIngredientesView = () => {
                 onConfirm={confirmarReactivacion}
                 mensaje={confReactivar
                     ? `¿Reactivar "${confReactivar.nombre}"? Se le quitará el prefijo [OBSOLETO] y volverá al catálogo activo con sus ${confReactivar.n_lineas_recetas} línea(s) de receta y ${confReactivar.n_insumos} insumo(s) actuales. Si ya existe un ingrediente activo con el mismo nombre, el sistema rechazará la acción.`
+                    : ''}
+                tipo="warning"
+            />
+            {/* COM-80: confirmación de marcado de insumo principal */}
+            <ModalConfirmacion
+                isOpen={!!confPrincipal}
+                onClose={() => setConfPrincipal(null)}
+                onConfirm={confirmarPrincipal}
+                mensaje={confPrincipal
+                    ? `¿Marcar "${confPrincipal.nombre}" como INSUMO PRINCIPAL del ingrediente "${ingSel?.nombre}"? El motor de costeo (Recetario, propuestas, lista de compras y reportes) usará este insumo preferentemente cuando tenga precio en la fecha; los demás insumos quedan como alternativa si el principal no tiene precio. Si el nuevo principal no tiene equivalencias propias, heredará las de los hermanos para conservar el gramaje de las recetas.`
                     : ''}
                 tipo="warning"
             />

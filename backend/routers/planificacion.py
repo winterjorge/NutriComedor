@@ -24,35 +24,43 @@ Regla v1 (documentada): la lista cubre contra el stock mensual COMPLETO; el
 control acumulado entre semanas del mismo mes vive en el reporte de uso
 (GET /subsidio/reporte-uso, COM-69), que alerta si el consumo supera el stock.
 COM-75 (este archivo): FIX de correspondencia ingrediente->insumo y de precios:
-    * El insumo de cada ítem se toma de la EQUIVALENCIA ACTIVA (ingrediente + unidad
-      de uso de la receta), no del primer insumo por ID; fallback: insumo con
-      histórico de precio más reciente.
-    * El costo usa el precio del INSUMO ESPECÍFICO vinculado (precios_por_gramo_por_insumo,
-      jerarquía COM-75: scraper día > manual > RF > scraper último); fallback al mejor
-      precio del ingrediente solo si el insumo no está en el mapa.
-    * Los nombres se limpian del sufijo "(manual)" para presentación (_limpiar_nombre_insumo).
-    * Se expone 'ingredientes_requieren_precio_manual' (calculado UNA sola vez, no
-      dentro del bucle) para que la UI promptee asignar precio manual temporal a
-      insumos nuevos sin histórico.
-    * Cada ítem expone 'fuente_precio' para auditoría (SCRAPER_DIA / MANUAL_PERIODO /
-      PREDICHO / SCRAPER_ULTIMO / LEGACY_INGREDIENTE / None).
+* El insumo de cada ítem se toma de la EQUIVALENCIA ACTIVA (ingrediente + unidad
+de uso de la receta), no del primer insumo por ID; fallback: insumo con
+histórico de precio más reciente.
+* El costo usa el precio del INSUMO ESPECÍFICO vinculado (precios_por_gramo_por_insumo,
+jerarquía COM-75: scraper día > manual > RF > scraper último); fallback al mejor
+precio del ingrediente solo si el insumo no está en el mapa.
+* Los nombres se limpian del sufijo "(manual)" para presentación (_limpiar_nombre_insumo).
+* Se expone 'ingredientes_requieren_precio_manual' (calculado UNA sola vez, no
+dentro del bucle) para que la UI promptee asignar precio manual temporal a
+insumos nuevos sin histórico.
+* Cada ítem expone 'fuente_precio' para auditoría (SCRAPER_DIA / MANUAL_PERIODO /
+PREDICHO / SCRAPER_ULTIMO / LEGACY_INGREDIENTE / None).
 COM-75 v2 (este archivo): REGLA DEL DÍA DE COMPRA en la lista: los precios se
-    resuelven UNA sola vez para el MENOR DÍA planificado de la semana
-    (fecha_compra = fecha_referencia + min(dias) - 1) y se replican a todos los
-    ítems, coherente con el motor greedy. La RF se acota a los insumos de la lista
-    (insumo_ids) y el diagnóstico reutiliza el mismo mapa (precios_mapa), por lo que
-    la predicción corre una única vez por petición de lista.
+resuelven UNA sola vez para el MENOR DÍA planificado de la semana
+(fecha_compra = fecha_referencia + min(dias) - 1) y se replican a todos los
+ítems, coherente con el motor greedy. La RF se acota a los insumos de la lista
+(insumo_ids) y el diagnóstico reutiliza el mismo mapa (precios_mapa), por lo que
+la predicción corre una única vez por petición de lista.
+COM-80 (este archivo): el FALLBACK de insumo (cuando no hay equivalencia activa)
+prefiere al insumo marcado es_principal=TRUE del ingrediente antes que el criterio
+de histórico más reciente, coherente con precios_insumos.mejor_opcion_ingrediente
+y optimizador.calcular_costo_receta. Sin principal marcado, el orden legacy
+(recencia de histórico) se conserva exactamente.
 Trazabilidad: el formateo anterior sin subsidio queda comentado al final.
 Uso: Registrado en main.py con prefijo /api/v1.
-Referencia: tickets COM-65 / COM-67 / COM-69 / COM-75 / COM-75 v2 (solo trazabilidad).
+Referencia: tickets COM-65 / COM-67 / COM-69 / COM-75 / COM-75 v2 / COM-80 (solo trazabilidad).
 """
 import math
 from datetime import date, datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query
 from psycopg2.extras import RealDictCursor
+
 from database import get_db
+
 # COM-69: stock del subsidio del mes (gramos/ml base por ingrediente)
 from subsidio_motor import subsidio_gramos_del_mes
+
 # COM-75: mapa jerarquizado por insumo + diagnóstico de insumos sin fuente de precio
 from precios_insumos import (
     precios_por_gramo_por_insumo,
@@ -60,6 +68,7 @@ from precios_insumos import (
 )
 
 router = APIRouter(prefix="/planificaciones", tags=["Planificaciones"])
+
 
 @router.get("")
 def listar_planificaciones(db=Depends(get_db)):
@@ -87,6 +96,7 @@ def listar_planificaciones(db=Depends(get_db)):
     finally:
         cur.close()
 
+
 @router.get("/{planificacion_id}")
 def obtener_planificacion_detalle(planificacion_id: int, db=Depends(get_db)):
     """Obtiene el detalle completo de una planificación específica."""
@@ -109,6 +119,7 @@ def obtener_planificacion_detalle(planificacion_id: int, db=Depends(get_db)):
         planificacion = cur.fetchone()
         if not planificacion:
             raise HTTPException(status_code=404, detail="Planificación no encontrada")
+
         cur.execute("""
             SELECT
                 pd.dia,
@@ -131,6 +142,7 @@ def obtener_planificacion_detalle(planificacion_id: int, db=Depends(get_db)):
     finally:
         cur.close()
 
+
 # ============================================================================
 # COM-67 v2 / COM-69 / COM-75: helpers de conversión
 # ============================================================================
@@ -144,14 +156,15 @@ def _gramos_de_ingrediente(cur, ing_id, unidad_receta_id, cantidad_total_receta)
         SELECT ie.gramos_por_unidad_uso
         FROM ingredientes_equivalencias ie
         WHERE ie.ingrediente_id = %s
-          AND ie.unidad_uso_id  = %s
-          AND ie.estado_activo  = TRUE
+          AND ie.unidad_uso_id = %s
+          AND ie.estado_activo = TRUE
         ORDER BY ie.fecha_registro DESC
         LIMIT 1;
     """, (ing_id, unidad_receta_id))
     row = cur.fetchone()
     if row:
         return cantidad_total_receta * float(row['gramos_por_unidad_uso']), 'equivalencia'
+
     cur.execute("""
         SELECT um.factor_a_base, um.tipo_magnitud
         FROM unidades_medida um
@@ -160,10 +173,12 @@ def _gramos_de_ingrediente(cur, ing_id, unidad_receta_id, cantidad_total_receta)
     um = cur.fetchone()
     if um and um['tipo_magnitud'] in ('masa', 'volumen'):
         return cantidad_total_receta * float(um['factor_a_base']), 'factor'
+
     cur.execute("SELECT peso_estimado_g FROM ingredientes WHERE id = %s;", (ing_id,))
     ing = cur.fetchone()
     peso = float(ing['peso_estimado_g']) if ing and ing['peso_estimado_g'] else 10.0
     return cantidad_total_receta * peso, 'peso_estimado'
+
 
 def _convertir_a_unidad_compra(cur, unidad_compra_id, gramos, cantidad_total_receta, peso_estimado_g):
     """
@@ -186,6 +201,7 @@ def _convertir_a_unidad_compra(cur, unidad_compra_id, gramos, cantidad_total_rec
         return gramos / peso_unidad, um['abreviatura']
     return cantidad_total_receta, um['abreviatura']
 
+
 def _limpiar_nombre_insumo(nombre: str) -> str:
     """
     COM-75: limpia sufijos como '(manual)' del nombre del insumo para presentación.
@@ -193,6 +209,7 @@ def _limpiar_nombre_insumo(nombre: str) -> str:
     if not nombre:
         return nombre
     return nombre.replace(' (manual)', '').replace('(manual)', '').strip()
+
 
 @router.get("/{planificacion_id}/lista-compras")
 def generar_lista_compras(
@@ -202,8 +219,8 @@ def generar_lista_compras(
     db=Depends(get_db)
 ):
     """
-    COM-67 v2 + COM-69 + COM-75 + COM-75 v2: lista de compras consolidada (semanal o
-    por día) con unidades reales de mercado y cobertura de SUBSIDIO (Solución B):
+    COM-67 v2 + COM-69 + COM-75 + COM-75 v2 + COM-80: lista de compras consolidada
+    (semanal o por día) con unidades reales de mercado y cobertura de SUBSIDIO (Solución B):
     1) requerido en gramos/ml base por ingrediente (equivalencias -> factor -> peso);
     2) COM-69: cubierto = min(requerido, stock del subsidio del mes del comedor);
        compra = requerido - cubierto; el costo estimado va SOLO sobre la compra;
@@ -215,6 +232,9 @@ def generar_lista_compras(
     COM-75 v2: los precios se resuelven UNA sola vez para el MENOR DÍA planificado de
     la semana (fecha_compra) y se replican a todos los ítems; la RF se acota a los
     insumos de la lista y el diagnóstico reutiliza el mismo mapa.
+    COM-80: cuando NO hay equivalencia activa, el insumo fallback del ingrediente es
+    el marcado es_principal=TRUE (si existe); solo a falta de principal se usa el
+    criterio legacy de histórico de precio más reciente.
     Si no se envía comedor_id, se comporta exactamente como COM-67 v2 (sin subsidio).
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
@@ -245,7 +265,6 @@ def generar_lista_compras(
         fecha_compra = fecha_ref + timedelta(days=min(dias_sel) - 1) if dias_sel else fecha_ref
 
         lista_compras = {}
-
         for dia_plan in dias_planificados:
             receta_id = dia_plan['receta_id']
             total_comensales = dia_plan['total_comensales']
@@ -282,7 +301,6 @@ def generar_lista_compras(
                     LIMIT 1;
                 """, (ing_id, ing['unidad_receta_id']))
                 equiv_row = cur.fetchone()
-
                 if equiv_row:
                     cur.execute("""
                         SELECT ins.id AS insumo_id, ins.nombre AS insumo_nombre,
@@ -292,15 +310,18 @@ def generar_lista_compras(
                     """, (equiv_row['insumo_id'],))
                     insumo = cur.fetchone()
                 else:
-                    # Fallback COM-75: insumo del ingrediente con histórico de precio más reciente
+                    # Fallback COM-75 + COM-80: primero el insumo PRINCIPAL del ingrediente
+                    # (decisión explícita del Admin); solo si no hay principal marcado se
+                    # usa el criterio legacy de histórico de precio más reciente.
                     cur.execute("""
                         SELECT ins.id AS insumo_id, ins.nombre AS insumo_nombre,
                                ins.unidad_medida_id AS unidad_compra_id
                         FROM insumos ins
                         LEFT JOIN historial_precios hp ON hp.insumo_id = ins.id
                         WHERE ins.ingrediente_id = %s
-                        GROUP BY ins.id, ins.nombre, ins.unidad_medida_id
-                        ORDER BY MAX(hp.fecha) DESC NULLS LAST, ins.id
+                        GROUP BY ins.id, ins.nombre, ins.unidad_medida_id, ins.es_principal
+                        ORDER BY ins.es_principal DESC,
+                                 MAX(hp.fecha) DESC NULLS LAST, ins.id
                         LIMIT 1;
                     """, (ing_id,))
                     insumo = cur.fetchone()
@@ -383,7 +404,6 @@ def generar_lista_compras(
         items_subsididados = 0
         ahorro_total = 0.0
         costo_total_compra = 0.0
-
         for (tipo, key), data in sorted(lista_compras.items(), key=lambda x: x[1]['nombre']):
             requerido = data['gramos']
             ing_id = data['ingrediente_id']
@@ -406,7 +426,6 @@ def generar_lista_compras(
                 opc = mejor_por_ing[ing_id]
             ppg = opc['ppg'] if opc else None
             fuente_precio = opc['fuente'] if opc else None
-
             costo_estimado = round(compra * ppg, 2) if (ppg is not None and compra > 0) else None
             ahorro_estimado = round(cubierto * ppg, 2) if (ppg is not None and cubierto > 0) else None
             if costo_estimado:
@@ -479,6 +498,7 @@ def generar_lista_compras(
     finally:
         cur.close()
 
+
 @router.delete("/{planificacion_id}")
 def eliminar_planificacion(planificacion_id: int, db=Depends(get_db)):
     """Elimina una planificación y sus días asociados."""
@@ -497,11 +517,12 @@ def eliminar_planificacion(planificacion_id: int, db=Depends(get_db)):
     finally:
         cur.close()
 
+
 # ============================================================================
 # COM-69 (TRAZABILIDAD): formateo COM-67 v2 sin subsidio, COMENTADO.
 # Antes cada ítem se convertía y mostraba sin campos de cobertura:
-#     cantidad_display = math.ceil((cantidad / 1000.0) * 10) / 10  # kg o L
-#     lista_formateada.append({'ingrediente_id', 'nombre', 'cantidad', 'unidad', 'dias_uso'})
+#   cantidad_display = math.ceil((cantidad / 1000.0) * 10) / 10  # kg o L
+#   lista_formateada.append({'ingrediente_id', 'nombre', 'cantidad', 'unidad', 'dias_uso'})
 # Desde COM-69 se agregan: cantidad_requerida, cantidad_subsidio, subsidio_completo,
 # subsidio_parcial, costo_estimado y ahorro_subsidio_estimado por ítem.
 # ============================================================================
