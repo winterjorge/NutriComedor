@@ -45,6 +45,16 @@ y todos los gates de módulos/permisos se conservan EXACTOS; solo cambia el
 contenedor de navegación. La categoría del tab activo se abre automáticamente
 y la elección del acordeón se persiste en localStorage ('nutri_sidebar_cat').
 La barra horizontal anterior queda COMENTADA por trazabilidad.
+COM-85 (este archivo): PANTALLAS INICIALES POR PERFIL. Al cargar la sesión por
+primera vez, el tab activo se establece según el perfil del usuario:
+* Admin de Sistema → 'modelos_ml' (Sistema > Modelos ML)
+* Administrativo municipal → 'reportes' (Inteligencia > Reportes)
+* Directivo de comedor → 'reportes' (Inteligencia > Reportes)
+* Operativo de comedor → 'pos' (Operación > Ventas y Demanda)
+Si el tab por defecto no está disponible (sin permisos), cae al primer tab
+visible. El estado `tabInicializado` evita re-aplicar la regla cuando el
+usuario navega manualmente. Trazabilidad: el useState('pos') original se
+cambia a null y la lógica de inicialización se encapsula en un useEffect.
 */
 import React, { useState, useEffect } from 'react';
 import {
@@ -166,6 +176,14 @@ const MAPA_CATEGORIAS = {
 // COM-41: clave de persistencia del acordeón
 const LS_CATEGORIA = 'nutri_sidebar_cat';
 
+// COM-85: mapeo de perfil a tab por defecto
+const TAB_POR_PERFIL = {
+  SISTEMA: 'modelos_ml',      // Admin de Sistema → Sistema > Modelos ML
+  MUNICIPAL: 'reportes',      // Administrativo municipal → Inteligencia > Reportes
+  DIRECTIVO: 'reportes',      // Directivo de comedor → Inteligencia > Reportes
+  OPERATIVO: 'pos',           // Operativo de comedor → Operación > Ventas y Demanda
+};
+
 /**
 COM-20: describe el contexto de trabajo activo para exhibirlo en el header.
 COM-78: para el perfil Administrativo se complementa con la municipalidad resuelta
@@ -180,8 +198,33 @@ const descripcionContexto = (seleccion) => {
   return seleccion.comedor_nombre || 'Comedor';
 };
 
+/**
+COM-85: Detecta el perfil de navegación del usuario según su rol y membresías.
+Retorna: 'SISTEMA' | 'MUNICIPAL' | 'DIRECTIVO' | 'OPERATIVO' | null
+*/
+const detectarPerfilNavegacion = (usuario, seleccion, perfilGestion, infoMunicipal) => {
+  // 1. Admin de Sistema: rol explícito o perfil SISTEMA en selección
+  if (usuario?.rol === 'Administrador Sistema' || seleccion?.perfil === 'SISTEMA') {
+    return 'SISTEMA';
+  }
+  // 2. Administrativo municipal: perfil ADMINISTRATIVO o membresía Administrativa activa
+  if (seleccion?.perfil === 'ADMINISTRATIVO' || infoMunicipal) {
+    return 'MUNICIPAL';
+  }
+  // 3. Directivo de comedor: perfilGestion detecta Presidente/Tesorero/Secretario
+  if (perfilGestion === 'COMEDOR_ADMIN') {
+    return 'DIRECTIVO';
+  }
+  // 4. Operativo de comedor: si está en contexto de comedor pero no es directivo
+  if (seleccion?.perfil && seleccion.perfil !== 'SISTEMA' && seleccion.perfil !== 'ADMINISTRATIVO') {
+    return 'OPERATIVO';
+  }
+  return null;
+};
+
 function AppContent() {
-  const [activeTab, setActiveTab] = useState('pos');
+  // COM-85: activeTab inicia en null (no en 'pos') para que la lógica de perfil pueda aplicar
+  const [activeTab, setActiveTab] = useState(null);
   const { usuario, pendienteCambio, completarCambioClave, cerrarSesion, seleccion, validando } = useAuth();
   // COM-25: módulos efectivos del usuario en sesión
   const [misModulos, setMisModulos] = useState([]);
@@ -190,12 +233,14 @@ function AppContent() {
   const [perfilGestion, setPerfilGestion] = useState(null);
   // COM-78: municipalidad del perfil Administrativo para el header
   const [infoMunicipal, setInfoMunicipal] = useState(null);
+  // COM-85: flag para evitar re-aplicar la regla de tab inicial cuando el usuario navega
+  const [tabInicializado, setTabInicializado] = useState(false);
   // COM-41: categoría abierta del acordeón (persistida) y drawer móvil
   const [catAbierta, setCatAbierta] = useState(() => {
     try {
-      return localStorage.getItem(LS_CATEGORIA) || MAPA_CATEGORIAS['pos'];
+      return localStorage.getItem(LS_CATEGORIA) || null;
     } catch (e) {
-      return MAPA_CATEGORIAS['pos'];
+      return null;
     }
   });
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -281,9 +326,42 @@ function AppContent() {
 
   // COM-41: la categoría del tab activo se abre automáticamente (sigue a la selección)
   useEffect(() => {
-    const cat = MAPA_CATEGORIAS[activeTab];
-    if (cat) setCatAbierta(cat);
+    if (activeTab) {
+      const cat = MAPA_CATEGORIAS[activeTab];
+      if (cat) setCatAbierta(cat);
+    }
   }, [activeTab]);
+
+  // COM-85: Inicialización del tab según perfil del usuario (solo en primera carga)
+  useEffect(() => {
+    // Solo ejecutar si aún no se ha inicializado y tenemos los datos necesarios
+    if (tabInicializado || cargandoModulos || !seleccion) return;
+
+    const perfil = detectarPerfilNavegacion(usuario, seleccion, perfilGestion, infoMunicipal);
+    if (!perfil) return;
+
+    const tabPorDefecto = TAB_POR_PERFIL[perfil];
+    
+    // Calcular tabs visibles (misma lógica que abajo)
+    const tieneModulosAdmin = MODULOS_ADMIN.some(m => misModulos.includes(m));
+    const puedeVerUsuarios = tieneModulosAdmin || perfilGestion === 'COMEDOR_ADMIN';
+    const modulosEfectivos = (misModulos.includes('presupuesto') && !misModulos.includes('propuestas'))
+      ? [...misModulos, 'propuestas']
+      : misModulos;
+    const tabs = TABS_BASE.filter(t => modulosEfectivos.includes(t.modulo));
+    if (puedeVerUsuarios) {
+      const idx = tabs.findIndex(t => t.id === 'comedores');
+      tabs.splice(idx === -1 ? tabs.length : idx, 0, TAB_USUARIOS);
+    }
+
+    // Aplicar el tab por defecto si está disponible, sino el primero visible
+    const tabFinal = tabs.some(t => t.id === tabPorDefecto)
+      ? tabPorDefecto
+      : (tabs[0]?.id || 'pos');
+
+    setActiveTab(tabFinal);
+    setTabInicializado(true);
+  }, [usuario, seleccion, perfilGestion, infoMunicipal, misModulos, cargandoModulos, tabInicializado]);
 
   // COM-19: sin sesión -> login
   if (!usuario) {
@@ -310,6 +388,16 @@ function AppContent() {
     );
   }
 
+  // COM-85: Esperar a que se inicialice el tab antes de renderizar el layout
+  if (!tabInicializado || !activeTab) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-emerald-700 to-emerald-900 flex flex-col items-center justify-center gap-3">
+        <Loader2 className="animate-spin text-white" size={44} />
+        <p className="text-emerald-100 text-sm">Cargando su perfil...</p>
+      </div>
+    );
+  }
+
   // COM-25: pestañas visibles según módulos permitidos
   const tieneModulosAdmin = MODULOS_ADMIN.some(m => misModulos.includes(m));
   const puedeVerUsuarios = tieneModulosAdmin || perfilGestion === 'COMEDOR_ADMIN';
@@ -326,10 +414,12 @@ function AppContent() {
     const idx = tabs.findIndex(t => t.id === 'comedores');
     tabs.splice(idx === -1 ? tabs.length : idx, 0, TAB_USUARIOS);
   }
-  // Mantiene activa una pestaña visible
-  if (tabs.length > 0 && !tabs.some(t => t.id === activeTab)) {
-    setTimeout(() => setActiveTab(tabs[0].id), 0);
-  }
+  // COM-85: El fallback antiguo de "Mantiene activa una pestaña visible" ya no es necesario
+  // porque la inicialización por perfil garantiza que activeTab siempre sea válido.
+  // Trazabilidad COM-41: línea anterior comentada:
+  // if (tabs.length > 0 && !tabs.some(t => t.id === activeTab)) {
+  //   setTimeout(() => setActiveTab(tabs[0].id), 0);
+  // }
 
   // COM-41: agrupado de tabs visibles por categoría; se omiten categorías vacías
   const categoriasVisibles = CATEGORIAS
