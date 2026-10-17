@@ -220,14 +220,14 @@ def precios_por_gramo_por_insumo(cur, fecha, fallback_ultima_fecha=False, insumo
     kwarg el comportamiento es idéntico al pre-COM-75 v2.
     """
     out = {}
-    # COM-82: filtro WHERE aplicado cuando el caller pasa el conjunto relevante
+    # COM-82/86: Filtro para evitar cargar todos los insumos del sistema
     filtro_sql = ""
     filtro_params = ()
     if insumo_ids:
         filtro_sql = " AND ins.id = ANY(%s)"
         filtro_params = (list(insumo_ids),)
 
-    # ---- Paso 1: SCRAPER DEL DÍA EXACTO (prioridad máxima, dato real) ----
+    # ---- Paso 1: SCRAPER DEL DÍA EXACTO ----
     cur.execute(f"""
         SELECT ins.id AS insumo_id, ins.nombre AS insumo_nombre, ins.origen,
                MIN(hp.precio_prom) AS precio_prom,
@@ -242,6 +242,7 @@ def precios_por_gramo_por_insumo(cur, fecha, fallback_ultima_fecha=False, insumo
         GROUP BY ins.id, ins.nombre, ins.origen,
                  um.abreviatura, um.tipo_magnitud, um.factor_a_base, ing.peso_estimado_g;
     """, (fecha, *filtro_params))
+
     for r in cur.fetchall():
         g_compra = gramos_por_unidad_compra(
             r['u_abrev'], r['u_tipo'], r['u_factor'], r['peso_estimado_g'])
