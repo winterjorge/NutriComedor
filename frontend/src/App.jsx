@@ -26,7 +26,7 @@ gestionan; perfiles municipales/auditoría solo lectura (gate backend).
 * "Precios de Venta" (módulo 'precios_venta'): exclusivo Admin de Sistemas.
 Solo hay 4 adiciones marcadas COM-59A (2 íconos, 2 imports, 2 entradas en
 TABS_BASE y 2 líneas de render); ninguna línea existente se elimina.
-COM-69: se AGREGA la pestaña "Reporte Subsidio" (módulo 'subsidio'):
+COM-69 (este archivo): se AGREGA la pestaña "Reporte Subsidio" (módulo 'subsidio'):
 vista de rendición mensual de uso del subsidio por comedor para el
 administrativo municipal (3 adiciones: import del ícono ClipboardCheck,
 import de ReporteSubsidioView, entrada en TABS_BASE y línea de render).
@@ -55,7 +55,11 @@ arranca en null (sentinela) y un effect de inicialización aplica el tab del
 perfil + abre su categoría del acordeón; si el tab del perfil no estuviera
 visible para el usuario, cae al primer tab visible (fail-safe). El guard legacy
 "mantiene activa una pestaña visible" solo opera POST-inicialización para no
-pisar la regla. Ningún otro comportamiento de navegación se modifica.
+pisar la regla.
+COM-85 v2 (este archivo): FIX de persistencia entre sesiones. Al cambiar de
+usuario (logout → login con otro perfil), se resetean activeTab y tabInicializado
+para que COM-85 aplique la pantalla inicial del nuevo perfil. Sin este fix, el
+nuevo usuario veía la última pestaña del usuario anterior.
 */
 import React, { useState, useEffect, useMemo } from 'react';
 import {
@@ -202,7 +206,7 @@ const descripcionContexto = (seleccion) => {
 };
 
 function AppContent() {
-  // COM-85: activeTab arranca en null (sentinela); el effect de inicialización por
+  // COM-85 v2: activeTab arranca en null (sentinela); el effect de inicialización por
   // perfil lo fija. Trazabilidad COM-41: antes era useState('pos').
   const [activeTab, setActiveTab] = useState(null);
   const { usuario, pendienteCambio, completarCambioClave, cerrarSesion, seleccion, validando } = useAuth();
@@ -225,6 +229,20 @@ function AppContent() {
   // COM-85: perfil de navegación resuelto y flag de inicialización del tab
   const [perfilNav, setPerfilNav] = useState(null);
   const [tabInicializado, setTabInicializado] = useState(false);
+
+  // COM-85 v2: Reset de estados cuando cambia el usuario (logout → login)
+  // Esto asegura que el nuevo usuario vea su pantalla inicial, no la del anterior.
+  useEffect(() => {
+    if (!usuario) {
+      // Usuario se deslogueó: resetear todo
+      setActiveTab(null);
+      setTabInicializado(false);
+      setPerfilNav(null);
+      setMisModulos([]);
+      setPerfilGestion(null);
+      setInfoMunicipal(null);
+    }
+  }, [usuario]);
 
   useEffect(() => {
     if (!usuario) {
