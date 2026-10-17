@@ -765,10 +765,10 @@ def listar_insumos_del_ingrediente(
             f['precio_por_gramo_hoy'] = opc['ppg'] if opc else None
             f['fuente_precio_hoy'] = opc['fuente'] if opc else None
             f['detalle_precio_hoy'] = opc['detalle'] if opc else None
-            # COM-37 v6: precio legible en unidad de compra (S/ por Kg, L, und...)
-            f['precio_por_unidad_hoy'] = (
-                _precio_por_unidad_hoy(cur, f['id'], opc['fuente'], fecha_obj) if opc else None
-            )
+            # COM-86 FIX: Usar el precio_por_unidad que YA viene calculado en 'opc'.
+            # Se elimina la llamada a _precio_por_unidad_hoy() dentro del bucle 
+            # para evitar el problema N+1 que causaba timeouts de 27+ segundos.
+            f['precio_por_unidad_hoy'] = opc.get('precio_por_unidad') if opc else None
         return filas
     except HTTPException:
         raise
