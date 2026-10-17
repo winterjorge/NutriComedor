@@ -1,8 +1,8 @@
 /**
 services/api.js
 Objetivo: Servicio centralizado de comunicación HTTP con la API del backend.
-      Todos los componentes consumen este módulo en lugar de hacer fetch directo,
-      lo que garantiza un manejo uniforme de errores, cabeceras y endpoints.
+Todos los componentes consumen este módulo en lugar de hacer fetch directo,
+lo que garantiza un manejo uniforme de errores, cabeceras y endpoints.
 Uso: Importar `api` en hooks y componentes para consumir los endpoints del sistema.
 Historial:
 COM-17: parser defensivo `leerErrorSeguro`.
@@ -16,52 +16,54 @@ COM-26: flujo CRUD de usuarios por perfil + búsquedas de municipalidades/comedo
 COM-5:  bloque KMEANS (clustering nutricional del recetario).
 COM-8:  bloque PROPUESTAS (motor greedy de menú semanal).
 COM-5 v4 / COM-8 v7: KMEANS con usuarioSolicitanteId + proteínas configurables +
-      bloque MODELOS_ML (panel de gráficos exclusivo del Admin).
+bloque MODELOS_ML (panel de gráficos exclusivo del Admin).
 COM-38: resetearClaveUsuario (reset/cambio de clave por Admin de Sistemas).
 COM-39: bloque DIRECTIVOS DE COMEDOR (búsqueda por distrito, listado, lotes).
 COM-37 v1/v5/v6/v8: bloque GESTION_INGREDIENTES (ingredientes CRUD sin borrado,
-      insumos del ingrediente con precio de hoy y fuente, búsqueda y vinculación
-      de insumos, insumos manuales, equivalencias uso->gramos, precios manuales
-      por insumo, legacy por ingrediente, re-emparejado y duplicados/fusión).
+insumos del ingrediente con precio de hoy y fuente, búsqueda y vinculación
+de insumos, insumos manuales, equivalencias uso->gramos, precios manuales
+por insumo, legacy por ingrediente, re-emparejado y duplicados/fusión).
 COM-48: en RECETAS: getComponentesReceta, limpiarIngredientesReceta,
-      getCategoriasAlimentos y createIngredienteDesdeReceta.
+getCategoriasAlimentos y createIngredienteDesdeReceta.
 COM-50 v1/v2/v3: bloque REPORTES DE GESTIÓN: getAlcanceReportes, getReporteGestion
-      (nivel/zona) y getPlanesGestion.
+(nivel/zona) y getPlanesGestion.
 COM-57: getObsoletosIngredientes (migración de sinónimos fusionados).
 COM-59A: bloques SUBSIDIO DE VÍVERES (getSubsidioMes, registrarSubsidio,
-      editarSubsidio, eliminarSubsidio) y PRECIOS DE VENTA (getPreciosVentaVigentes,
-      getHistorialPreciosVenta, registrarPrecioVenta).
+editarSubsidio, eliminarSubsidio) y PRECIOS DE VENTA (getPreciosVentaVigentes,
+getHistorialPreciosVenta, registrarPrecioVenta).
 COM-59A v2: getHistorialPreciosVenta acepta `params` y envía
-      `usuario_solicitante_id` (obligatorio tras el fix de seguridad del backend
-      v2); con esto PreciosVentaView deja de degradar con banner y carga el
-      historial completo. Ningún otro método se modifica.
+`usuario_solicitante_id` (obligatorio tras el fix de seguridad del backend
+v2); con esto PreciosVentaView deja de degradar con banner y carga el
+historial completo. Ningún otro método se modifica.
 COM-62 v2: bloque POS reconstruido como superconjunto del original:
-      * Nuevos: buscarComensalesPorNombre (autocompletado) y editarComensal
-        (completar/corregir DNI después).
-      * buscarComensal / registrarComensal / registrarVenta / modificarVenta /
-        eliminarVenta pasan a retornar JSON parseado y a lanzar Error con
-        leerErrorSeguro (fix del bug "l.json is not a function" de
-        ModalEdicionVenta: las versiones raw-fetch devolvían el Response crudo).
-      * Las 5 versiones originales raw-fetch quedan COMENTADAS al final del
-        bloque por trazabilidad (convención del proyecto: nada se elimina).
+* Nuevos: buscarComensalesPorNombre (autocompletado) y editarComensal
+(completar/corregir DNI después).
+* buscarComensal / registrarComensal / registrarVenta / modificarVenta /
+eliminarVenta pasan a retornar JSON parseado y a lanzar Error con
+leerErrorSeguro (fix del bug "l.json is not a function" de
+ModalEdicionVenta: las versiones raw-fetch devolvían el Response crudo).
+* Las 5 versiones originales raw-fetch quedan COMENTADAS al final del
+bloque por trazabilidad (convención del proyecto: nada se elimina).
 COM-63: cargaMasivaHistorica (POST /padron/carga-masiva, multipart CSV
-      fecha;afiliados;publico;sociales;cocineras).
+fecha;afiliados;publico;sociales;cocineras).
 COM-65: getListaCompras documenta el filtro opcional por día (la firma ya lo
-      traía; se agrega el comentario de trazabilidad en PLANIFICACIONES).
+traía; se agrega el comentario de trazabilidad en PLANIFICACIONES).
 COM-68: reactivarIngrediente (POST /ingredientes-admin/{id}/reactivar): quita el
-      prefijo [OBSOLETO] y devuelve el canónico al catálogo activo.
+prefijo [OBSOLETO] y devuelve el canónico al catálogo activo.
 COM-69 (este archivo): tres adiciones marcadas, ninguna línea existente se elimina:
-      * getListaCompras acepta `comedorId` opcional (query comedor_id) para que el
-        backend aplique la cobertura del subsidio del mes (Solución B).
-      * getComedoresVisiblesSubsidio (GET /subsidio/comedores-visibles): selector
-        del reporte municipal según permisos de lectura de subsidio.
-      * getReporteSubsidio (GET /subsidio/reporte-uso): stock vs consumo proyectado
-        acumulado del mes por comedor, con estados OK/POR AGOTAR/AGOTADO/SIN CONSUMO.
+* getListaCompras acepta `comedorId` opcional (query comedor_id) para que el
+backend aplique la cobertura del subsidio del mes (Solución B).
+* getComedoresVisiblesSubsidio (GET /subsidio/comedores-visibles): selector
+del reporte municipal según permisos de lectura de subsidio.
+* getReporteSubsidio (GET /subsidio/reporte-uso): stock vs consumo proyectado
+acumulado del mes por comedor, con estados OK/POR AGOTAR/AGOTADO/SIN CONSUMO.
 COM-43: bloque SCRAPER SISAP (ejecutarScraper, getEstadoScraper, getHistorialScraper).
 COM-77: bloque REPORTES AVANZADOS (alcance unificado + 5 reportes operativos).
-COM-78 (este archivo): bloque REPORTES MUNICIPIO (getDashboardDistrital,
-      getObservatorioPrecios, getCoberturaFocalizacion). Ningún método existente
-      se elimina ni se renombra.
+COM-78: bloque REPORTES MUNICIPIO (getDashboardDistrital, getObservatorioPrecios,
+getCoberturaFocalizacion).
+COM-80 (este archivo): marcarInsumoPrincipal (PUT /ingredientes-admin/insumos/{id}/principal):
+marca el insumo canónico del ingrediente; el motor de costeo lo prefiere cuando
+tiene precio en la fecha. Ningún método existente se elimina ni se renombra.
 */
 const API_BASE = '/api/v1';
 
@@ -228,7 +230,7 @@ export const api = {
         return response.json();
     },
     // ==========================================
-    // GESTIÓN DE INGREDIENTES (COM-37 v1/v5/v6/v8 + COM-57 + COM-68) — exclusivo Admin de Sistemas
+    // GESTIÓN DE INGREDIENTES (COM-37 v1/v5/v6/v8 + COM-57 + COM-68 + COM-80) — exclusivo Admin de Sistemas
     // ==========================================
     getIngredientesAdmin: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/ingredientes-admin?usuario_solicitante_id=${usuarioSolicitanteId}`);
@@ -300,6 +302,19 @@ export const api = {
             method: 'PUT'
         });
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al desvincular el insumo'));
+        return response.json();
+    },
+    // COM-80: marca el insumo como PRINCIPAL de su ingrediente (desmarca hermanos y
+    // hereda equivalencias de hermanos para las unidades de uso faltantes). El motor
+    // de costeo (optimizador / precios_insumos / lista de compras) lo prefiere cuando
+    // tiene precio en la fecha; si no, conserva el comportamiento legacy.
+    marcarInsumoPrincipal: async (insumoId, usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/insumos/${insumoId}/principal`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ usuario_solicitante_id: usuarioSolicitanteId })
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al marcar el insumo principal'));
         return response.json();
     },
     getEquivalencias: async (ingredienteId, usuarioSolicitanteId, insumoId) => {
@@ -865,7 +880,7 @@ export const api = {
         return response.json();
     },
     // COM-69: reporte de uso del subsidio por comedor y mes (stock vs consumo
-    // proyectado acumulado del mes, con estados).
+    // proyectado acumulado de las planificaciones del mes, con estados).
     getReporteSubsidio: async (params) => {
         const qs = new URLSearchParams();
         qs.append('usuario_solicitante_id', params.usuario_solicitante_id);
