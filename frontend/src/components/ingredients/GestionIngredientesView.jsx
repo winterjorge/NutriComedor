@@ -23,12 +23,17 @@ COM-37 v6: scroll automático al panel, precio por unidad de compra hoy, precarg
 de períodos en Sección D.
 COM-57: sección A2 de sinónimos obsoletos con migración asistida.
 COM-68: reactivación de obsoletos desde UI + filtro de ruido.
-COM-79 (este archivo): FIX del bug de validación HTML5 al capturar precios.
-Los inputs de precio usaban min="0.01" step="0.10", lo que hacía que valores
-enteros como 20 fueran inválidos (el navegador sugería 19.91 y 20.01).
-Se cambia a min="0" step="0.01" en el modal de insumo manual y en Sección D,
-y se agrega validación cliente de precio > 0 en submitInsumoManual y
-submitPer (min="0" permitiría enviar 0 al backend).
+COM-79: FIX del bug de validación HTML5 al capturar precios (min="0.01"
+step="0.10" rechazaba enteros como 20). Se cambió a min="0" step="0.01"
+en el modal de insumo manual y en Sección D, con validación cliente > 0
+en submitInsumoManual y submitPer.
+COM-79 v2 (este archivo): FIX de fuga de estado entre ingredientes. Al cambiar
+de ingrediente el panel mostraba datos del anterior (insumos, períodos y
+select de Sección D) mientras cargaba la respuesta, y los conservaba si la
+carga fallaba. Ahora seleccionarIngrediente limpia síncronamente las
+secciones B/C/D, los cargadores usan tokens de petición para descartar
+respuestas obsoletas (guarda de carrera), los catch limpian su estado, y
+los modales de vinculación/insumo manual resetean formularios al abrir.
 Nada existente se elimina; lo ajustado queda comentado por trazabilidad.
 Uso: Montada por App.jsx en la pestaña "Gestión de Ingredientes".
 Referencia: tickets COM-37 / COM-57 / COM-68 / COM-79 (solo trazabilidad).
@@ -51,10 +56,26 @@ const FORM_PER_VACIO = {
     observacion: '',
 };
 
+// COM-79 v2: formulario vacío del modal de insumo manual (reset al abrir)
+const FORM_INSUMO_VACIO = {
+    nombre: '',
+    unidad_medida_id: '',
+    precio_por_unidad: '',
+    usar_rango: false,
+    fecha_inicio: '',
+    fecha_fin: '',
+    observacion: '',
+    equivalencias: [],
+};
+
 export const GestionIngredientesView = () => {
     const { usuario } = useAuth();
     // COM-37 v6: referencia del panel para scroll automático al seleccionar ingrediente
     const panelRef = useRef(null);
+    // COM-79 v2: tokens de petición para descartar respuestas obsoletas (carreras)
+    const tokenInsumosRef = useRef(0);
+    const tokenEqRef = useRef(0);
+    const tokenPerRef = useRef(0);
 
     // ===== Sección A: catálogo =====
     const [ingredientes, setIngredientes] = useState([]);
@@ -93,10 +114,7 @@ export const GestionIngredientesView = () => {
     const [resultadosInsumo, setResultadosInsumo] = useState([]);
     const [buscandoInsumo, setBuscandoInsumo] = useState(false);
     const [modalInsumoManual, setModalInsumoManual] = useState(false);
-    const [formInsumoManual, setFormInsumoManual] = useState({
-        nombre: '', unidad_medida_id: '', precio_por_unidad: '', usar_rango: false,
-        fecha_inicio: '', fecha_fin: '', observacion: '', equivalencias: [],
-    });
+    const [formInsumoManual, setFormInsumoManual] = useState(FORM_INSUMO_VACIO);
     const [guardandoInsumo, setGuardandoInsumo] = useState(false);
 
     // ===== Sección C: equivalencias =====
@@ -170,24 +188,32 @@ export const GestionIngredientesView = () => {
             : obsoletos
     ), [obsoletos, soloConReferencias]);
 
+    // COM-79 v2: token de carrera + limpieza en catch para no mostrar períodos ajenos
     const cargarPeriodos = useCallback(async (insumoId) => {
-        if (!insumoId) { setPeriodos([]); return; }
+        const token = ++tokenPerRef.current;
+        if (!insumoId) { setPeriodos([]); setCargandoPer(false); return; }
         setCargandoPer(true);
         try {
-            setPeriodos(await api.getPreciosManualesInsumo(insumoId, usuario.id));
+            const lista = await api.getPreciosManualesInsumo(insumoId, usuario.id);
+            if (token !== tokenPerRef.current) return; // respuesta obsoleta
+            setPeriodos(lista);
         } catch (e) {
+            if (token !== tokenPerRef.current) return;
+            setPeriodos([]);
             setErrorSeccion(e.message);
         } finally {
-            setCargandoPer(false);
+            if (token === tokenPerRef.current) setCargandoPer(false);
         }
     }, [usuario.id]);
 
-    // COM-37 v6: precarga en Sección D del insumo con períodos manuales (o el primero)
+    // COM-79 v2: token de carrera + limpieza en catch para no mostrar insumos ajenos
     const cargarInsumos = useCallback(async (ing) => {
+        const token = ++tokenInsumosRef.current;
         setCargandoInsumos(true);
         setErrorSeccion('');
         try {
             const lista = await api.getInsumosDelIngrediente(ing.id, usuario.id);
+            if (token !== tokenInsumosRef.current) return; // respuesta obsoleta
             setInsumos(lista);
             const pre = lista.find(x => (x.n_precios_manuales || 0) > 0)
                 || lista.find(x => x.origen === 'MANUAL')
@@ -200,29 +226,46 @@ export const GestionIngredientesView = () => {
                 setPeriodos([]);
             }
         } catch (e) {
+            if (token !== tokenInsumosRef.current) return;
+            setInsumos([]);
+            setInsumoPreciosSel('');
+            setPeriodos([]);
             setErrorSeccion(e.message);
         } finally {
-            setCargandoInsumos(false);
+            if (token === tokenInsumosRef.current) setCargandoInsumos(false);
         }
     }, [usuario.id, cargarPeriodos]);
 
+    // COM-79 v2: token de carrera + limpieza en catch para no mostrar equivalencias ajenas
     const cargarEquivalencias = useCallback(async (ing) => {
+        const token = ++tokenEqRef.current;
         setCargandoEq(true);
         try {
-            setEquivalencias(await api.getEquivalencias(ing.id, usuario.id));
+            const lista = await api.getEquivalencias(ing.id, usuario.id);
+            if (token !== tokenEqRef.current) return; // respuesta obsoleta
+            setEquivalencias(lista);
         } catch (e) {
+            if (token !== tokenEqRef.current) return;
+            setEquivalencias([]);
             setErrorSeccion(e.message);
         } finally {
-            setCargandoEq(false);
+            if (token === tokenEqRef.current) setCargandoEq(false);
         }
     }, [usuario.id]);
 
+    // COM-79 v2: limpiar SINCRÓNICAMENTE las secciones B/C/D al cambiar de ingrediente
+    // para que nunca se vean datos del ingrediente anterior mientras carga el nuevo.
     const seleccionarIngrediente = (ing) => {
         setIngSel(ing);
+        setInsumos([]);
+        setEquivalencias([]);
+        setPeriodos([]);
+        setInsumoPreciosSel('');
         setFormEq({ insumo_id: '', unidad_uso_id: '', gramos_por_unidad_uso: '', observacion: '' });
         setEqEditId(null);
         setFormPer(FORM_PER_VACIO);
         setPerEditId(null);
+        setErrorSeccion('');
         cargarInsumos(ing);
         cargarEquivalencias(ing);
     };
@@ -317,7 +360,7 @@ export const GestionIngredientesView = () => {
                 const res = await api.createIngredienteAdmin(payload);
                 setExito(res.message || 'Ingrediente creado.');
                 setModalIng(null);
-                cargar();
+                await cargar();
             } catch (e2) {
                 setError(e2.message);
             } finally {
@@ -347,6 +390,21 @@ export const GestionIngredientesView = () => {
     };
 
     // ---------- Sección B: buscar y vincular insumos ----------
+    // COM-79 v2: reset de búsqueda/resultados al abrir el modal
+    const abrirBuscarInsumo = () => {
+        setQInsumo(ingSel?.nombre || '');
+        setResultadosInsumo([]);
+        setErrorSeccion('');
+        setModalBuscarInsumo(true);
+    };
+
+    // COM-79 v2: reset del formulario al abrir el modal de insumo manual
+    const abrirInsumoManual = () => {
+        setFormInsumoManual(FORM_INSUMO_VACIO);
+        setErrorSeccion('');
+        setModalInsumoManual(true);
+    };
+
     const buscarInsumos = async () => {
         setBuscandoInsumo(true);
         setErrorSeccion('');
@@ -413,10 +471,7 @@ export const GestionIngredientesView = () => {
             });
             setExito(res.message || 'Insumo manual creado.');
             setModalInsumoManual(false);
-            setFormInsumoManual({
-                nombre: '', unidad_medida_id: '', precio_por_unidad: '', usar_rango: false,
-                fecha_inicio: '', fecha_fin: '', observacion: '', equivalencias: [],
-            });
+            setFormInsumoManual(FORM_INSUMO_VACIO);
             cargarInsumos(ingSel);
             cargarEquivalencias(ingSel);
             cargar();
@@ -748,11 +803,11 @@ export const GestionIngredientesView = () => {
                             </span>
                         </h3>
                         <div className="flex gap-2">
-                            <button onClick={() => { setModalBuscarInsumo(true); setResultadosInsumo([]); setQInsumo(ingSel.nombre || ''); }}
+                            <button onClick={abrirBuscarInsumo}
                                 className="flex items-center gap-1 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-medium transition-colors">
                                 <Search size={13} /> Vincular insumo del scraper
                             </button>
-                            <button onClick={() => setModalInsumoManual(true)}
+                            <button onClick={abrirInsumoManual}
                                 className="flex items-center gap-1 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-medium transition-colors">
                                 <Plus size={13} /> Nuevo insumo manual
                             </button>
