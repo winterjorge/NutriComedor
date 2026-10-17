@@ -35,26 +35,31 @@ COM-43: se AGREGA la pestaña "Scraper SISAP" (módulo 'modelos_ml'):
 ejecución web y auditoría del scraper (import Database + ScraperAdminView).
 COM-78: header mejorado: nombre de la municipalidad visible para el perfil
 Administrativo y "Módulo Predictivo Activo" SOLO para Admin de Sistemas.
-COM-81 (este archivo): foco visible de marca en la barra de pestañas y botón de
-salida: se reemplaza el outline negro por defecto del navegador (visible al
-navegar con Tab) por un anillo esmeralda consistente con la paleta
-(focus:outline-none + focus-visible:ring-2 focus-visible:ring-emerald-500).
-Con clic de mouse no se pinta nada (focus-visible); con teclado se ve el anillo
-verde en lugar del contorno negro. Para volver al comportamiento literal
-anterior (sin indicador), dejar solo focus:outline-none (línea alternativa
-comentada en el className de las pestañas).
+COM-81: foco visible de marca (anillo esmeralda focus-visible) en botones del
+shell en lugar del outline negro del navegador.
+COM-41 (este archivo): la barra horizontal de pestañas se REEMPLAZA por un
+SIDEBAR lateral con 6 categorías en acordeón (Cocina, Operación, Gestión,
+Inteligencia, Configuración y Sistema), fijo en desktop (>=lg) y drawer
+deslizante con hamburguesa + backdrop en móvil/tablet. El catálogo TABS_BASE
+y todos los gates de módulos/permisos se conservan EXACTOS; solo cambia el
+contenedor de navegación. La categoría del tab activo se abre automáticamente
+y la elección del acordeón se persiste en localStorage ('nutri_sidebar_cat').
+La barra horizontal anterior queda COMENTADA por trazabilidad.
 */
 import React, { useState, useEffect } from 'react';
 import {
   ChefHat, Calculator, ShoppingCart, Activity, Users, ClipboardList,
   LogOut, Store, UserCog, Loader2, MapPin, Contact, BarChart3, PieChart,
-  Sparkles,  // COM-8: ícono de la pestaña "Propuestas de Menú"
-  LineChart, // COM-5 v4: ícono de la pestaña "Modelos ML"
-  Package,   // COM-37: ícono de la pestaña "Gestión de Ingredientes"
-  Gift,      // COM-59A: ícono de la pestaña "Subsidio de Víveres"
-  Coins,     // COM-59A: ícono de la pestaña "Precios de Venta"
+  Sparkles,   // COM-8: ícono de la pestaña "Propuestas de Menú"
+  LineChart,  // COM-5 v4: ícono de la pestaña "Modelos ML"
+  Package,    // COM-37: ícono de la pestaña "Gestión de Ingredientes"
+  Gift,       // COM-59A: ícono de la pestaña "Subsidio de Víveres"
+  Coins,      // COM-59A: ícono de la pestaña "Precios de Venta"
   ClipboardCheck, // COM-69: ícono de la pestaña "Reporte Subsidio"
-  Database   // COM-43: ícono de la pestaña "Scraper SISAP"
+  Database,   // COM-43: ícono de la pestaña "Scraper SISAP"
+  Menu, X,    // COM-41: hamburguesa del drawer móvil y botón de cierre
+  Settings,   // COM-41: ícono de la categoría "Configuración"
+  Shield      // COM-41: ícono de la categoría "Sistema" (solo Admin)
 } from 'lucide-react';
 import { RecipesView } from './components/recipes/RecipesView';
 import { ClusterRecetasView } from './components/recipes/ClusterRecetasView';
@@ -90,14 +95,11 @@ import { SeleccionComedorView } from './components/auth/SeleccionComedorView';
 import { api } from './services/api';
 // COM-43: panel de ejecución/auditoría del scraper SISAP (solo Admin de Sistemas)
 import { ScraperAdminView } from './components/scraper/ScraperAdminView';
+// COM-41: navegación lateral agrupada por categorías (desktop + drawer móvil)
+import { SidebarNav } from './components/layout/SidebarNav';
 
 // COM-25: módulos de administración que abren el panel global de usuarios
 const MODULOS_ADMIN = ['municipalidades', 'roles', 'bloqueos', 'vistas'];
-
-// COM-81: clases de foco de marca reutilizables en el shell (barra de pestañas y
-// header). Anillo esmeralda solo con teclado; sin outline negro del navegador.
-// Alternativa literal COM-81 (sin indicador visible): 'focus:outline-none'
-const FOCUS_MARCA = 'focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-50';
 
 // COM-25 + COM-5 + COM-8 + COM-5 v4 + COM-37 + COM-59A + COM-69 + COM-43: catálogo de pestañas
 const TABS_BASE = [
@@ -139,6 +141,31 @@ const TABS_BASE = [
 // COM-25: pestaña de gestión de usuarios (panel global o de comedor)
 const TAB_USUARIOS = { id: 'usuarios', label: 'Usuarios', icon: Contact, color: 'blue', modulo: null };
 
+// =========================================================================
+// COM-41: CATEGORÍAS DEL SIDEBAR (agrupación de negocio validada con producto)
+// =========================================================================
+const CATEGORIAS = [
+  { clave: 'cocina', label: 'Cocina', icon: ChefHat },
+  { clave: 'operacion', label: 'Operación', icon: Activity },
+  { clave: 'gestion', label: 'Gestión', icon: Gift },
+  { clave: 'inteligencia', label: 'Inteligencia', icon: BarChart3 },
+  { clave: 'configuracion', label: 'Configuración', icon: Settings },
+  // COM-41: categoría técnica exclusiva del Admin de Sistemas (decisión de producto)
+  { clave: 'sistema', label: 'Sistema', icon: Shield },
+];
+// COM-41: mapa tab -> categoría. Todo tab nuevo DEBE registrarse aquí o quedará
+// sin contenedor de navegación (fail-safe: se ignora en el agrupado).
+const MAPA_CATEGORIAS = {
+  recipes: 'cocina', propuestas: 'cocina', planificaciones: 'cocina', catalog: 'cocina',
+  pos: 'operacion',
+  subsidio: 'gestion', reporte_subsidio: 'gestion', precios_venta: 'gestion',
+  reportes: 'inteligencia',
+  comedores: 'configuracion', grupos: 'configuracion', usuarios: 'configuracion',
+  clusters: 'sistema', modelos_ml: 'sistema', scraper: 'sistema', gestion_ingredientes: 'sistema',
+};
+// COM-41: clave de persistencia del acordeón
+const LS_CATEGORIA = 'nutri_sidebar_cat';
+
 /**
 COM-20: describe el contexto de trabajo activo para exhibirlo en el header.
 COM-78: para el perfil Administrativo se complementa con la municipalidad resuelta
@@ -163,6 +190,15 @@ function AppContent() {
   const [perfilGestion, setPerfilGestion] = useState(null);
   // COM-78: municipalidad del perfil Administrativo para el header
   const [infoMunicipal, setInfoMunicipal] = useState(null);
+  // COM-41: categoría abierta del acordeón (persistida) y drawer móvil
+  const [catAbierta, setCatAbierta] = useState(() => {
+    try {
+      return localStorage.getItem(LS_CATEGORIA) || MAPA_CATEGORIAS['pos'];
+    } catch (e) {
+      return MAPA_CATEGORIAS['pos'];
+    }
+  });
+  const [drawerOpen, setDrawerOpen] = useState(false);
 
   useEffect(() => {
     if (!usuario) {
@@ -236,6 +272,19 @@ function AppContent() {
     return () => { vivo = false; };
   }, [usuario]);
 
+  // COM-41: persistencia del acordeón
+  useEffect(() => {
+    try {
+      if (catAbierta) localStorage.setItem(LS_CATEGORIA, catAbierta);
+    } catch (e) { /* almacenamiento no disponible: se ignora */ }
+  }, [catAbierta]);
+
+  // COM-41: la categoría del tab activo se abre automáticamente (sigue a la selección)
+  useEffect(() => {
+    const cat = MAPA_CATEGORIAS[activeTab];
+    if (cat) setCatAbierta(cat);
+  }, [activeTab]);
+
   // COM-19: sin sesión -> login
   if (!usuario) {
     return <LoginView />;
@@ -281,6 +330,19 @@ function AppContent() {
   if (tabs.length > 0 && !tabs.some(t => t.id === activeTab)) {
     setTimeout(() => setActiveTab(tabs[0].id), 0);
   }
+
+  // COM-41: agrupado de tabs visibles por categoría; se omiten categorías vacías
+  const categoriasVisibles = CATEGORIAS
+    .map(cat => ({ ...cat, tabs: tabs.filter(t => MAPA_CATEGORIAS[t.id] === cat.clave) }))
+    .filter(cat => cat.tabs.length > 0);
+
+  // COM-41: selección desde el sidebar (desktop o drawer)
+  const seleccionarTab = (id) => {
+    setActiveTab(id);
+    setCatAbierta(MAPA_CATEGORIAS[id] || null);
+    setDrawerOpen(false);
+  };
+
   // Sin módulos asignados
   if (!cargandoModulos && tabs.length === 0) {
     return (
@@ -294,7 +356,7 @@ function AppContent() {
           </p>
           <button
             onClick={cerrarSesion}
-            className={`mt-4 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium transition-colors ${FOCUS_MARCA}`}
+            className="mt-4 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
           >
             Cerrar sesión
           </button>
@@ -309,7 +371,16 @@ function AppContent() {
         {/* Header */}
         <header className="bg-emerald-700 text-white p-4 shadow-md">
           <div className="max-w-6xl mx-auto flex items-center gap-3">
-            <Activity size={28} />
+            {/* COM-41: hamburguesa del drawer móvil/tablet */}
+            <button
+              onClick={() => setDrawerOpen(true)}
+              className="lg:hidden p-2 bg-emerald-800 hover:bg-emerald-900 rounded-lg border border-emerald-600 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300"
+              title="Abrir menú de navegación"
+              aria-label="Abrir menú de navegación"
+            >
+              <Menu size={18} />
+            </button>
+            <Activity size={28} className="hidden lg:block" />
             <div className="flex-1">
               <h1 className="text-2xl font-bold tracking-tight">NutriComedor OSB</h1>
               <p className="text-xs text-emerald-100">
@@ -333,7 +404,7 @@ function AppContent() {
             )}
             <button
               onClick={cerrarSesion}
-              className={`flex items-center gap-2 bg-emerald-800 hover:bg-emerald-900 px-3 py-2 rounded-lg text-sm font-medium transition-colors border border-emerald-600 ${FOCUS_MARCA}`}
+              className="flex items-center gap-2 bg-emerald-800 hover:bg-emerald-900 px-3 py-2 rounded-lg text-sm font-medium transition-colors border border-emerald-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300"
               title="Cerrar sesión"
             >
               <LogOut size={16} />
@@ -341,6 +412,36 @@ function AppContent() {
             </button>
           </div>
         </header>
+
+        {/* COM-41: drawer móvil/tablet del sidebar (backdrop + panel deslizante) */}
+        {drawerOpen && (
+          <div className="fixed inset-0 z-40 lg:hidden">
+            <div className="absolute inset-0 bg-black/40" onClick={() => setDrawerOpen(false)} />
+            <div className="absolute inset-y-0 left-0 w-72 max-w-[85vw] bg-white shadow-xl p-4 overflow-y-auto">
+              <div className="flex items-center justify-between mb-3">
+                <p className="font-bold text-slate-800 flex items-center gap-2">
+                  <Activity size={16} className="text-emerald-600" /> Menú
+                </p>
+                <button
+                  onClick={() => setDrawerOpen(false)}
+                  className="p-1.5 bg-slate-100 hover:bg-slate-200 rounded-lg text-slate-600 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                  title="Cerrar menú"
+                  aria-label="Cerrar menú"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+              <SidebarNav
+                categorias={categoriasVisibles}
+                activeTab={activeTab}
+                onSelect={seleccionarTab}
+                catAbierta={catAbierta}
+                setCatAbierta={setCatAbierta}
+              />
+            </div>
+          </div>
+        )}
+
         <main className="max-w-6xl mx-auto mt-8 p-4">
           {cargandoModulos ? (
             <div className="p-16 text-center text-emerald-600">
@@ -348,32 +449,28 @@ function AppContent() {
               <p className="text-sm mt-2 text-slate-500">Cargando sus módulos permitidos...</p>
             </div>
           ) : (
-            <>
-              {/* Barra de pestañas */}
-              <div className="flex gap-2 mb-6 border-b border-slate-200 pb-2 overflow-x-auto">
-                {tabs.map(tab => {
-                  const Icon = tab.icon;
-                  const isActive = activeTab === tab.id;
-                  return (
-                    <button
-                      key={tab.id}
-                      onClick={() => setActiveTab(tab.id)}
-                      /* COM-81: foco de marca (anillo esmeralda solo con teclado) en lugar
-                         del outline negro por defecto del navegador.
-                         Alternativa literal anterior (sin indicador): usar solo
-                         focus:outline-none en lugar de FOCUS_MARCA. */
-                      className={`flex shrink-0 items-center gap-2 px-4 py-2 font-medium rounded-t-lg transition-colors ${FOCUS_MARCA} ${isActive
-                        ? `bg-white text-${tab.color}-700 shadow-sm border-t border-x border-slate-200`
-                        : 'text-slate-500 hover:bg-slate-100'
-                        }`}
-                    >
-                      <Icon size={18} /> {tab.label}
-                    </button>
-                  );
-                })}
-              </div>
+            /* COM-41: layout de dos columnas: sidebar desktop + contenido */
+            <div className="flex gap-6 items-start">
+              {/* Sidebar fijo desktop */}
+              <aside className="hidden lg:block w-60 shrink-0 sticky top-4">
+                <div className="bg-white border border-slate-200 rounded-xl p-3 shadow-sm">
+                  <SidebarNav
+                    categorias={categoriasVisibles}
+                    activeTab={activeTab}
+                    onSelect={seleccionarTab}
+                    catAbierta={catAbierta}
+                    setCatAbierta={setCatAbierta}
+                  />
+                </div>
+              </aside>
               {/* Contenedor de vistas */}
-              <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 min-h-[500px]">
+              <div className="flex-1 min-w-0 bg-white p-6 rounded-xl shadow-sm border border-slate-200 min-h-[500px]">
+                {/* COM-41 (trazabilidad): barra horizontal de pestañas RETIRADA y
+                    comentada; la navegación vive ahora en SidebarNav (desktop/drawer).
+                <div className="flex gap-2 mb-6 border-b border-slate-200 pb-2 overflow-x-auto">
+                    {tabs.map(tab => { ... })}
+                </div>
+                */}
                 {activeTab === 'recipes' && <RecipesView />}
                 {activeTab === 'clusters' && <ClusterRecetasView />} {/* COM-5 / COM-5 v4: módulo 'clusters' */}
                 {activeTab === 'modelos_ml' && <ModelosMLView />} {/* COM-5 v4: panel ML solo Admin */}
@@ -404,7 +501,7 @@ function AppContent() {
                   <GestionUsuariosComedorView />
                 )}
               </div>
-            </>
+            </div>
           )}
         </main>
       </div>
