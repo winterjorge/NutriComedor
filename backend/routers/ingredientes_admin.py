@@ -1,39 +1,43 @@
 """
 routers/ingredientes_admin.py
-Objetivo: COM-37 v5/v6/v8: módulo "Gestión de Ingredientes" exclusivo del Administrador
-          de Sistemas, sobre el modelo de DOS CONCEPTOS:
-            - INGREDIENTE: lo que se cocina; unidad de USO.
-            - INSUMO: lo que se compra; unidad de COMPRA; origen SCRAPER|MANUAL.
-          Secciones:
-            A) Ingredientes: listado con indicadores, crear y editar/renombrar SIN borrado.
-            B) Emparejamiento ingrediente<->insumo: insumos vinculados con precio vigente
-               hoy en unidad de compra y fuente, búsqueda y vinculación de insumos del
-               scraper, creación de insumo MANUAL (unidad+precio+vigencia+equivalencias),
-               edición y desvinculación de manuales.
-            C) Equivalencias unidad de USO -> gramos (CRUD + desactivación lógica).
-            D) Precios manuales POR INSUMO (períodos con vigencia opcional, solapes).
-            E) Re-emparejado de insumos huérfanos (heuristics + nombre normalizado).
-            LEGACY (COM-37 v1): precios manuales POR INGREDIENTE como último fallback.
+Objetivo: COM-37 v5/v6/v8 + COM-57 + COM-68 + COM-80: módulo "Gestión de Ingredientes"
+exclusivo del Administrador de Sistemas, sobre el modelo de DOS CONCEPTOS:
+- INGREDIENTE: lo que se cocina; unidad de USO.
+- INSUMO: lo que se compra; unidad de COMPRA; origen SCRAPER|MANUAL.
+Secciones:
+A) Ingredientes: listado con indicadores, crear, editar/renombrar SIN borrado y
+   COM-68: REACTIVAR sinónimos obsoletos (quita el prefijo [OBSOLETO]).
+B) Emparejamiento ingrediente<->insumo (vinculación, insumos manuales, fusión) y
+   COM-80: marcación de INSUMO PRINCIPAL (PUT /insumos/{id}/principal).
+C) Equivalencias unidad de USO -> gramos (CRUD + desactivación lógica).
+D) Precios manuales POR INSUMO (períodos con vigencia opcional, solapes).
+E) Re-emparejado de insumos huérfanos (heuristics + nombre normalizado).
+LEGACY (COM-37 v1): precios manuales POR INGREDIENTE como último fallback.
 Historial:
- - COM-37 v8 (este archivo): FIX del reporte "vinculé un insumo y solo una receta quedó
-   con precio completo": el vínculo es por ingrediente (insumos.ingrediente_id), pero
-   existen IDs duplicados/sinónimos (Pimenton vs Pimiento) y reasignaciones que huérfanan
-   al ingrediente origen. Se agregan:
-     * POST /{ingrediente_id}/fusionar: fusiona un ingrediente duplicado (origen) en el
-       canónico (destino): re-apunta receta_ingrediente (sumando cantidades en líneas
-       duplicadas receta+unidad), insumos, equivalencias y precios legacy; renombra el
-       origen como '[OBSOLETO] ...' (SIN borrado físico del catálogo; el DELETE de líneas
-       puente duplicadas es parte inherente de la fusión, documentado).
-     * GET /duplicados: detecta ingredientes SIN insumos cuyo nombre normalizado coincide
-       o contiene al de otro ingrediente CON insumos (candidatos a fusión).
-     * VincularInsumoInput.fusionar_ingrediente_origen: al reasignar un insumo desde otro
-       ingrediente, fusiona también ese origen en el destino (usado por el modal de
-       Evaluar con la confirmación "Vincular y fusionar").
- - COM-37 v6: precio vigente hoy en unidad de compra + detalle de fuente en el listado B.
- - COM-37 v5: secciones B/C/D/E sobre insumos_precios_manuales e ingredientes_equivalencias.
+COM-37 v8: fusión de sinónimos (POST /{id}/fusionar, GET /duplicados) y flag
+    fusionar_ingrediente_origen en vincular-insumo.
+COM-57: FIX del reporte "[OBSOLETO] en recetas": _fusionar_ingredientes ACEPTA
+    orígenes ya marcados [OBSOLETO] y no duplica el prefijo; GET /obsoletos.
+COM-68:
+    * POST /{ingrediente_id}/reactivar: quita el prefijo [OBSOLETO] si el nombre
+      activo está libre (reparación de canónicos fusionados en dirección errónea).
+    * Guardarraíl en POST /{id}/fusionar: si origen y destino están en relación
+      genérico->variedad (nombres normalizados contenidos) Y el origen tiene líneas
+      de receta, la fusión se RECHAZA (400) salvo forzar=True explícito: ese caso es
+      vinculación de insumos al genérico o reactivación, no fusión de sinónimos.
+    * GET /duplicados marca advertencia_generico=True en esos pares para que la UI
+      no sugiera fusionar ciegamente.
+COM-80 (este archivo):
+    * GET /{ingrediente_id}/insumos expone es_principal por insumo.
+    * PUT /insumos/{insumo_id}/principal: marca el insumo canónico del ingrediente
+      (desmarca hermanos) y hereda equivalencias activas de hermanos para las
+      unidades de uso que el nuevo principal no tenga (observación 'Heredada COM-80').
+    * vincular-insumo e insumos-manuales: si el ingrediente no tenía principal, el
+      insumo recién vinculado/creado queda como principal (y hereda equivalencias).
+    * desvincular: si el insumo desvinculado era principal, se limpia el flag.
 Permisos: todos los endpoints exigen es_admin_sistema (403 en caso contrario).
-Uso: Registrado en main.py con prefijo /api/v1 (include existente de COM-37).
-Referencia: tickets COM-37 v5/v6/v8 (solo trazabilidad).
+Uso: Registrado en main.py con prefijo /api/v1.
+Referencia: tickets COM-37 / COM-57 / COM-68 / COM-80 (solo trazabilidad).
 """
 import unicodedata
 from datetime import date
@@ -47,7 +51,8 @@ from database import get_db
 from permisos import es_admin_sistema
 # COM-37 v5: precio de hoy por insumo (scraper día > manual período) para exhibir fuente
 from precios_insumos import precios_por_gramo_por_insumo
-
+# COM-80: herencia de equivalencias desde el esquema (misma regla del backfill)
+from esquema_ingredientes_admin import heredar_equivalencias_de_hermanos
 # COM-37: algoritmo de reconocimiento existente del scraper para re-emparejar insumos.
 try:
     from scraper.classifiers.heuristics import clasificar_heuristica_mejorada
@@ -56,8 +61,9 @@ except Exception:  # pragma: no cover - degradación controlada
     clasificar_heuristica_mejorada = None
     HEURISTICA_DISPONIBLE = False
 
-router = APIRouter(prefix="/ingredientes-admin", tags=["Gestión de Ingredientes (COM-37 v8)"])
+router = APIRouter(prefix="/ingredientes-admin", tags=["Gestión de Ingredientes (COM-68/COM-80)"])
 
+PREFIJO_OBSOLETO = '[OBSOLETO] '
 
 # ==========================================
 # MODELOS DE ENTRADA
@@ -79,6 +85,16 @@ class EditarIngredienteInput(BaseModel):
     peso_estimado_g: Optional[float] = None
 
 
+class ReactivarIngredienteInput(BaseModel):
+    """COM-68: reactivación de un sinónimo obsoleto (quita el prefijo)."""
+    usuario_solicitante_id: int
+
+
+class MarcarPrincipalInput(BaseModel):
+    """COM-80: marcación del insumo principal de un ingrediente."""
+    usuario_solicitante_id: int
+
+
 class EquivalenciaItem(BaseModel):
     """Equivalencia unidad de USO -> gramos para un insumo concreto."""
     unidad_uso_id: int
@@ -91,16 +107,18 @@ class VincularInsumoInput(BaseModel):
     insumo_id: int
     reasignar: bool = False
     # COM-37 v8: si el insumo pertenecía a otro ingrediente y este flag es True, se
-    # fusiona ese ingrediente origen en el destino (sinónimos), de modo que TODAS las
-    # recetas del sinónimo hereden el precio del insumo reasignado.
+    # fusiona ese ingrediente origen en el destino (sinónimos).
     fusionar_ingrediente_origen: bool = False
     equivalencias: List[EquivalenciaItem] = []
 
 
 class FusionarIngredienteInput(BaseModel):
-    """COM-37 v8: fusiona `origen_id` (duplicado/sinónimo) en el ingrediente de la ruta."""
+    """COM-37 v8 / COM-57 / COM-68: fusiona `origen_id` en el ingrediente de la ruta.
+    COM-68: `forzar` permite saltar el guardarraíl genérico->variedad (uso excepcional
+    y auditado); por defecto False."""
     usuario_solicitante_id: int
     origen_id: int
+    forzar: bool = False
 
 
 class CrearInsumoManualInput(BaseModel):
@@ -249,8 +267,8 @@ def _mapa_categorias(cur):
 def _precio_por_unidad_hoy(cur, insumo_id, fuente, fecha_obj):
     """
     COM-37 v6: precio EN UNIDAD DE COMPRA vigente hoy para exhibición en el panel:
-      SCRAPER_DIA    -> mínimo precio_prom del día en historial_precios.
-      MANUAL_PERIODO -> período manual activo vigente más reciente.
+    SCRAPER_DIA    -> mínimo precio_prom del día en historial_precios.
+    MANUAL_PERIODO -> período manual activo vigente más reciente.
     """
     if fuente == 'SCRAPER_DIA':
         cur.execute("""
@@ -272,19 +290,57 @@ def _precio_por_unidad_hoy(cur, insumo_id, fuente, fecha_obj):
     return None
 
 
+# COM-68: relación genérico->variedad (hipónimo/hiperónimo por nombre contenido)
+def _es_relacion_generico_variedad(norm_a: str, norm_b: str) -> bool:
+    if not norm_a or not norm_b or norm_a == norm_b:
+        return False
+    return norm_a in norm_b or norm_b in norm_a
+
+
+def _lineas_receta_de(cur, ingrediente_id: int) -> int:
+    cur.execute("SELECT COUNT(*) AS n FROM receta_ingrediente WHERE ingrediente_id = %s;",
+                (ingrediente_id,))
+    return int(cur.fetchone()['n'] or 0)
+
+
 # ==========================================
-# COM-37 v8: FUSIÓN DE INGREDIENTES SINÓNIMOS
+# COM-80: HELPERS DE INSUMO PRINCIPAL
+# ==========================================
+def _ingrediente_tiene_principal(cur, ingrediente_id) -> bool:
+    cur.execute("""
+        SELECT 1 FROM insumos
+        WHERE ingrediente_id = %s AND es_principal = TRUE LIMIT 1;
+    """, (ingrediente_id,))
+    return cur.fetchone() is not None
+
+
+def _asegurar_principal_si_vacio(cur, ingrediente_id, insumo_id):
+    """
+    COM-80: si el ingrediente aún no tiene insumo principal, marca `insumo_id` como
+    principal y hereda equivalencias activas de hermanos para las unidades de uso
+    que le falten. Retorna True si marcó (y cuántas equivalencias heredó).
+    """
+    if _ingrediente_tiene_principal(cur, ingrediente_id):
+        return False, 0
+    cur.execute("UPDATE insumos SET es_principal = TRUE WHERE id = %s;", (insumo_id,))
+    heredadas = heredar_equivalencias_de_hermanos(cur, ingrediente_id, insumo_id)
+    return True, heredadas
+
+
+# ==========================================
+# COM-37 v8 / COM-57 / COM-68: FUSIÓN DE INGREDIENTES SINÓNIMOS
 # ==========================================
 def _fusionar_ingredientes(cur, origen_id: int, destino_id: int) -> dict:
     """
     COM-37 v8: fusiona el ingrediente `origen_id` (duplicado/sinónimo) en `destino_id`.
+    COM-57: TAMBIÉN acepta orígenes ya marcados '[OBSOLETO]' (caso de migración/
+    reparación) y NO duplica el prefijo al renombrar.
     Re-apunta todas las referencias y conserva trazabilidad:
-      1) receta_ingrediente: si la receta ya tiene línea del destino con la misma unidad
-         de uso, SUMA las cantidades y elimina la línea duplicada del origen (el DELETE
-         es parte inherente de la fusión de líneas puente; el catálogo NO se borra).
-      2) receta_ingrediente restante, insumos, equivalencias y precios legacy: se mueven
-         al destino (las equivalencias en conflicto se desactivan, no se borran).
-      3) El ingrediente origen se renombra '[OBSOLETO] <nombre>' (sin borrado físico).
+    1) receta_ingrediente: si la receta ya tiene línea del destino con la misma
+       unidad de uso y componente, SUMA cantidades y elimina la duplicada del origen.
+    2) receta_ingrediente restante, insumos, equivalencias y precios legacy: se mueven
+       al destino (las equivalencias en conflicto se desactivan, no se borran).
+    3) El origen queda como '[OBSOLETO] <nombre>' (sin borrado físico).
     Retorna contadores para el mensaje de confirmación. El caller hace commit.
     """
     if origen_id == destino_id:
@@ -294,25 +350,25 @@ def _fusionar_ingredientes(cur, origen_id: int, destino_id: int) -> dict:
     if len(filas) != 2:
         raise HTTPException(status_code=404, detail="Ingrediente origen o destino no encontrado.")
     nombres = {f['id']: f['nombre'] for f in filas}
-    if nombres[origen_id].startswith('[OBSOLETO]'):
-        raise HTTPException(status_code=400, detail="El ingrediente origen ya está obsoleto.")
-
-    # 1) Líneas puente duplicadas (misma receta + misma unidad de uso): sumar y quitar duplicado
+    # 1) Líneas puente duplicadas (misma receta + componente + unidad): sumar y quitar duplicado
     cur.execute("""
         UPDATE receta_ingrediente d
         SET cantidad_requerida = d.cantidad_requerida + o.cantidad_requerida
         FROM receta_ingrediente o
         WHERE o.ingrediente_id = %s AND d.ingrediente_id = %s
-          AND d.receta_id = o.receta_id AND d.unidad_medida_id = o.unidad_medida_id;
+          AND d.receta_id = o.receta_id
+          AND d.componente_id = o.componente_id
+          AND d.unidad_medida_id = o.unidad_medida_id;
     """, (origen_id, destino_id))
     cur.execute("""
         DELETE FROM receta_ingrediente o
         USING receta_ingrediente d
         WHERE o.ingrediente_id = %s AND d.ingrediente_id = %s
-          AND d.receta_id = o.receta_id AND d.unidad_medida_id = o.unidad_medida_id;
+          AND d.receta_id = o.receta_id
+          AND d.componente_id = o.componente_id
+          AND d.unidad_medida_id = o.unidad_medida_id;
     """, (origen_id, destino_id))
     n_lineas_duplicadas = cur.rowcount
-
     # 2) Mover el resto de referencias al destino
     cur.execute("UPDATE receta_ingrediente SET ingrediente_id = %s WHERE ingrediente_id = %s;",
                 (destino_id, origen_id))
@@ -330,9 +386,12 @@ def _fusionar_ingredientes(cur, origen_id: int, destino_id: int) -> dict:
                 (destino_id, origen_id))
     cur.execute("UPDATE ingredientes_precios_manuales SET ingrediente_id = %s WHERE ingrediente_id = %s;",
                 (destino_id, origen_id))
-
-    # 3) Marcar el origen como obsoleto (sin borrado físico)
-    cur.execute("UPDATE ingredientes SET nombre = '[OBSOLETO] ' || nombre WHERE id = %s;", (origen_id,))
+    # 3) Marcar el origen como obsoleto (COM-57: sin duplicar el prefijo si ya lo tenía)
+    cur.execute("""
+        UPDATE ingredientes
+        SET nombre = '[OBSOLETO] ' || nombre
+        WHERE id = %s AND nombre NOT LIKE '[OBSOLETO]%%';
+    """, (origen_id,))
     return {
         'origen_id': origen_id,
         'origen_nombre': nombres[origen_id],
@@ -345,11 +404,11 @@ def _fusionar_ingredientes(cur, origen_id: int, destino_id: int) -> dict:
 
 
 # ==========================================
-# SECCIÓN A: INGREDIENTES (CRUD sin borrado)
+# SECCIÓN A: INGREDIENTES (CRUD sin borrado) + COM-68 REACTIVAR
 # ==========================================
 @router.get("")
 def listar_ingredientes(usuario_solicitante_id: int, db=Depends(get_db)):
-    """COM-37 v5: ingredientes + indicadores de emparejamiento y precios."""
+    """COM-37 v5: ingredientes activos + indicadores de emparejamiento y precios."""
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         _validar_admin(cur, usuario_solicitante_id)
@@ -383,12 +442,46 @@ def listar_ingredientes(usuario_solicitante_id: int, db=Depends(get_db)):
         cur.close()
 
 
+@router.get("/obsoletos")
+def listar_obsoletos(usuario_solicitante_id: int, db=Depends(get_db)):
+    """
+    COM-57: ingredientes marcados '[OBSOLETO]' (sinónimos fusionados) con el daño
+    pendiente: cuántas líneas de receta y cuántos insumos siguen atrapados en ellos.
+    Sirve para dirigir la migración con POST /{destino}/fusionar o la reactivación
+    con POST /{id}/reactivar (COM-68).
+    """
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        _validar_admin(cur, usuario_solicitante_id)
+        cur.execute("""
+            SELECT i.id, i.nombre,
+                   (SELECT COUNT(*) FROM receta_ingrediente ri
+                     WHERE ri.ingrediente_id = i.id) AS n_lineas_recetas,
+                   (SELECT COUNT(DISTINCT ri.receta_id) FROM receta_ingrediente ri
+                     WHERE ri.ingrediente_id = i.id) AS n_recetas_afectadas,
+                   (SELECT COUNT(*) FROM insumos ins
+                     WHERE ins.ingrediente_id = i.id) AS n_insumos
+            FROM ingredientes i
+            WHERE i.nombre LIKE '[OBSOLETO]%%'
+            ORDER BY n_lineas_recetas DESC, i.nombre;
+        """)
+        return cur.fetchall()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al listar obsoletos: {e}")
+    finally:
+        cur.close()
+
+
 @router.get("/duplicados")
 def listar_duplicados(usuario_solicitante_id: int, db=Depends(get_db)):
     """
     COM-37 v8: candidatos a fusión: ingredientes SIN insumos cuyo nombre normalizado
-    coincide o contiene (>=4 caracteres) al de otro ingrediente CON insumos. Explica
-    por qué una receta quedaba sin precio completo aunque su sinónimo sí tuviera insumo.
+    coincide o contiene (>=4 caracteres) al de otro ingrediente CON insumos.
+    COM-68: marca advertencia_generico=True cuando el par está en relación
+    genérico->variedad y el origen tiene líneas de receta (ese caso NO debe
+    fusionarse: debe vincularse insumos al genérico o reactivarse).
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -412,6 +505,11 @@ def listar_duplicados(usuario_solicitante_id: int, db=Depends(get_db)):
                         'origen_id': oid, 'origen_nombre': onom,
                         'destino_id': did, 'destino_nombre': dnom,
                         'recetas_afectadas': uso_recetas.get(oid, 0),
+                        # COM-68: advertencia de relación genérico->variedad
+                        'advertencia_generico': (
+                            _es_relacion_generico_variedad(onorm, dnorm)
+                            and uso_recetas.get(oid, 0) > 0
+                        ),
                     })
                     break
         return out
@@ -426,13 +524,36 @@ def listar_duplicados(usuario_solicitante_id: int, db=Depends(get_db)):
 @router.post("/{ingrediente_id}/fusionar")
 def fusionar_ingrediente(ingrediente_id: int, data: FusionarIngredienteInput, db=Depends(get_db)):
     """
-    COM-37 v8: fusiona el ingrediente duplicado `origen_id` en el ingrediente de la ruta
-    (destino). Tras la fusión, TODAS las recetas que usaban el sinónimo pasan a usar el
+    COM-37 v8 / COM-57: fusiona el ingrediente duplicado `origen_id` en el ingrediente
+    de la ruta (destino). Tras la fusión, TODAS las recetas del sinónimo pasan al
     canónico y heredan sus insumos/precios. El origen queda como '[OBSOLETO] ...'.
+    COM-68: guardarraíl genérico->variedad. Si los nombres normalizados están en
+    relación de contención (ej. 'papa' dentro de 'papa seca') Y el origen tiene
+    líneas de receta, se rechaza con 400 salvo forzar=True: ese patrón indica un
+    canónico genérico mal fusionado, cuya reparación es reactivar/vincular, no
+    fusionar de nuevo.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         _validar_admin(cur, data.usuario_solicitante_id)
+        # COM-68: guardarraíl de fusión genérico->variedad
+        cur.execute("SELECT nombre FROM ingredientes WHERE id IN (%s, %s);",
+                    (data.origen_id, ingrediente_id))
+        filas = cur.fetchall()
+        if len(filas) == 2:
+            n_origen = _normalizar(filas[0]['nombre'].replace(PREFIJO_OBSOLETO, ''))
+            n_destino = _normalizar(filas[1]['nombre'].replace(PREFIJO_OBSOLETO, ''))
+            lineas_origen = _lineas_receta_de(cur, data.origen_id)
+            if (_es_relacion_generico_variedad(n_origen, n_destino)
+                    and lineas_origen > 0 and not data.forzar):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Relación genérico/variedad detectada entre "
+                           f"'{filas[0]['nombre']}' ({lineas_origen} línea(s) de receta) y "
+                           f"'{filas[1]['nombre']}'. Fusionar movería las recetas del genérico a la "
+                           f"variedad (error COM-68). Opciones: (a) reactivar el genérico con "
+                           f"POST /{data.origen_id}/reactivar y vincularle insumos-variedad, o "
+                           f"(b) reintentar con forzar=true si está seguro de que son sinónimos reales.")
         resumen = _fusionar_ingredientes(cur, data.origen_id, ingrediente_id)
         db.commit()
         return {
@@ -447,6 +568,50 @@ def fusionar_ingrediente(ingrediente_id: int, data: FusionarIngredienteInput, db
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error al fusionar ingredientes: {e}")
+    finally:
+        cur.close()
+
+
+@router.post("/{ingrediente_id}/reactivar")
+def reactivar_ingrediente(ingrediente_id: int, data: ReactivarIngredienteInput, db=Depends(get_db)):
+    """
+    COM-68: quita el prefijo '[OBSOLETO] ' del ingrediente, devolviéndolo al catálogo
+    activo (caso típico: canónico genérico fusionado por error). Valida que no exista
+    otro ingrediente activo con el mismo nombre normalizado. No toca líneas, insumos ni
+    equivalencias: solo el nombre/estado de catálogo.
+    """
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        _validar_admin(cur, data.usuario_solicitante_id)
+        cur.execute("SELECT id, nombre FROM ingredientes WHERE id = %s;", (ingrediente_id,))
+        fila = cur.fetchone()
+        if not fila:
+            raise HTTPException(status_code=404, detail="Ingrediente no encontrado.")
+        if not fila['nombre'].startswith(PREFIJO_OBSOLETO):
+            raise HTTPException(status_code=400,
+                            detail=f"'{fila['nombre']}' ya está activo: no requiere reactivación.")
+        nombre_limpio = fila['nombre'][len(PREFIJO_OBSOLETO):].strip()
+        cur.execute("""
+            SELECT id FROM ingredientes
+            WHERE id <> %s AND nombre NOT LIKE '[OBSOLETO]%%' AND LOWER(nombre) = LOWER(%s);
+        """, (ingrediente_id, nombre_limpio))
+        if cur.fetchone():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Ya existe un ingrediente activo llamado '{nombre_limpio}'. "
+                       f"Fusione este obsoleto en aquel (POST /{ingrediente_id}/fusionar) en lugar de reactivar.")
+        cur.execute("UPDATE ingredientes SET nombre = %s WHERE id = %s;", (nombre_limpio, ingrediente_id))
+        db.commit()
+        return {
+            'id': ingrediente_id,
+            'nombre': nombre_limpio,
+            'message': f"Ingrediente '{nombre_limpio}' reactivado. Revise sus insumos, equivalencias y precios.",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error al reactivar el ingrediente: {e}")
     finally:
         cur.close()
 
@@ -524,7 +689,7 @@ def editar_ingrediente(ingrediente_id: int, data: EditarIngredienteInput, db=Dep
 
 
 # ==========================================
-# SECCIÓN B: EMPAREJAMIENTO INGREDIENTE <-> INSUMO
+# SECCIÓN B: EMPAREJAMIENTO INGREDIENTE <-> INSUMO (+ COM-80 PRINCIPAL)
 # ==========================================
 @router.get("/buscar-insumos")
 def buscar_insumos(
@@ -566,9 +731,10 @@ def listar_insumos_del_ingrediente(
     db=Depends(get_db),
 ):
     """
-    COM-37 v6: insumos vinculados al ingrediente con unidad de compra, último precio
-    scraper, períodos manuales activos, equivalencias y el precio VIGENTE HOY EN UNIDAD
-    DE COMPRA (precio_por_unidad_hoy) con su fuente y detalle legible.
+    COM-37 v6 + COM-80: insumos vinculados al ingrediente con unidad de compra, último
+    precio scraper, períodos manuales activos, equivalencias, el precio VIGENTE HOY EN
+    UNIDAD DE COMPRA (precio_por_unidad_hoy) con su fuente y detalle legible, y el flag
+    es_principal (COM-80) para que la UI muestre/marque el insumo canónico.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -576,6 +742,7 @@ def listar_insumos_del_ingrediente(
         fecha_obj = _parse_fecha(fecha) or date.today()
         cur.execute("""
             SELECT ins.id, ins.nombre, ins.origen, ins.unidad_medida_id,
+                   ins.es_principal,
                    um.nombre AS unidad_nombre, um.abreviatura AS unidad_abrev,
                    (SELECT hp.precio_prom FROM historial_precios hp
                      WHERE hp.insumo_id = ins.id ORDER BY hp.fecha DESC LIMIT 1) AS ultimo_precio_scraper,
@@ -589,7 +756,7 @@ def listar_insumos_del_ingrediente(
             FROM insumos ins
             LEFT JOIN unidades_medida um ON um.id = ins.unidad_medida_id
             WHERE ins.ingrediente_id = %s
-            ORDER BY ins.origen, ins.nombre;
+            ORDER BY ins.es_principal DESC, ins.origen, ins.nombre;
         """, (ingrediente_id,))
         filas = cur.fetchall()
         precios_hoy = precios_por_gramo_por_insumo(cur, fecha_obj)
@@ -611,13 +778,55 @@ def listar_insumos_del_ingrediente(
         cur.close()
 
 
+@router.put("/insumos/{insumo_id}/principal")
+def marcar_insumo_principal(insumo_id: int, data: MarcarPrincipalInput, db=Depends(get_db)):
+    """
+    COM-80: marca el insumo como PRINCIPAL de su ingrediente (desmarca los hermanos).
+    El insumo principal es el que el motor de costeo usa preferentemente cuando tiene
+    precio en la fecha (scraper/manual/RF); si no tiene precio, se conserva el
+    comportamiento legacy de menor costo. Hereda equivalencias activas de hermanos
+    para las unidades de uso que el nuevo principal no tenga (observación
+    'Heredada COM-80 ...'), de modo que el gramaje de las recetas no cambie
+    silenciosamente al cambiar de insumo.
+    """
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        _validar_admin(cur, data.usuario_solicitante_id)
+        cur.execute("SELECT id, nombre, ingrediente_id FROM insumos WHERE id = %s;", (insumo_id,))
+        ins = cur.fetchone()
+        if not ins:
+            raise HTTPException(status_code=404, detail="Insumo no encontrado.")
+        if ins['ingrediente_id'] is None:
+            raise HTTPException(status_code=400,
+                            detail="El insumo está huérfano (sin ingrediente): vincúlelo antes de marcarlo principal.")
+        cur.execute("UPDATE insumos SET es_principal = FALSE WHERE ingrediente_id = %s AND id <> %s;",
+                    (ins['ingrediente_id'], insumo_id))
+        cur.execute("UPDATE insumos SET es_principal = TRUE WHERE id = %s;", (insumo_id,))
+        heredadas = heredar_equivalencias_de_hermanos(cur, ins['ingrediente_id'], insumo_id)
+        db.commit()
+        msg = (f"Insumo '{ins['nombre']}' marcado como PRINCIPAL de su ingrediente. "
+               f"El costeo de recetas y motores lo usará preferentemente.")
+        if heredadas:
+            msg += f" Se heredaron {heredadas} equivalencia(s) de insumos hermanos para conservar el gramaje."
+        return {'message': msg, 'insumo_id': insumo_id, 'equivalencias_heredadas': heredadas}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error al marcar el insumo principal: {e}")
+    finally:
+        cur.close()
+
+
 @router.post("/{ingrediente_id}/vincular-insumo")
 def vincular_insumo(ingrediente_id: int, data: VincularInsumoInput, db=Depends(get_db)):
     """
     COM-37 v5/v8: vincula un insumo existente al ingrediente y registra equivalencias.
     COM-37 v8: si el insumo pertenecía a otro ingrediente y
-    `fusionar_ingrediente_origen=True`, ese origen se fusiona en el destino (sinónimos),
-    de modo que TODAS las recetas del sinónimo hereden el precio (fix del reporte).
+    `fusionar_ingrediente_origen=True`, ese origen se fusiona en el destino (sinónimos).
+    COM-68: esa fusión inducida pasa también por el guardarraíl genérico->variedad.
+    COM-80: si el ingrediente no tenía insumo principal, el recién vinculado queda como
+    principal (y hereda equivalencias de hermanos para las unidades faltantes).
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -635,15 +844,38 @@ def vincular_insumo(ingrediente_id: int, data: VincularInsumoInput, db=Depends(g
                 status_code=400,
                 detail=f"El insumo '{ins['nombre']}' ya está vinculado a otro ingrediente. "
                        f"Use reasignar=true para moverlo.")
+        # COM-68: guardarraíl también para la fusión inducida por vinculación
+        if (origen_previo is not None and origen_previo != ingrediente_id
+                and data.fusionar_ingrediente_origen):
+            cur.execute("SELECT nombre FROM ingredientes WHERE id IN (%s, %s);",
+                        (origen_previo, ingrediente_id))
+            filas = cur.fetchall()
+            if len(filas) == 2:
+                n_origen = _normalizar(filas[0]['nombre'].replace(PREFIJO_OBSOLETO, ''))
+                n_destino = _normalizar(filas[1]['nombre'].replace(PREFIJO_OBSOLETO, ''))
+                lineas_origen = _lineas_receta_de(cur, origen_previo)
+                if _es_relacion_generico_variedad(n_origen, n_destino) and lineas_origen > 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Vincular con fusión movería las recetas del genérico "
+                               f"'{filas[0]['nombre']}' a la variedad '{filas[1]['nombre']}'. "
+                               f"Vincule el insumo SIN fusionar (fusionar_ingrediente_origen=false) "
+                               f"o reactive el genérico primero.")
         cur.execute("UPDATE insumos SET ingrediente_id = %s WHERE id = %s;",
                     (ingrediente_id, data.insumo_id))
         n_eq = _upsert_equivalencias(cur, ingrediente_id, data.insumo_id,
                                      data.equivalencias, data.usuario_solicitante_id)
+        # COM-80: principal automático solo si el ingrediente no tenía ninguno
+        marcado, heredadas = _asegurar_principal_si_vacio(cur, ingrediente_id, data.insumo_id)
         mensaje_extra = ''
-        if origen_previo is not None and origen_previo != ingrediente_id and data.fusionar_ingrediente_origen:
+        if (origen_previo is not None and origen_previo != ingrediente_id
+                and data.fusionar_ingrediente_origen):
             resumen = _fusionar_ingredientes(cur, origen_previo, ingrediente_id)
             mensaje_extra = (f" Se fusionó '{resumen['origen_nombre']}' en el destino: "
                              f"{resumen['lineas_receta_movidas']} línea(s) de receta heredaron el precio.")
+        if marcado:
+            mensaje_extra += (f" Insumo marcado como principal del ingrediente"
+                              f"{' (con ' + str(heredadas) + ' equivalencia(s) heredada(s))' if heredadas else ''}.")
         db.commit()
         return {'message': f"Insumo '{ins['nombre']}' vinculado. Equivalencias registradas: {n_eq}.{mensaje_extra}"}
     except HTTPException:
@@ -660,6 +892,8 @@ def crear_insumo_manual(ingrediente_id: int, data: CrearInsumoManualInput, db=De
     """
     COM-37 v5: crea insumo MANUAL vinculado al ingrediente + primer período de precio
     (unidad de COMPRA, vigencia opcional) + equivalencias opcionales, en una transacción.
+    COM-80: si el ingrediente no tenía principal, el insumo manual nuevo queda como
+    principal (es la decisión explícita del Admin al crearlo con precio).
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -684,26 +918,27 @@ def crear_insumo_manual(ingrediente_id: int, data: CrearInsumoManualInput, db=De
                 raise HTTPException(status_code=400, detail="Con el rango activado, fecha_inicio es obligatoria.")
             if fin is not None and fin < ini:
                 raise HTTPException(status_code=400, detail="fecha_fin no puede ser anterior a fecha_inicio.")
-
         cur.execute("""
             INSERT INTO insumos (ingrediente_id, nombre, unidad_medida_id, origen)
             VALUES (%s, %s, %s, 'MANUAL')
             RETURNING id;
         """, (ingrediente_id, nombre, data.unidad_medida_id))
         insumo_id = cur.fetchone()['id']
-
         cur.execute("""
             INSERT INTO insumos_precios_manuales
                 (insumo_id, precio_por_unidad, fecha_inicio, fecha_fin, observacion, creado_por)
             VALUES (%s, %s, %s, %s, %s, %s);
         """, (insumo_id, data.precio_por_unidad, ini, fin,
               (data.observacion or '').strip() or None, data.usuario_solicitante_id))
-
         n_eq = _upsert_equivalencias(cur, ingrediente_id, insumo_id,
                                      data.equivalencias, data.usuario_solicitante_id)
+        # COM-80: principal automático solo si el ingrediente no tenía ninguno
+        marcado, heredadas = _asegurar_principal_si_vacio(cur, ingrediente_id, insumo_id)
         db.commit()
-        return {'insumo_id': insumo_id,
-                'message': f"Insumo manual '{nombre}' creado con precio y {n_eq} equivalencia(s)."}
+        msg = f"Insumo manual '{nombre}' creado con precio y {n_eq} equivalencia(s)."
+        if marcado:
+            msg += f" Marcado como principal del ingrediente ({heredadas} equivalencia(s) heredada(s))."
+        return {'insumo_id': insumo_id, 'message': msg}
     except HTTPException:
         raise
     except Exception as e:
@@ -752,11 +987,16 @@ def editar_insumo_manual(insumo_id: int, data: EditarInsumoManualInput, db=Depen
 
 @router.put("/insumos/{insumo_id}/desvincular")
 def desvincular_insumo(insumo_id: int, usuario_solicitante_id: int, db=Depends(get_db)):
-    """COM-37 v5: deja el insumo huérfano; conserva historial y precios."""
+    """
+    COM-37 v5: deja el insumo huérfano; conserva historial y precios.
+    COM-80: si el insumo desvinculado era el principal de su ingrediente, se limpia el
+    flag (el ingrediente queda sin principal y el costeo vuelve al legacy más barato
+    hasta que se marque otro).
+    """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         _validar_admin(cur, usuario_solicitante_id)
-        cur.execute("UPDATE insumos SET ingrediente_id = NULL WHERE id = %s;", (insumo_id,))
+        cur.execute("UPDATE insumos SET ingrediente_id = NULL, es_principal = FALSE WHERE id = %s;", (insumo_id,))
         if cur.rowcount != 1:
             raise HTTPException(status_code=404, detail="Insumo no encontrado.")
         db.commit()
@@ -1037,6 +1277,9 @@ def reemparejar_insumos(usuario_solicitante_id: int, db=Depends(get_db)):
     """
     COM-37 v5: vincula insumos con ingrediente_id NULL usando heuristics + matching por
     nombre normalizado contra el catálogo vigente.
+    COM-80 (nota): el re-emparejado NO marca principales; el backfill del bootstrap
+    (coincidencia exacta de nombre) lo hará en el siguiente arranque solo si el
+    ingrediente aún no tiene principal, o el Admin lo marca desde la UI.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -1045,17 +1288,17 @@ def reemparejar_insumos(usuario_solicitante_id: int, db=Depends(get_db)):
         huerfanos = cur.fetchall()
         if not huerfanos:
             return {'emparejados': 0, 'detalle': [], 'message': 'No hay insumos huérfanos por emparejar.'}
-
         mapa_cat = _mapa_categorias(cur)
-        cur.execute("SELECT id, nombre FROM ingredientes;")
+        cur.execute("SELECT id, nombre FROM ingredientes WHERE nombre NOT LIKE '[OBSOLETO]%%';")
         norm_ing = [(r['id'], _normalizar(r['nombre'])) for r in cur.fetchall()]
-
         actualizados = []
         for ins in huerfanos:
             nombre_norm = _normalizar(ins['nombre'])
             candidato = None
-
-            if HEURISTICA_DISPONIBLE:
+            # COM-80 (fix Pylance reportOptionalCall): el guard booleano no estrecha el
+            # tipo del callable para el analizador estático; se añade la comprobación
+            # explícita de no-None. Comportamiento en runtime idéntico al anterior.
+            if HEURISTICA_DISPONIBLE and clasificar_heuristica_mejorada is not None:
                 try:
                     generico, _cat_id = clasificar_heuristica_mejorada(ins['nombre'], mapa_cat)
                 except Exception:
@@ -1071,7 +1314,6 @@ def reemparejar_insumos(usuario_solicitante_id: int, db=Depends(get_db)):
                             if gnorm and (gnorm in inorm or inorm in gnorm):
                                 candidato = iid
                                 break
-
             if candidato is None:
                 for iid, inorm in norm_ing:
                     if inorm and inorm == nombre_norm:
@@ -1082,13 +1324,11 @@ def reemparejar_insumos(usuario_solicitante_id: int, db=Depends(get_db)):
                     if inorm and len(inorm) >= 4 and (inorm in nombre_norm or nombre_norm in inorm):
                         candidato = iid
                         break
-
             if candidato is not None:
                 cur.execute("UPDATE insumos SET ingrediente_id = %s WHERE id = %s;",
                             (candidato, ins['id']))
                 actualizados.append({'insumo_id': ins['id'], 'insumo': ins['nombre'],
                                      'ingrediente_id': candidato})
-
         db.commit()
         cur.execute("SELECT COUNT(*) AS n FROM insumos WHERE ingrediente_id IS NULL;")
         restantes = cur.fetchone()['n']

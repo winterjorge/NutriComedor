@@ -3,28 +3,37 @@
  * Objetivo: Listado paginado y ordenable del recetario con evaluación de costo (modal)
  *           y edición de recetas.
  * Historial:
- *  - Sprint 1/2: versión original (paginación, orden, búsqueda, modal de costo).
- *  - COM-47 v2 (este archivo): las columnas nutricionales muestran valores POR RACIÓN
- *    (= valor de preparación de la tabla / raciones), nunca los de la preparación
- *    completa ni multiplicados. Se agrega el helper porRacion y los encabezados
- *    indican "(por ración)". El ordenamiento sigue usando las columnas de la tabla
- *    (el orden relativo no cambia al dividir por raciones constantes por fila).
- *    Nada existente se elimina; solo se ajustan las celdas de exhibición.
+ *  - Sprint 1/2: versión original (paginación, orden por columnas, búsqueda).
+ *  - COM-47 v2: las columnas nutricionales mostraban tabla/raciones.
+ *  - COM-47 v3 (este archivo): FIX del bug de doble división: los valores nutricionales
+ *    de recetas_almuerzo YA SON POR RACIÓN tal como se capturan en el modal, por lo que
+ *    se muestran SIN dividir (el helper porRacion queda COMENTADO por trazabilidad).
+ *    Mejoras de legibilidad solicitadas:
+ *      * Columna única "Contenido nutricional (por ración)" con los 6 valores
+ *        etiquetados (energía, proteína, hierro, vitamina A, zinc, carbohidratos) en
+ *        cuadrícula de 2 columnas para que se vea TODO el contenido sin ensanchar.
+ *      * Los nombres largos de receta pasan a dos líneas: se retira whitespace-nowrap
+ *        de la tabla y la celda de nombre tiene ancho máximo con wrap natural.
+ *      * El ordenamiento por columnas se mueve a un selector compacto (conserva todas
+ *        las claves anteriores); los encabezados ordenables quedan COMENTADOS.
+ *    Nada existente se elimina; lo reemplazado se comenta.
  */
 import React, { useState, useEffect } from 'react';
-import { Search, Plus, BadgeDollarSign, Loader2, Edit, ChevronUp, ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Search, Plus, BadgeDollarSign, Loader2, Edit, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, ArrowUpDown } from 'lucide-react';
 import { api } from '../../services/api';
 import { ModalNuevaReceta } from './ModalNuevaReceta';
 import { ModalCostoReceta } from './ModalCostoReceta';
 
-// COM-47 v2: raciones válidas de una receta (default histórico del comedor: 4)
-const racionesDe = (r) => (r && r.raciones && r.raciones > 0 ? Number(r.raciones) : 4);
+// COM-47 v3 (trazabilidad): helper de división por raciones COMENTADO. Los valores de
+// la tabla ya están POR RACIÓN y no deben dividirse de nuevo (causaba 793 -> 198.25).
+// const racionesDe = (r) => (r && r.raciones && r.raciones > 0 ? Number(r.raciones) : 4);
+// const porRacion = (valor, r) => {
+//     if (valor === null || valor === undefined || valor === '') return '-';
+//     return (Number(valor) / racionesDe(r)).toFixed(2);
+// };
 
-// COM-47 v2: valor nutricional POR RACIÓN a partir del valor de preparación de la tabla
-const porRacion = (valor, r) => {
-    if (valor === null || valor === undefined || valor === '') return '-';
-    return (Number(valor) / racionesDe(r)).toFixed(2);
-};
+// COM-47 v3: formato legible de un valor nutricional tal como se guardó
+const fmtNut = (v) => (v === null || v === undefined || v === '' ? '—' : Number(v));
 
 export const RecipesView = () => {
     const [recetas, setRecetas] = useState([]);
@@ -86,14 +95,16 @@ export const RecipesView = () => {
         return () => clearTimeout(timeoutId);
     }, [busqueda]);
 
-    const handleSort = (campo) => {
-        if (sortBy === campo) {
-            setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
-        } else {
-            setSortBy(campo);
-            setSortOrder('asc');
-        }
-    };
+    // COM-47 v3 (trazabilidad): orden por clic en encabezado COMENTADO; se reemplaza
+    // por el selector compacto de orden (misma lógica de estado sortBy/sortOrder).
+    // const handleSort = (campo) => {
+    //     if (sortBy === campo) {
+    //         setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
+    //     } else {
+    //         setSortBy(campo);
+    //         setSortOrder('asc');
+    //     }
+    // };
 
     const abrirEditar = (receta) => {
         setRecetaEditar(receta);
@@ -113,10 +124,12 @@ export const RecipesView = () => {
         setRecetaEditar(null);
     };
 
-    const SortIcon = ({ campo }) => {
-        if (sortBy !== campo) return <ChevronUp size={14} className="text-slate-400" />;
-        return sortOrder === 'asc' ? <ChevronUp size={14} className="text-emerald-600" /> : <ChevronDown size={14} className="text-emerald-600" />;
-    };
+    // COM-47 v3 (trazabilidad): ícono de orden por columna COMENTADO (ya no hay
+    // encabezados ordenables; el orden vive en el selector compacto).
+    // const SortIcon = ({ campo }) => {
+    //     if (sortBy !== campo) return <ChevronUp size={14} className="text-slate-400" />;
+    //     return sortOrder === 'asc' ? <ChevronUp size={14} className="text-emerald-600" /> : <ChevronDown size={14} className="text-emerald-600" />;
+    // };
 
     return (
         <>
@@ -134,8 +147,8 @@ export const RecipesView = () => {
                     </button>
                 </div>
 
-                <div className="mb-4 bg-slate-50 p-4 rounded-xl border border-slate-100">
-                    <div className="relative max-w-md">
+                <div className="mb-4 bg-slate-50 p-4 rounded-xl border border-slate-100 flex flex-wrap items-center gap-3">
+                    <div className="relative flex-1 min-w-[220px] max-w-md">
                         <Search className="absolute left-3 top-2.5 text-slate-400" size={18} />
                         <input
                             type="text"
@@ -145,37 +158,57 @@ export const RecipesView = () => {
                             className="w-full pl-10 pr-4 py-2 border border-slate-300 rounded-lg outline-none shadow-sm"
                         />
                     </div>
+                    {/* COM-47 v3: selector compacto de ordenamiento (reemplaza los
+                        encabezados ordenables para no ensanchar la tabla) */}
+                    <div className="flex items-center gap-2 ml-auto">
+                        <label className="text-xs text-slate-500 flex items-center gap-1">
+                            <ArrowUpDown size={13} /> Ordenar por
+                        </label>
+                        <select
+                            value={sortBy}
+                            onChange={(e) => setSortBy(e.target.value)}
+                            className="px-3 py-1.5 border border-slate-300 rounded-lg text-xs bg-white outline-none focus:ring-2 focus:ring-emerald-500"
+                        >
+                            <option value="nombre">Nombre</option>
+                            <option value="energia_kcal">Energía (kcal/ración)</option>
+                            <option value="proteina_g">Proteína (g/ración)</option>
+                            <option value="hierro_mg">Hierro (mg/ración)</option>
+                            <option value="vitamina_a_ug">Vitamina A (μg/ración)</option>
+                            <option value="zinc_mg">Zinc (mg/ración)</option>
+                            <option value="carbohidratos_g">Carbohidratos (g/ración)</option>
+                            <option value="raciones">Raciones</option>
+                            <option value="fecha_creacion">Fecha de creación</option>
+                        </select>
+                        <button
+                            onClick={() => setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')}
+                            title={sortOrder === 'asc' ? 'Ascendente' : 'Descendente'}
+                            className="p-1.5 border border-slate-300 rounded-lg text-slate-600 hover:bg-slate-100 transition-colors"
+                        >
+                            {sortOrder === 'asc' ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+                        </button>
+                    </div>
                 </div>
 
+                {/* COM-47 v3: se retira whitespace-nowrap para que nombres y celdas
+                    puedan envolver; la tabla ya no es extremadamente ancha */}
                 <div className="overflow-x-auto rounded-lg border border-slate-200 shadow-sm">
-                    <table className="w-full text-left border-collapse whitespace-nowrap">
+                    <table className="w-full text-left border-collapse">
                         <thead>
+                            {/* COM-47 v3 (trazabilidad): encabezados ordenables anteriores
+                                COMENTADOS; el orden vive ahora en el selector compacto.
                             <tr className="bg-slate-100 text-slate-600 text-sm">
-                                <th className="p-4 font-semibold cursor-pointer hover:bg-slate-200" onClick={() => handleSort('nombre')}>
-                                    <div className="flex items-center gap-2">
-                                        Receta
-                                        <SortIcon campo="nombre" />
-                                    </div>
-                                </th>
-                                {/* COM-47 v2: encabezados indican valores POR RACIÓN */}
-                                <th className="p-4 font-semibold text-center cursor-pointer hover:bg-slate-200" onClick={() => handleSort('energia_kcal')}>
-                                    <div className="flex items-center justify-center gap-2">
-                                        Energía (kcal/ración)
-                                        <SortIcon campo="energia_kcal" />
-                                    </div>
-                                </th>
-                                <th className="p-4 font-semibold text-center cursor-pointer hover:bg-slate-200" onClick={() => handleSort('hierro_mg')}>
-                                    <div className="flex items-center justify-center gap-2">
-                                        Hierro (mg/ración)
-                                        <SortIcon campo="hierro_mg" />
-                                    </div>
-                                </th>
-                                <th className="p-4 font-semibold text-center cursor-pointer hover:bg-slate-200" onClick={() => handleSort('proteina_g')}>
-                                    <div className="flex items-center justify-center gap-2">
-                                        Proteína (g/ración)
-                                        <SortIcon campo="proteina_g" />
-                                    </div>
-                                </th>
+                                <th ... onClick={() => handleSort('nombre')}>Receta <SortIcon campo="nombre" /></th>
+                                <th ... onClick={() => handleSort('energia_kcal')}>Energía (kcal) ...</th>
+                                <th ... onClick={() => handleSort('hierro_mg')}>Hierro (mg) ...</th>
+                                <th ... onClick={() => handleSort('proteina_g')}>Proteína (g) ...</th>
+                                <th ...>IA Evaluadora</th>
+                                <th ...>Acciones</th>
+                            </tr>
+                            */}
+                            <tr className="bg-slate-100 text-slate-600 text-sm">
+                                <th className="p-4 font-semibold">Receta</th>
+                                <th className="p-4 font-semibold text-center">Raciones</th>
+                                <th className="p-4 font-semibold">Contenido nutricional (por ración)</th>
                                 <th className="p-4 font-semibold text-center">IA Evaluadora</th>
                                 <th className="p-4 font-semibold text-center">Acciones</th>
                             </tr>
@@ -183,32 +216,44 @@ export const RecipesView = () => {
                         <tbody className="divide-y divide-slate-200">
                             {cargando ? (
                                 <tr>
-                                    <td colSpan="6" className="p-8 text-center text-emerald-600">
+                                    <td colSpan="5" className="p-8 text-center text-emerald-600">
                                         <Loader2 className="animate-spin mx-auto" size={28} />
                                     </td>
                                 </tr>
                             ) : recetas.length === 0 ? (
                                 <tr>
-                                    <td colSpan="6" className="p-8 text-center text-slate-500">
+                                    <td colSpan="5" className="p-8 text-center text-slate-500">
                                         {busqueda ? 'No se encontraron recetas' : 'No hay recetas registradas'}
                                     </td>
                                 </tr>
                             ) : (
                                 recetas.map(r => (
-                                    <tr key={r.id} className="hover:bg-slate-50">
+                                    <tr key={r.id} className="hover:bg-slate-50 align-top">
+                                        {/* COM-47 v3: nombre con wrap a dos líneas (ancho máximo) */}
+                                        <td className="p-4 max-w-[240px]">
+                                            <p className="font-medium text-slate-800 whitespace-normal break-words leading-snug">
+                                                {r.nombre}
+                                            </p>
+                                            <p className="text-xs text-slate-500 whitespace-normal break-words mt-0.5">
+                                                {r.descripcion}
+                                            </p>
+                                        </td>
+                                        <td className="p-4 text-center">
+                                            <span className="inline-block px-2 py-0.5 bg-blue-50 text-blue-700 rounded-full text-xs font-bold" title="Raciones que produce la preparación">
+                                                {r.raciones ?? 4}
+                                            </span>
+                                        </td>
+                                        {/* COM-47 v3: valores TAL COMO SE GUARDARON (por ración);
+                                            cuadrícula 2x3 con los 6 nutrientes etiquetados */}
                                         <td className="p-4">
-                                            <p className="font-medium text-slate-800">{r.nombre}</p>
-                                            <p className="text-xs text-slate-500 truncate max-w-xs">{r.descripcion}</p>
-                                        </td>
-                                        {/* COM-47 v2: valores POR RACIÓN (tabla / raciones) */}
-                                        <td className="p-4 text-center text-sm text-slate-700" title={`Preparación completa: ${r.energia_kcal ?? '-'} kcal`}>
-                                            {porRacion(r.energia_kcal, r)}
-                                        </td>
-                                        <td className="p-4 text-center text-sm text-slate-700" title={`Preparación completa: ${r.hierro_mg ?? '-'} mg`}>
-                                            {porRacion(r.hierro_mg, r)}
-                                        </td>
-                                        <td className="p-4 text-center text-sm text-slate-700" title={`Preparación completa: ${r.proteina_g ?? '-'} g`}>
-                                            {porRacion(r.proteina_g, r)}
+                                            <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-[11px] leading-4 text-slate-600 max-w-[260px]">
+                                                <span><b className="text-slate-700">Energía:</b> {fmtNut(r.energia_kcal)} kcal</span>
+                                                <span><b className="text-slate-700">Proteína:</b> {fmtNut(r.proteina_g)} g</span>
+                                                <span><b className="text-slate-700">Hierro:</b> {fmtNut(r.hierro_mg)} mg</span>
+                                                <span><b className="text-slate-700">Vit. A:</b> {fmtNut(r.vitamina_a_ug)} μg</span>
+                                                <span><b className="text-slate-700">Zinc:</b> {fmtNut(r.zinc_mg)} mg</span>
+                                                <span><b className="text-slate-700">Carboh.:</b> {fmtNut(r.carbohidratos_g)} g</span>
+                                            </div>
                                         </td>
                                         <td className="p-4 text-center">
                                             <button
@@ -271,7 +316,6 @@ export const RecipesView = () => {
                     </div>
                 )}
             </div>
-
             <ModalNuevaReceta
                 isOpen={modalNueva}
                 onClose={handleModalClose}

@@ -3,13 +3,12 @@ schemas/receta.py
 Objetivo: Modelos Pydantic del módulo de recetas (CRUD, ingredientes y listado).
 Historial:
  - Sprint 1: versión original (nombre, descripción y nutrientes).
- - COM-45 (este archivo): el campo `raciones` deja de ser Optional sin uso:
-     * RecetaBase/RecetaInput/RecetaResponse: `raciones: int` OBLIGATORIO con default 4
-       y validación de entero mayor a cero (gt=0) y cota superior de seguridad (le=10000).
-     * RecetaUpdate: `raciones: Optional[int]` con la misma validación cuando se envía
-       (None = no modificar, para actualizaciones parciales).
-   Las líneas anteriores (`raciones: Optional[int] = None`) quedan COMENTADAS por
-   trazabilidad. Es el dato que permite nutrición y costo POR RACIÓN (COM-47 v2).
+ - COM-45: `raciones` obligatorio con default 4 y validación gt=0 en creación;
+   opcional validado en edición parcial.
+ - COM-48 (este archivo): el payload de ingrediente de receta (`IngredienteRecetaInput`)
+   exige `componente_id` (FK a recetas_componentes: Ensalada, Plato de fondo, Refresco,
+   Fruta...), habilitando el mismo ingrediente en varios componentes con cantidades
+   independientes. La nutrición (6 campos) sigue POR RACIÓN en RecetaBase.
 """
 from pydantic import BaseModel, Field
 from typing import Optional, List
@@ -18,10 +17,7 @@ from typing import Optional, List
 class RecetaBase(BaseModel):
     nombre: str
     descripcion: Optional[str] = None
-    # COM-45 (trazabilidad): línea anterior comentada (Optional sin validación ni uso):
-    # raciones: Optional[int] = None  # NUEVO: Número de raciones
-    # COM-45: raciones obligatorias con default 4; entero mayor a cero validado aquí y
-    # reforzado por el CHECK chk_recetas_raciones_positivas de la base de datos.
+    # COM-45: raciones obligatorias con default 4; entero mayor a cero.
     raciones: int = Field(4, gt=0, le=10000,
                           description="Número de raciones que produce la receta")
     hierro_mg: Optional[float] = None
@@ -40,9 +36,7 @@ class RecetaUpdate(BaseModel):
     """Todos los campos opcionales para actualización parcial"""
     nombre: Optional[str] = None
     descripcion: Optional[str] = None
-    # COM-45 (trazabilidad): línea anterior comentada:
-    # raciones: Optional[int] = None  # NUEVO
-    # COM-45: si se envía, debe ser entero mayor a cero; None = no modificar.
+    # COM-45: si se envía, entero mayor a cero; None = no modificar.
     raciones: Optional[int] = Field(None, gt=0, le=10000,
                                     description="Número de raciones que produce la receta")
     hierro_mg: Optional[float] = None
@@ -74,6 +68,12 @@ class RecetaListResponse(BaseModel):
 
 
 class IngredienteRecetaInput(BaseModel):
+    """
+    COM-48: línea de ingrediente de una receta, ahora vinculada a un componente
+    (Ensalada / Plato de fondo / Refresco / Fruta / futuros). El mismo ingrediente
+    puede enviarse varias veces con componente_id distinto y cantidades independientes.
+    """
     ingrediente_id: int
     cantidad_requerida: float
     unidad_medida_id: int
+    componente_id: int = Field(..., gt=0, description="Componente de la receta (recetas_componentes.id)")

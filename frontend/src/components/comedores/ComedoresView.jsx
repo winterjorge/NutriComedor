@@ -1,14 +1,23 @@
 /**
  * components/comedores/ComedoresView.jsx
- * Objetivo: Vista de gestión de comedores (COM-21) actualizada para que la ubicación
- *           geográfica se seleccione mediante la cascada departamento -> provincia ->
- *           distrito (COM-27), eliminando la captura de texto libre para esos campos.
- *           Conserva el listado, filtros, creación, edición, asociación de usuarios y
- *           cambio de estado de membresía.
+ * Objetivo: Vista de gestión de comedores (COM-21) con la ubicación geográfica
+ *           seleccionada mediante la cascada departamento -> provincia -> distrito
+ *           (COM-27). Conserva el listado, filtros, creación, edición, asociación
+ *           de usuarios y cambio de estado de membresía.
+ * Historial:
+ *  - COM-21: versión original con captura de texto libre para ubicación.
+ *  - COM-27: adopción del selector en cascada y payload con FK geográficos.
+ *  - COM-44 (este archivo): alineación con el backend actualizado.
+ *      * La columna "Ubicación" del listado usa `c.distrito_nombre` / `c.provincia_nombre`
+ *        / `c.departamento_nombre` (nombres resueltos desde la cascada por el router).
+ *        Fallback a los textos legacy para comedores creados antes de COM-44.
+ *      * `abrirModalEditar` precarga la cascada desde `c.departamento_id` /
+ *        `c.provincia_id` / `c.distrito_id` (los FK persistidos por el backend).
+ *      * El payload de guardar envía SOLO los FK geográficos (ya no intenta enviar
+ *        los textos `departamento`/`ciudad`/`distrito`, que ahora resuelve el backend).
+ * Dependencias: SelectorUbicacionCascada y api.getDepartamentos/getProvincias/getDistritos.
  * Uso: Montado por App.jsx para usuarios con permiso de gestión de comedores.
- * Dependencias COM-27: SelectorUbicacionCascada (bloque A) y api.getDepartamentos/
- *           getProvincias/getDistritos (bloque UBICACIONES de api.js).
- * Referencia: tickets COM-21 (multi-comedor) y COM-27 (ubicación en cascada).
+ * Referencia: tickets COM-21 / COM-27 / COM-44 (solo trazabilidad).
  */
 import React, { useState, useEffect, useCallback } from 'react';
 import {
@@ -19,7 +28,6 @@ import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { ModalConfirmacion } from '../common/ModalConfirmacion';
 import { ModalExito } from '../common/ModalExito';
-// COM-27: selector de ubicación en cascada (reemplaza los campos de texto libre)
 import { SelectorUbicacionCascada } from '../common/SelectorUbicacionCascada';
 
 // COM-27: estado inicial de la ubicación geográfica en cascada
@@ -103,7 +111,7 @@ export const ComedoresView = () => {
             link_ubicacion: comedor.link_ubicacion || '',
             fecha_fundacion: comedor.fecha_fundacion ? String(comedor.fecha_fundacion).slice(0, 10) : '',
         });
-        // COM-27: precarga la ubicación desde los FK guardados
+        // COM-44: precarga la cascada desde los FK persistidos por el backend
         setUbicacion({
             departamento_id: comedor.departamento_id || null,
             provincia_id: comedor.provincia_id || null,
@@ -121,13 +129,15 @@ export const ComedoresView = () => {
             setError('El nombre del comedor es obligatorio.');
             return;
         }
-        // COM-27: la ubicación debe estar completa hasta distrito
+        // COM-27/COM-44: la ubicación debe estar completa hasta distrito
         if (!ubicacion.departamento_id || !ubicacion.provincia_id || !ubicacion.distrito_id) {
             setError('Complete la ubicación geográfica (departamento, provincia y distrito).');
             return;
         }
         setGuardando(true);
         try {
+            // COM-44: el payload SOLO lleva los FK geográficos; los nombres
+            // (departamento/ciudad/distrito) los resuelve y guarda el backend.
             const payload = {
                 nombre: formComedor.nombre.trim(),
                 zona: formComedor.zona.trim() || null,
@@ -135,7 +145,6 @@ export const ComedoresView = () => {
                 link_ubicacion: formComedor.link_ubicacion.trim() || null,
                 fecha_fundacion: formComedor.fecha_fundacion || null,
                 usuario_solicitante_id: usuario.id,
-                // COM-27: FK de ubicación geográfica (fuente de verdad)
                 departamento_id: ubicacion.departamento_id,
                 provincia_id: ubicacion.provincia_id,
                 distrito_id: ubicacion.distrito_id,
@@ -285,10 +294,12 @@ export const ComedoresView = () => {
                             <tr key={c.id} className="hover:bg-slate-50">
                                 <td className="p-3 font-medium text-slate-800">{c.nombre}</td>
                                 <td className="p-3 text-slate-600">
-                                    {/* COM-27: muestra la ubicación resuelta desde los FK */}
+                                    {/* COM-44: nombres resueltos por el router (cascada) con fallback a textos legacy */}
                                     <span className="flex items-center gap-1">
                                         <MapPin size={13} className="text-emerald-600" />
-                                        {[c.distrito_nombre, c.provincia_nombre, c.departamento_nombre]
+                                        {[c.distrito_nombre || c.distrito,
+                                          c.provincia_nombre || c.ciudad,
+                                          c.departamento_nombre || c.departamento]
                                             .filter(Boolean).join(', ') || 'Sin ubicación'}
                                     </span>
                                 </td>
@@ -330,14 +341,12 @@ export const ComedoresView = () => {
                                 <X size={22} />
                             </button>
                         </div>
-
                         <form onSubmit={guardarComedor} className="p-6 space-y-4 overflow-y-auto">
                             {error && (
                                 <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-center gap-2 text-sm">
                                     <AlertCircle size={16} /> {error}
                                 </div>
                             )}
-
                             <div>
                                 <label className="block text-xs font-semibold text-slate-600 mb-1">Nombre del comedor *</label>
                                 <input
@@ -347,7 +356,6 @@ export const ComedoresView = () => {
                                     className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500"
                                 />
                             </div>
-
                             {/* COM-27: ubicación en cascada (reemplaza departamento/ciudad/distrito de texto libre) */}
                             <div>
                                 <label className="flex items-center gap-1 text-xs font-semibold text-slate-600 mb-1">
@@ -359,7 +367,6 @@ export const ComedoresView = () => {
                                     mostrarMunicipalidad={false}
                                 />
                             </div>
-
                             <div className="grid grid-cols-2 gap-3">
                                 <div>
                                     <label className="block text-xs font-semibold text-slate-600 mb-1">Zona</label>
@@ -380,7 +387,6 @@ export const ComedoresView = () => {
                                     />
                                 </div>
                             </div>
-
                             <div>
                                 <label className="block text-xs font-semibold text-slate-600 mb-1">Dirección</label>
                                 <input
@@ -390,7 +396,6 @@ export const ComedoresView = () => {
                                     className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500"
                                 />
                             </div>
-
                             <div>
                                 <label className="block text-xs font-semibold text-slate-600 mb-1">Link de ubicación (mapa)</label>
                                 <input
@@ -401,7 +406,6 @@ export const ComedoresView = () => {
                                     className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500"
                                 />
                             </div>
-
                             <div className="flex justify-end gap-3 pt-2">
                                 <button type="button" onClick={() => setModalComedorAbierto(false)}
                                     className="px-5 py-2 border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-100 transition-colors text-sm">
@@ -430,14 +434,12 @@ export const ComedoresView = () => {
                                 <X size={22} />
                             </button>
                         </div>
-
                         <div className="p-6 space-y-4 overflow-y-auto">
                             {error && (
                                 <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-center gap-2 text-sm">
                                     <AlertCircle size={16} /> {error}
                                 </div>
                             )}
-
                             {/* Búsqueda de usuario por documento */}
                             <div className="flex gap-2">
                                 <input
@@ -456,7 +458,6 @@ export const ComedoresView = () => {
                                     Buscar
                                 </button>
                             </div>
-
                             {usuarioEncontrado && (
                                 <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg flex flex-wrap items-center justify-between gap-2">
                                     <span className="text-sm text-slate-700">
@@ -480,7 +481,6 @@ export const ComedoresView = () => {
                                     </div>
                                 </div>
                             )}
-
                             {/* Lista de usuarios del comedor */}
                             <div className="rounded-lg border border-slate-200 overflow-hidden">
                                 <table className="w-full text-left text-sm">

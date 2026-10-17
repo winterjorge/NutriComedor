@@ -1,30 +1,51 @@
 /**
- * components/budget/GenerarPropuestasView.jsx
- * Objetivo: Vista COM-8 "Propuestas de Menú": genera y muestra 3 propuestas de menú
- *           semanal (NutriMax, EconoMax, BalanceMax) del motor greedy, cada una con
- *           costo total, calorías promedio/día, recolección proyectada y margen
- *           (ventas - compras), top 3 de ingredientes (solo vegetales/frutas/proteínas)
- *           y el listado de platos por día. El personal Directivo fija una propuesta
- *           ("Seleccionar esta opción"). Incluye historial de menús seleccionados.
- * Historial:
- *  - COM-8 v1: 3 tarjetas, selección solo Directivo, historial.
- *  - COM-8 v2: selector de días de cocina (chips Lun-Dom) y tarjetas de recolección/margen.
- *  - COM-8 v4: se retira el botón independiente "Regenerar"; al pulsar "Generar 3
- *              propuestas" con una sesión activa se abre un modal de confirmación.
- *  - COM-8 v5 (este archivo): trazabilidad recuperada. Todas las líneas reemplazadas en
- *              versiones anteriores se conservan COMENTADAS (no borradas).
- * Permisos: vista para Directivo y Operativo (módulo 'propuestas', COM-25). El botón de
- *           selección solo aparece si el backend responde puede_seleccionar=true.
- * Uso: Montada por App.jsx en la pestaña "Propuestas de Menú".
- * Referencia: ticket COM-8 / HU-08 (solo trazabilidad; los nombres obedecen a la funcionalidad).
- */
+components/budget/GenerarPropuestasView.jsx
+Objetivo: Vista COM-8 "Propuestas de Menú": genera y muestra 3 propuestas de menú
+      semanal (NutriMax, EconoMax, BalanceMax) del motor greedy, cada una con
+      costo total, calorías promedio/día, recolección proyectada y margen
+      (ventas - compras), top 3 de ingredientes (solo vegetales/frutas/proteínas)
+      y el listado de platos por día. El personal Directivo fija una propuesta
+      ("Seleccionar esta opción"). Incluye historial de menús seleccionados.
+Historial:
+COM-8 v1: 3 tarjetas, selección solo Directivo, historial.
+COM-8 v2: selector de días de cocina (chips Lun-Dom) y tarjetas de recolección/margen.
+COM-8 v4: se retira el botón independiente "Regenerar"; al pulsar "Generar 3
+         propuestas" con una sesión activa se abre un modal de confirmación.
+COM-8 v5: trazabilidad recuperada. Todas las líneas reemplazadas en
+         versiones anteriores se conservan COMENTADAS (no borradas).
+COM-61 / HU-11: VARIEDAD ENTRE SEMANAS en la UI:
+         * Checkbox "Permitir platos repetidos" (opt-in explícito, default OFF).
+           Al marcarlo se exige confirmación con el mensaje del criterio:
+           "¿Está seguro de permitir platos repetidos en la generación de nuevas
+           sugerencias semanales?" (ModalConfirmacion; cancelar => queda OFF).
+         * El payload de api.generarPropuestas viaja con permitir_repetidos.
+         * Badge de VARIEDAD por propuesta (variedad_pct = % platos nuevos vs la
+           semana VIGENTE anterior) + fecha de la semana de referencia.
+         * Advertencia listada cuando el motor repitió platos por falta de
+           alternativas (repeticiones_semana_anterior con flag inevitable).
+         * Tag "Repetido de la semana anterior" en la línea de cada día del menú
+           resumido cuando d.repite_semana_anterior = true.
+         * Chips de contexto en el encabezado de sesión: semana anterior detectada
+           y aviso de "repetición permitida" si la generación usó el opt-in.
+         Nada existente de COM-8 v1-v5 se elimina; los bloques comentados se conservan.
+COM-74: muestra por día los comensales proyectados (IA + cocineras) con badge de
+         fuente (IA/parámetro) en cada tarjeta de propuesta.
+COM-75 (este archivo): banner de aviso cuando la generación detecta ingredientes
+         cuyos insumos son NUEVOS y no se pueden predecir (sin histórico de scraper):
+         promptea al usuario a asignar un precio manual temporal en Gestión de
+         Ingredientes hasta juntar datos suficientes para predecir.
+Permisos: vista para Directivo y Operativo (módulo 'propuestas', COM-25). El botón de
+      selección solo aparece si el backend responde puede_seleccionar=true.
+Uso: Montada por App.jsx en la pestaña "Propuestas de Menú".
+Referencia: ticket COM-8 / HU-08 / COM-61 / COM-74 / COM-75 (solo trazabilidad).
+*/
 import React, { useState, useEffect, useCallback } from 'react';
 import {
     Sparkles,
     // RefreshCw, // COM-8 v5 (trazabilidad): icono del botón "Regenerar" retirado en COM-8 v4; se conserva comentado.
-    Loader2, AlertCircle, Wallet, Flame,
+    Loader2, AlertCircle, AlertTriangle, Wallet, Flame,
     ShoppingBasket, CalendarDays, History, ChevronDown, ChevronUp, Lock,
-    CheckCircle2, TrendingUp, Coins
+    CheckCircle2, TrendingUp, Coins, Users
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
@@ -52,17 +73,26 @@ const DIAS_OPCIONES = [
 // COM-8 v2: por defecto se cocina de lunes a viernes
 const DIAS_DEFAULT = [1, 2, 3, 4, 5];
 
+// COM-74: badge de fuente de comensales (IA vs parámetro)
+const badgeFuente = (fuente) => {
+    if (fuente === 'prediccion_ia') {
+        return <span className="ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-100 text-emerald-700">IA</span>;
+    }
+    return <span className="ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold bg-slate-100 text-slate-600">Par.</span>;
+};
+
 export const GenerarPropuestasView = () => {
     const { usuario, seleccion } = useAuth();
     const comedorId = seleccion?.comedor_id;
-
     // Parámetros de generación
     const [presupuesto, setPresupuesto] = useState('2500');
     const [fechaRef, setFechaRef] = useState('');
     const [seed, setSeed] = useState(0);
     // COM-8 v2: días de cocina seleccionados
     const [diasSel, setDiasSel] = useState(DIAS_DEFAULT);
-
+    // COM-61 (HU-11): opt-in explícito de repetición de platos entre semanas (default OFF)
+    const [permitirRepetidos, setPermitirRepetidos] = useState(false);
+    const [confPermitirRepetidos, setConfPermitirRepetidos] = useState(false);
     // Estado de la sesión de propuestas
     const [sesion, setSesion] = useState(null);
     const [seleccionadaId, setSeleccionadaId] = useState(null);
@@ -72,13 +102,11 @@ export const GenerarPropuestasView = () => {
     const [confSeleccion, setConfSeleccion] = useState(null);
     // COM-8 v4: modal de confirmación al regenerar con el botón "Generar 3 propuestas"
     const [confRegenerar, setConfRegenerar] = useState(false);
-
     // Historial de menús definitivos
     const [historial, setHistorial] = useState([]);
     const [mostrarHistorial, setMostrarHistorial] = useState(false);
     const [expandidos, setExpandidos] = useState({});
     const [diasHistorial, setDiasHistorial] = useState({});
-
     const puedeSeleccionar = !!sesion?.puede_seleccionar;
 
     const cargarHistorial = useCallback(async () => {
@@ -86,7 +114,6 @@ export const GenerarPropuestasView = () => {
         try { setHistorial(await api.getHistorialPropuestas(comedorId, usuario.id)); }
         catch (e) { /* sección opcional: no bloquea la vista */ }
     }, [comedorId, usuario.id]);
-
     useEffect(() => { cargarHistorial(); }, [cargarHistorial]);
 
     // COM-8 v2: alterna un día de cocina (mínimo 1 día activo)
@@ -100,13 +127,26 @@ export const GenerarPropuestasView = () => {
         });
     };
 
+    // COM-61 (HU-11): el checkbox solo se activa tras confirmación explícita del criterio;
+    // desactivarlo no requiere confirmación (vuelve al comportamiento seguro por defecto).
+    const onTogglePermitirRepetidos = (e) => {
+        if (e.target.checked) {
+            setConfPermitirRepetidos(true);
+        } else {
+            setPermitirRepetidos(false);
+        }
+    };
+    const confirmarPermitirRepetidos = () => {
+        setConfPermitirRepetidos(false);
+        setPermitirRepetidos(true);
+    };
+
     // COM-8 v4: función interna que hace la llamada real al motor
     const ejecutarGeneracion = async (nuevoSeed) => {
         if (!comedorId) { setError('No hay un comedor seleccionado en su sesión.'); return; }
         const pres = Number(presupuesto);
         if (!pres || pres <= 0) { setError('Ingrese un presupuesto semanal válido (mayor a 0).'); return; }
         if (diasSel.length === 0) { setError('Seleccione al menos un día de cocina.'); return; }
-
         setCargando(true); setError(''); setSeleccionadaId(null);
         try {
             const res = await api.generarPropuestas({
@@ -115,6 +155,8 @@ export const GenerarPropuestasView = () => {
                 fecha_referencia: fechaRef || null,
                 seed: nuevoSeed,
                 dias_semana: diasSel,          // COM-8 v2: días de cocina elegidos
+                // COM-61 (HU-11): opt-in de repetición entre semanas (default false)
+                permitir_repetidos: permitirRepetidos,
                 usuario_solicitante_id: usuario.id,
             });
             setSesion(res);
@@ -136,12 +178,10 @@ export const GenerarPropuestasView = () => {
             ejecutarGeneracion(seed);
         }
     };
-
     const confirmarRegenerar = async () => {
         setConfRegenerar(false);
         await ejecutarGeneracion(seed + 1);
     };
-
     // COM-8 v5 (trazabilidad): función "regenerar" independiente de COM-8 v1/v2, comentada.
     // La regeneración ahora pasa por el modal de confirmación (confirmarRegenerar).
     // const regenerar = () => generar(seed + 1);
@@ -190,7 +230,6 @@ export const GenerarPropuestasView = () => {
                         visibles, pulsar "Generar" las reemplazará previa confirmación.
                     </p>
                 </div>
-
                 {/* COM-8 v5 (trazabilidad): botón independiente "Regenerar" de COM-8 v1/v2,
                     comentado por requerimiento COM-8 v4 (la regeneración se pide desde
                     "Generar 3 propuestas" con modal de confirmación).
@@ -205,7 +244,6 @@ export const GenerarPropuestasView = () => {
                     )}
                 */}
             </div>
-
             {/* Formulario de generación */}
             <div className="flex flex-wrap gap-3 mb-4 items-end">
                 <div>
@@ -231,7 +269,6 @@ export const GenerarPropuestasView = () => {
                     Generar 3 propuestas
                 </button>
             </div>
-
             {/* COM-8 v2: selector de días de cocina (chips) */}
             <div className="mb-5">
                 <label className="flex items-center gap-1 text-xs font-semibold text-slate-600 mb-1">
@@ -254,13 +291,51 @@ export const GenerarPropuestasView = () => {
                     })}
                 </div>
             </div>
-
+            {/* COM-61 (HU-11): opt-in explícito de repetición de platos de la semana anterior.
+                Por defecto OFF: el motor evita los platos del menú VIGENTE anterior y solo
+                los repite si no hay alternativas (marcados como inevitables en cada tarjeta). */}
+            <div className="mb-5 flex flex-wrap items-center gap-3">
+                <label className="flex items-center gap-2 text-xs font-semibold text-slate-600 cursor-pointer select-none">
+                    <input
+                        type="checkbox"
+                        checked={permitirRepetidos}
+                        onChange={onTogglePermitirRepetidos}
+                        className="h-4 w-4 rounded border-slate-300 text-amber-600 focus:ring-amber-500"
+                    />
+                    Permitir platos repetidos
+                </label>
+                <span className="text-[11px] text-slate-500">
+                    {permitirRepetidos
+                        ? 'Opt-in activo: las propuestas podrán incluir platos de la semana anterior.'
+                        : 'Por defecto el motor evita los platos del menú vigente de la semana anterior.'}
+                </span>
+            </div>
             {error && (
                 <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-center gap-2 text-sm">
                     <AlertCircle size={16} /> {error}
                 </div>
             )}
-
+            {/* COM-75: prompt de precio manual temporal para insumos nuevos sin histórico */}
+            {sesion && (sesion.ingredientes_requieren_precio_manual || []).length > 0 && (
+                <div className="mb-4 p-3 bg-amber-50 border border-amber-300 rounded-lg text-amber-800 text-sm">
+                    <p className="font-bold flex items-center gap-1 mb-1">
+                        <AlertCircle size={15} /> Ingredientes sin precio predecible
+                    </p>
+                    <p className="mb-2">
+                        Estos insumos son nuevos o no tienen histórico suficiente para que la IA
+                        los prediga. Asigne un <b>precio manual temporal</b> en
+                        Gestión de Ingredientes hasta juntar datos del scraper:
+                    </p>
+                    <ul className="list-disc ml-5 space-y-0.5 text-xs">
+                        {sesion.ingredientes_requieren_precio_manual.map((x, i) => (
+                            <li key={i}>
+                                <b>{x.ingrediente}</b>
+                                {(x.insumos || []).length > 0 ? ` (insumos: ${x.insumos.join(', ')})` : ''}
+                            </li>
+                        ))}
+                    </ul>
+                </div>
+            )}
             {/* Tarjetas de propuestas */}
             {cargando && !sesion ? (
                 <div className="p-12 text-center text-emerald-600">
@@ -273,6 +348,17 @@ export const GenerarPropuestasView = () => {
                         Semana del <b>{sesion.semana_inicio}</b> · {sesion.propuestas.length} propuestas ·
                         Días de cocina:{' '}
                         <b>{(sesion.dias_seleccionados || []).map(d => DIAS_OPCIONES[d - 1]?.label).join(', ')}</b>
+                        {/* COM-61 (HU-11): contexto de variedad de la sesión */}
+                        {sesion.semana_anterior?.fecha_referencia && (
+                            <span className="ml-2 inline-flex items-center gap-1 text-slate-600 bg-slate-100 px-2 py-0.5 rounded-full font-semibold">
+                                <History size={11} /> Semana anterior: {sesion.semana_anterior.fecha_referencia}
+                            </span>
+                        )}
+                        {sesion.permitir_repetidos && (
+                            <span className="ml-2 inline-flex items-center gap-1 text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full font-semibold">
+                                <AlertTriangle size={11} /> Repetición permitida en esta generación
+                            </span>
+                        )}
                         {!puedeSeleccionar && (
                             <span className="ml-2 inline-flex items-center gap-1 text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full font-semibold">
                                 <Lock size={11} /> Solo el personal directivo puede fijar el menú
@@ -297,7 +383,6 @@ export const GenerarPropuestasView = () => {
                                         )}
                                     </div>
                                     <p className="text-xs text-slate-500 mb-3">{p.descripcion}</p>
-
                                     {/* COM-8 v2: resumen en 4 tarjetas: compras, kcal, ventas y margen */}
                                     <div className="grid grid-cols-2 gap-2 mb-3 text-center">
                                         <div className="bg-slate-50 rounded-lg py-2">
@@ -326,7 +411,32 @@ export const GenerarPropuestasView = () => {
                                             <p className="text-[10px] text-slate-500">Margen (ventas − compras)</p>
                                         </div>
                                     </div>
-
+                                    {/* COM-61 (HU-11): indicador de variedad vs semana anterior */}
+                                    <div className="mb-3 flex items-center justify-between gap-2">
+                                        <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                            (r.variedad_pct ?? 100) >= 100 ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                                            <CheckCircle2 size={11} /> Variedad: {r.variedad_pct ?? 100}% platos nuevos
+                                        </span>
+                                        {r.semana_anterior_fecha && (
+                                            <span className="text-[10px] text-slate-400">vs semana del {r.semana_anterior_fecha}</span>
+                                        )}
+                                    </div>
+                                    {/* COM-61 (HU-11): advertencia de repeticiones inevitables (sin alternativas) */}
+                                    {(r.repeticiones_semana_anterior || []).length > 0 && (
+                                        <div className="mb-3 p-2 bg-amber-50 border border-amber-200 rounded-lg text-[11px] text-amber-800">
+                                            <p className="font-bold flex items-center gap-1 mb-1">
+                                                <AlertTriangle size={12} /> Platos repetidos de la semana pasada:
+                                            </p>
+                                            <ul className="list-disc ml-4 space-y-0.5">
+                                                {(r.repeticiones_semana_anterior || []).map((rep, i) => (
+                                                    <li key={i}>
+                                                        <b>{rep.dia_nombre}:</b> {rep.receta_nombre}
+                                                        {rep.inevitable ? ' (sin alternativas suficientes en el recetario)' : ''}
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        </div>
+                                    )}
                                     <div className="mb-3">
                                         <p className="flex items-center gap-1 text-[11px] font-semibold text-slate-600 mb-1">
                                             <ShoppingBasket size={11} /> Top 3 ingredientes
@@ -344,7 +454,24 @@ export const GenerarPropuestasView = () => {
                                             ? `Dentro del presupuesto de S/ ${r.presupuesto_semanal}`
                                             : `Excede el presupuesto de S/ ${r.presupuesto_semanal}`}
                                     </p>
-
+                                    {/* COM-74: comensales proyectados por día */}
+                                    {sesion.comensales_por_dia && (
+                                        <div className="mb-3 p-2 bg-blue-50 border border-blue-200 rounded-lg">
+                                            <p className="text-[11px] font-bold text-blue-800 mb-1 flex items-center gap-1">
+                                                <Users size={11} /> Comensales proyectados por día
+                                            </p>
+                                            <div className="grid grid-cols-5 gap-1 text-[10px]">
+                                                {Object.entries(sesion.comensales_por_dia).map(([dia, cd]) => (
+                                                    <div key={dia} className="text-center">
+                                                        <p className="font-bold text-slate-700">{DIAS_OPCIONES[dia - 1]?.label}</p>
+                                                        <p className="text-slate-600">{cd.social}/{cd.afiliado}/{cd.normal}+{cd.cocineras}</p>
+                                                        <p className="font-bold text-blue-700">Total: {cd.total}</p>
+                                                        {badgeFuente(cd.fuente)}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
                                     {/* Menú resumido por día (solo días de cocina) */}
                                     <div className="space-y-1 mb-4 flex-1">
                                         {(p.menu || []).map(d => (
@@ -352,13 +479,18 @@ export const GenerarPropuestasView = () => {
                                                 <div>
                                                     <span className="font-bold text-slate-700">{d.dia_nombre}: </span>
                                                     <span className="text-slate-600">{d.receta_nombre}</span>
-                                                    <span className="block text-[10px] text-slate-400">{d.cluster_etiqueta}</span>
+                                                    <span className="block text-[10px] text-slate-400">
+                                                        {d.cluster_etiqueta}
+                                                        {/* COM-61 (HU-11): marca el día que repite plato de la semana anterior */}
+                                                        {d.repite_semana_anterior && (
+                                                            <span className="ml-1 text-amber-700 font-bold">· Repetido de la semana anterior</span>
+                                                        )}
+                                                    </span>
                                                 </div>
                                                 <span className="text-slate-600 font-semibold shrink-0">S/ {d.costo_racion}</span>
                                             </div>
                                         ))}
                                     </div>
-
                                     {/* Acción de selección (solo Directivo) */}
                                     {puedeSeleccionar && !elegida && seleccionadaId === null && (
                                         <button onClick={() => setConfSeleccion(p)} disabled={cargando}
@@ -382,7 +514,6 @@ export const GenerarPropuestasView = () => {
                     </p>
                 </div>
             )}
-
             {/* Historial de menús seleccionados */}
             <button onClick={() => setMostrarHistorial(!mostrarHistorial)}
                 className="flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-slate-800 transition-colors mb-2">
@@ -455,7 +586,6 @@ export const GenerarPropuestasView = () => {
                     </table>
                 </div>
             )}
-
             {/* Confirmación de selección */}
             <ModalConfirmacion
                 isOpen={!!confSeleccion}
@@ -472,6 +602,14 @@ export const GenerarPropuestasView = () => {
                 onClose={() => setConfRegenerar(false)}
                 onConfirm={confirmarRegenerar}
                 mensaje="¿Generar 3 nuevas propuestas? Las propuestas actuales se perderán. Si ya seleccionó una como definitiva, esta no se verá afectada."
+                tipo="warning"
+            />
+            {/* COM-61 (HU-11): prompt de confirmación del opt-in de repetición (mensaje literal del criterio) */}
+            <ModalConfirmacion
+                isOpen={confPermitirRepetidos}
+                onClose={() => setConfPermitirRepetidos(false)}
+                onConfirm={confirmarPermitirRepetidos}
+                mensaje="¿Está seguro de permitir platos repetidos en la generación de nuevas sugerencias semanales?"
                 tipo="warning"
             />
             <ModalExito isOpen={!!exito} onClose={() => setExito('')} mensaje={exito} />

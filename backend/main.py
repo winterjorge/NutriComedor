@@ -3,19 +3,29 @@ main.py
 Objetivo: Punto de entrada de la aplicación FastAPI. Orquesta los routers, configuraciones globales y middleware.
 Uso: Ejecutar con `uvicorn main:app --host 0.0.0.0 --port 8000`.
 Historial:
- - COM-21/22/23/25/26/27: routers de gestión (comedores, grupos, usuarios, municipalidades, vistas, ubicaciones).
- - COM-5: router de clustering K-means del recetario.
- - COM-8: router de propuestas de menú semanal (motor greedy).
- - COM-5 v4 / COM-8 v7: router del panel de gráficos de Machine Learning (modelos_ml),
-   exclusivo del Administrador de Sistemas.
- - COM-38: router de reseteo/cambio de clave por Admin de Sistemas (reset_clave).
- - COM-39: router de gestión de directivos por comedor (directivos), exclusivo del
-   Administrador de Sistemas.
- - COM-39 fix: el include de `directivos` va ANTES que el de `comedores` (sombra de
-   rutas /comedores/{comedor_id} que respondía 422 a /comedores/buscar-por-distrito).
- - COM-37 (este archivo): router de Gestión de Ingredientes (ingredientes_admin),
-   exclusivo del Administrador de Sistemas: CRUD sin borrado, precios manuales con
-   vigencia y re-emparejado de insumos huérfanos.
+COM-21/22/23/25/26/27: routers de gestión (comedores, grupos, usuarios, municipalidades, vistas, ubicaciones).
+COM-5: router de clustering K-means del recetario.
+COM-8: router de propuestas de menú semanal (motor greedy).
+COM-5 v4 / COM-8 v7: router del panel de gráficos de Machine Learning (modelos_ml),
+    exclusivo del Administrador de Sistemas.
+COM-38: router de reseteo/cambio de clave por Admin de Sistemas (reset_clave).
+COM-39: router de gestión de directivos por comedor (directivos), exclusivo del
+    Administrador de Sistemas.
+COM-39 fix: el include de `directivos` va ANTES que el de `comedores` (sombra de
+    rutas /comedores/{comedor_id} que respondía 422 a /comedores/buscar-por-distrito).
+COM-37: router de Gestión de Ingredientes (ingredientes_admin), exclusivo del
+    Administrador de Sistemas: CRUD sin borrado, precios manuales con vigencia y
+    re-emparejado de insumos huérfanos.
+COM-50: router del Reporte de Gestión "Resumen ejecutivo y recomendaciones"
+    (reportes_gestion), con alcances por perfil (comedor/zona/macro).
+COM-59A (este archivo): routers de Subsidio mensual de víveres (subsidio) y de
+    Precios de Venta con historial (precios_venta). Versión 2.17.0.
+COM-77: router de reportes operativos del comedor (reportes_avanzados) + alcance
+    unificado COM-77/78.
+COM-43: router de ejecución web/catch-up del scraper SISAP (scraper_admin) + hook
+    de catch-up en el lifespan.
+COM-78 (este archivo): router de reportes macro municipales (reportes_municipio):
+    dashboard distrital, observatorio de precios y cobertura/focalización.
 """
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -43,12 +53,19 @@ from routers import (
     reset_clave,      # COM-38: reseteo/cambio de clave por Admin de Sistemas
     directivos,       # COM-39: gestión de directivos por comedor (solo Admin de Sistemas)
     ingredientes_admin,  # COM-37: gestión de ingredientes y precios manuales (solo Admin)
+    reportes_gestion,    # COM-50: resumen ejecutivo y recomendaciones (alcances por perfil)
+    subsidio,            # COM-59A: subsidio mensual de víveres por comedor
+    precios_venta,       # COM-59A: precios de venta con historial (solo Admin de Sistemas)
+    reportes_avanzados,  # COM-77: reportes operativos del comedor (y alcance COM-78)
+    scraper_admin,       # COM-43: ejecución web/catch-up del scraper SISAP (solo Admin)
+    reportes_municipio,  # COM-78: reportes macro municipales (dashboard/observatorio/cobertura)
 )
+
 # Asegurado de esquema dinámico (parámetros, planificación, raciones, seguridad,
 # comedores, grupos, gestión de usuarios, permisos por vistas, ubicaciones,
 # esquema K-means con seed nutricional, esquema de propuestas COM-8, seeds de
-# módulos ML / proteínas configurables COM-5 v4 y esquema COM-37 de precios
-# manuales + módulo gestion_ingredientes) al arrancar
+# módulos ML / proteínas configurables COM-5 v4, esquema COM-37 de precios
+# manuales + módulo gestion_ingredientes, y esquema COM-59A de subsidio/precios)
 from db_bootstrap import asegurar_esquema
 
 
@@ -56,10 +73,17 @@ from db_bootstrap import asegurar_esquema
 async def lifespan(app: FastAPI):
     # Verificar/crear tablas dinámicas antes de atender peticiones.
     asegurar_esquema()
+    # COM-43: catch-up automático de precios faltantes al arrancar (servidor no 24/7).
+    # Nunca bloquea el arranque: cualquier error se degrada a un print de auditoría.
+    try:
+        from routers.scraper_admin import lanzar_catchup_arranque
+        lanzar_catchup_arranque()
+    except Exception as e:
+        print(f"[BOOTSTRAP] COM-43: catch-up de scraper no iniciado: {e}")
     yield
 
 
-app = FastAPI(title="API - NutriComedor", version="2.15.0", lifespan=lifespan)
+app = FastAPI(title="API - NutriComedor", version="2.18.0", lifespan=lifespan)
 
 # Configuración de CORS (Mantiene compatibilidad con tu Frontend)
 app.add_middleware(
@@ -87,6 +111,12 @@ app.include_router(propuestas_menu.router, prefix="/api/v1")  # COM-8
 app.include_router(modelos_ml.router, prefix="/api/v1")       # COM-5 v4 / COM-8 v7
 app.include_router(reset_clave.router, prefix="/api/v1")      # COM-38
 app.include_router(ingredientes_admin.router, prefix="/api/v1")  # COM-37
+app.include_router(reportes_gestion.router, prefix="/api/v1")    # COM-50
+app.include_router(subsidio.router, prefix="/api/v1")            # COM-59A
+app.include_router(precios_venta.router, prefix="/api/v1")       # COM-59A
+app.include_router(reportes_avanzados.router, prefix="/api/v1")  # COM-77
+app.include_router(scraper_admin.router, prefix="/api/v1")       # COM-43
+app.include_router(reportes_municipio.router, prefix="/api/v1")  # COM-78
 # COM-39 fix (trazabilidad): posición original del include de directivos, comentada.
 # app.include_router(directivos.router, prefix="/api/v1")     # COM-39 (antes, después de reset_clave)
 app.include_router(parametros.router, prefix="/api/v1")

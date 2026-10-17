@@ -1,39 +1,78 @@
 /**
- * services/api.js
- * Objetivo: Servicio centralizado de comunicación HTTP con la API del backend.
- *           Todos los componentes consumen este módulo en lugar de hacer fetch directo,
- *           lo que garantiza un manejo uniforme de errores, cabeceras y endpoints.
- * Uso: Importar `api` en hooks y componentes para consumir los endpoints del sistema.
- * Historial:
- *   COM-17: parser defensivo `leerErrorSeguro`.
- *   COM-19: endpoints de autenticación (login, cambiar-clave).
- *   COM-20: getContextoSeleccion y verificarMembresia.
- *   COM-21: bloque COMEDORES (CRUD, usuarios por comedor, asociación, estado, búsqueda).
- *   COM-22: bloque GRUPOS (catálogo, membresías, asignación y estado).
- *   COM-23: bloque USUARIOS, MUNICIPALIDADES y extensiones de GRUPOS.
- *   COM-25: bloque VISTAS (módulos, matriz de permisos, módulos efectivos).
- *   COM-26: flujo CRUD de usuarios por perfil + búsquedas de municipalidades/comedores.
- *   COM-5:  bloque KMEANS (clustering nutricional del recetario).
- *   COM-8:  bloque PROPUESTAS (motor greedy de menú semanal).
- *   COM-5 v4 / COM-8 v7: KMEANS con usuarioSolicitanteId + proteínas configurables +
- *           bloque MODELOS_ML (panel de gráficos exclusivo del Admin).
- *   COM-38: resetearClaveUsuario (reset/cambio de clave por Admin de Sistemas).
- *   COM-39: bloque DIRECTIVOS DE COMEDOR (búsqueda por distrito, listado, lotes).
- *   COM-37 v1: bloque GESTION_INGREDIENTES (ingredientes CRUD sin borrado, precios
- *           manuales por ingrediente con vigencia, re-emparejado).
- *   COM-37 v5 (este archivo): se AMPLÍA GESTION_INGREDIENTES con el modelo de DOS
- *           CONCEPTOS (ingrediente=uso / insumo=compra): insumos del ingrediente con
- *           precio de hoy y fuente, búsqueda de insumos, vinculación con equivalencias,
- *           creación/edición/desvinculación de insumos MANUALES, CRUD de equivalencias
- *           (unidad de uso -> gramos) y CRUD de precios manuales POR INSUMO.
- *           Los métodos v1 de precios por ingrediente se conservan como LEGACY.
- */
-
+services/api.js
+Objetivo: Servicio centralizado de comunicación HTTP con la API del backend.
+Todos los componentes consumen este módulo en lugar de hacer fetch directo,
+lo que garantiza un manejo uniforme de errores, cabeceras y endpoints.
+Uso: Importar `api` en hooks y componentes para consumir los endpoints del sistema.
+Historial:
+COM-17: parser defensivo `leerErrorSeguro`.
+COM-19: endpoints de autenticación (login, cambiar-clave).
+COM-20: getContextoSeleccion y verificarMembresia.
+COM-21: bloque COMEDORES (CRUD, usuarios por comedor, asociación, estado, búsqueda).
+COM-22: bloque GRUPOS (catálogo, membresías, asignación y estado).
+COM-23: bloque USUARIOS, MUNICIPALIDADES y extensiones de GRUPOS.
+COM-25: bloque VISTAS (módulos, matriz de permisos, módulos efectivos).
+COM-26: flujo CRUD de usuarios por perfil + búsquedas de municipalidades/comedores.
+COM-5:  bloque KMEANS (clustering nutricional del recetario).
+COM-8:  bloque PROPUESTAS (motor greedy de menú semanal).
+COM-5 v4 / COM-8 v7: KMEANS con usuarioSolicitanteId + proteínas configurables +
+bloque MODELOS_ML (panel de gráficos exclusivo del Admin).
+COM-38: resetearClaveUsuario (reset/cambio de clave por Admin de Sistemas).
+COM-39: bloque DIRECTIVOS DE COMEDOR (búsqueda por distrito, listado, lotes).
+COM-37 v1/v5/v6/v8: bloque GESTION_INGREDIENTES (ingredientes CRUD sin borrado,
+insumos del ingrediente con precio de hoy y fuente, búsqueda y vinculación
+de insumos, insumos manuales, equivalencias uso->gramos, precios manuales
+por insumo, legacy por ingrediente, re-emparejado y duplicados/fusión).
+COM-48: en RECETAS: getComponentesReceta, limpiarIngredientesReceta,
+getCategoriasAlimentos y createIngredienteDesdeReceta.
+COM-50 v1/v2/v3: bloque REPORTES DE GESTIÓN: getAlcanceReportes, getReporteGestion
+(nivel/zona) y getPlanesGestion.
+COM-57: getObsoletosIngredientes (migración de sinónimos fusionados).
+COM-59A: bloques SUBSIDIO DE VÍVERES (getSubsidioMes, registrarSubsidio,
+editarSubsidio, eliminarSubsidio) y PRECIOS DE VENTA (getPreciosVentaVigentes,
+getHistorialPreciosVenta, registrarPrecioVenta).
+COM-59A v2: getHistorialPreciosVenta acepta `params` y envía
+`usuario_solicitante_id` (obligatorio tras el fix de seguridad del backend
+v2); con esto PreciosVentaView deja de degradar con banner y carga el
+historial completo. Ningún otro método se modifica.
+COM-62 v2: bloque POS reconstruido como superconjunto del original:
+* Nuevos: buscarComensalesPorNombre (autocompletado) y editarComensal
+(completar/corregir DNI después).
+* buscarComensal / registrarComensal / registrarVenta / modificarVenta /
+eliminarVenta pasan a retornar JSON parseado y a lanzar Error con
+leerErrorSeguro (fix del bug "l.json is not a function" de
+ModalEdicionVenta: las versiones raw-fetch devolvían el Response crudo).
+* Las 5 versiones originales raw-fetch quedan COMENTADAS al final del
+bloque por trazabilidad (convención del proyecto: nada se elimina).
+COM-63: cargaMasivaHistorica (POST /padron/carga-masiva, multipart CSV
+fecha;afiliados;publico;sociales;cocineras).
+COM-65: getListaCompras documenta el filtro opcional por día (la firma ya lo
+traía; se agrega el comentario de trazabilidad en PLANIFICACIONES).
+COM-68: reactivarIngrediente (POST /ingredientes-admin/{id}/reactivar): quita el
+prefijo [OBSOLETO] y devuelve el canónico al catálogo activo.
+COM-69: tres adiciones marcadas, ninguna línea existente se elimina:
+* getListaCompras acepta `comedorId` opcional (query comedor_id) para que el
+backend aplique la cobertura del subsidio del mes (Solución B).
+* getComedoresVisiblesSubsidio (GET /subsidio/comedores-visibles): selector
+del reporte municipal según permisos de lectura de subsidio.
+* getReporteSubsidio (GET /subsidio/reporte-uso): stock vs consumo proyectado
+acumulado del mes por comedor, con estados OK/POR AGOTAR/AGOTADO/SIN CONSUMO.
+COM-43: bloque SCRAPER SISAP (ejecutarScraper, getEstadoScraper, getHistorialScraper).
+COM-77: bloque REPORTES AVANZADOS (alcance unificado + 5 reportes operativos).
+COM-78: bloque REPORTES MUNICIPIO (getDashboardDistrital, getObservatorioPrecios,
+getCoberturaFocalizacion).
+COM-80: marcarInsumoPrincipal (PUT /ingredientes-admin/insumos/{id}/principal):
+marca el insumo canónico del ingrediente; el motor de costeo lo prefiere cuando
+tiene precio en la fecha. Ningún método existente se elimina ni se renombra.
+COM-86 (este archivo): getVentasHoy y getPadronStats aceptan parámetros opcionales
+`fecha` (YYYY-MM-DD) y `comedor_id` para filtrar ventas y estadísticas por
+fecha y comedor. Sin parámetros, comportamiento legacy (hoy, todos los comedores).
+*/
 const API_BASE = '/api/v1';
 
 /**
- * Parser defensivo de errores: si el cuerpo no es JSON, devuelve un mensaje legible.
- */
+Parser defensivo de errores: si el cuerpo no es JSON, devuelve un mensaje legible.
+*/
 const leerErrorSeguro = async (response, mensajePorDefecto) => {
     try {
         const data = await response.json();
@@ -76,7 +115,6 @@ export const api = {
             return { ok: false, status: 0, data: { detail: 'Error de conexión con el servidor.' } };
         }
     },
-
     // ==========================================
     // PARÁMETROS DINÁMICOS
     // ==========================================
@@ -85,7 +123,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener parámetros'));
         return response.json();
     },
-
     // ==========================================
     // COMEDORES (COM-21) Y CONTEXTO DE SELECCIÓN (COM-20)
     // ==========================================
@@ -170,7 +207,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al verificar la membresía'));
         return response.json();
     },
-
     // ==========================================
     // DIRECTIVOS DE COMEDOR (COM-39)
     // ==========================================
@@ -196,11 +232,9 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al aplicar los cambios de directivos'));
         return response.json();
     },
-
     // ==========================================
-    // GESTIÓN DE INGREDIENTES (COM-37 v1 + COM-37 v5) — exclusivo Admin de Sistemas
+    // GESTIÓN DE INGREDIENTES (COM-37 v1/v5/v6/v8 + COM-57 + COM-68 + COM-80) — exclusivo Admin de Sistemas
     // ==========================================
-    // --- Ingredientes (CRUD sin borrado) ---
     getIngredientesAdmin: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/ingredientes-admin?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener ingredientes'));
@@ -224,8 +258,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al actualizar el ingrediente'));
         return response.json();
     },
-
-    // --- COM-37 v5: Sección B: emparejamiento ingrediente <-> insumo ---
     getInsumosDelIngrediente: async (ingredienteId, usuarioSolicitanteId, fecha) => {
         const params = new URLSearchParams({ usuario_solicitante_id: String(usuarioSolicitanteId) });
         if (fecha) params.append('fecha', fecha);
@@ -275,8 +307,15 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al desvincular el insumo'));
         return response.json();
     },
-
-    // --- COM-37 v5: Sección C: equivalencias unidad de uso -> gramos ---
+    marcarInsumoPrincipal: async (insumoId, usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/insumos/${insumoId}/principal`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ usuario_solicitante_id: usuarioSolicitanteId })
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al marcar el insumo principal'));
+        return response.json();
+    },
     getEquivalencias: async (ingredienteId, usuarioSolicitanteId, insumoId) => {
         const params = new URLSearchParams({ usuario_solicitante_id: String(usuarioSolicitanteId) });
         if (insumoId) params.append('insumo_id', insumoId);
@@ -309,8 +348,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al desactivar la equivalencia'));
         return response.json();
     },
-
-    // --- COM-37 v5: Sección D: precios manuales POR INSUMO ---
     getPreciosManualesInsumo: async (insumoId, usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/ingredientes-admin/insumos/${insumoId}/precios-manuales?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener precios del insumo'));
@@ -341,8 +378,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al desactivar el precio manual'));
         return response.json();
     },
-
-    // --- COM-37 v5: re-emparejado de insumos huérfanos ---
     reemparejarInsumos: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/ingredientes-admin/reemparejar-insumos?usuario_solicitante_id=${usuarioSolicitanteId}`, {
             method: 'POST'
@@ -350,8 +385,34 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al re-emparejar insumos'));
         return response.json();
     },
-
-    // --- LEGACY COM-37 v1: precios manuales POR INGREDIENTE (fallback de resolución) ---
+    getDuplicadosIngredientes: async (usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/duplicados?usuario_solicitante_id=${usuarioSolicitanteId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al detectar duplicados'));
+        return response.json();
+    },
+    getObsoletosIngredientes: async (usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/obsoletos?usuario_solicitante_id=${usuarioSolicitanteId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al listar sinónimos obsoletos'));
+        return response.json();
+    },
+    fusionarIngrediente: async (destinoId, data) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/${destinoId}/fusionar`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al fusionar ingredientes'));
+        return response.json();
+    },
+    reactivarIngrediente: async (ingredienteId, data) => {
+        const response = await fetch(`${API_BASE}/ingredientes-admin/${ingredienteId}/reactivar`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al reactivar el ingrediente'));
+        return response.json();
+    },
     getPreciosManuales: async (ingredienteId, usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/ingredientes-admin/${ingredienteId}/precios-manuales?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener precios manuales'));
@@ -373,7 +434,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al desactivar el precio manual'));
         return response.json();
     },
-
     // ==========================================
     // GRUPOS, PRIVILEGIOS Y ROLES TEMPORALES (COM-22 / COM-23)
     // ==========================================
@@ -458,7 +518,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al revocar el rol temporal'));
         return response.json();
     },
-
     // ==========================================
     // PERMISOS POR VISTAS (COM-25)
     // ==========================================
@@ -486,9 +545,8 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener sus módulos permitidos'));
         return response.json();
     },
-
     // ==========================================
-    // USUARIOS: FLUJO CRUD POR PERFIL (COM-23 / COM-26 / COM-38)
+    // USUARIOS: FLUJO CRUD POR PERFIL (COM-23 / COM-26 / COM-38 / COM-56)
     // ==========================================
     getUsuarios: async (params = {}) => {
         const qs = new URLSearchParams(params).toString();
@@ -542,7 +600,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al desbloquear por intentos'));
         return response.json();
     },
-    // COM-38: reseteo/cambio de contraseña de CUALQUIER usuario por Admin de Sistemas.
     resetearClaveUsuario: async (usuarioId, data) => {
         const response = await fetch(`${API_BASE}/usuarios/${usuarioId}/reset-clave`, {
             method: 'POST',
@@ -566,7 +623,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al actualizar la política'));
         return response.json();
     },
-
     // ==========================================
     // MUNICIPALIDADES (COM-23)
     // ==========================================
@@ -609,7 +665,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al buscar municipalidades'));
         return response.json();
     },
-
     // ==========================================
     // UBICACIÓN GEOGRÁFICA (COM-27)
     // ==========================================
@@ -633,7 +688,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener municipalidades'));
         return response.json();
     },
-
     // ==========================================
     // CLUSTERING K-MEANS DEL RECETARIO (COM-5 / COM-5 v4)
     // ==========================================
@@ -681,7 +735,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al guardar la configuración de proteínas'));
         return response.json();
     },
-
     // ==========================================
     // PANEL DE GRÁFICOS DE MACHINE LEARNING (COM-5 v4 / COM-8 v7)
     // ==========================================
@@ -705,7 +758,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar el gráfico del Greedy Search'));
         return response.json();
     },
-
     // ==========================================
     // PROPUESTAS DE MENÚ SEMANAL (COM-8)
     // ==========================================
@@ -742,9 +794,115 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el detalle del menú'));
         return response.json();
     },
-
     // ==========================================
-    // RECETAS
+    // REPORTES DE GESTIÓN (COM-50 / HU-10) — alcances por perfil (v3)
+    // ==========================================
+    getAlcanceReportes: async (usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/reportes-gestion/alcance?usuario_solicitante_id=${usuarioSolicitanteId}`);
+        if (!response.ok) {
+            const err = new Error(await leerErrorSeguro(response, 'Error al obtener el alcance de reportería'));
+            err.status = response.status;
+            throw err;
+        }
+        return response.json();
+    },
+    getReporteGestion: async (params = {}) => {
+        const qs = new URLSearchParams();
+        if (params.usuario_solicitante_id) qs.append('usuario_solicitante_id', params.usuario_solicitante_id);
+        if (params.nivel) qs.append('nivel', params.nivel);
+        if (params.comedor_id) qs.append('comedor_id', params.comedor_id);
+        if (params.zona) qs.append('zona', params.zona);
+        if (params.candidata_id) qs.append('candidata_id', params.candidata_id);
+        if (params.presupuesto_id) qs.append('presupuesto_id', params.presupuesto_id);
+        const response = await fetch(`${API_BASE}/reportes-gestion/resumen?${qs.toString()}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el reporte de gestión'));
+        return response.json();
+    },
+    getPlanesGestion: async (comedorId, usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/reportes-gestion/planes?comedor_id=${comedorId}&usuario_solicitante_id=${usuarioSolicitanteId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener los planes disponibles'));
+        return response.json();
+    },
+    // ==========================================
+    // SUBSIDIO DE VÍVERES (COM-59A + COM-69)
+    // ==========================================
+    getSubsidioMes: async (params) => {
+        const qs = new URLSearchParams();
+        qs.append('comedor_id', params.comedor_id);
+        qs.append('anio', params.anio);
+        qs.append('mes', params.mes);
+        qs.append('usuario_solicitante_id', params.usuario_solicitante_id);
+        const response = await fetch(`${API_BASE}/subsidio?${qs.toString()}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el subsidio del mes'));
+        return response.json();
+    },
+    registrarSubsidio: async (data) => {
+        const response = await fetch(`${API_BASE}/subsidio`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al registrar el subsidio'));
+        return response.json();
+    },
+    editarSubsidio: async (subsidioId, data) => {
+        const response = await fetch(`${API_BASE}/subsidio/${subsidioId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al editar el subsidio'));
+        return response.json();
+    },
+    eliminarSubsidio: async (subsidioId, usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/subsidio/${subsidioId}?usuario_solicitante_id=${usuarioSolicitanteId}`, {
+            method: 'DELETE'
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al eliminar el subsidio'));
+        return response.json();
+    },
+    getComedoresVisiblesSubsidio: async (usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/subsidio/comedores-visibles?usuario_solicitante_id=${usuarioSolicitanteId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al listar comedores visibles'));
+        return response.json();
+    },
+    getReporteSubsidio: async (params) => {
+        const qs = new URLSearchParams();
+        qs.append('usuario_solicitante_id', params.usuario_solicitante_id);
+        qs.append('comedor_id', params.comedor_id);
+        qs.append('anio', params.anio);
+        qs.append('mes', params.mes);
+        const response = await fetch(`${API_BASE}/subsidio/reporte-uso?${qs.toString()}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar el reporte de uso del subsidio'));
+        return response.json();
+    },
+    // ==========================================
+    // PRECIOS DE VENTA (COM-59A) — exclusivo Admin de Sistemas
+    // ==========================================
+    getPreciosVentaVigentes: async () => {
+        const response = await fetch(`${API_BASE}/precios-venta/vigentes`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener los precios vigentes'));
+        return response.json();
+    },
+    getHistorialPreciosVenta: async (params = {}) => {
+        const qs = new URLSearchParams();
+        if (params.usuario_solicitante_id) qs.append('usuario_solicitante_id', params.usuario_solicitante_id);
+        if (params.tipo_comensal) qs.append('tipo_comensal', params.tipo_comensal);
+        const response = await fetch(`${API_BASE}/precios-venta/historial?${qs.toString()}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el historial de precios'));
+        return response.json();
+    },
+    registrarPrecioVenta: async (data) => {
+        const response = await fetch(`${API_BASE}/precios-venta`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al registrar el precio'));
+        return response.json();
+    },
+    // ==========================================
+    // RECETAS (+ COM-48: componentes, categorías y alta de ingredientes; limpieza)
     // ==========================================
     getRecetas: async (params = {}) => {
         const queryString = new URLSearchParams(params).toString();
@@ -804,7 +962,30 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al eliminar ingrediente'));
         return response.json();
     },
-
+    getComponentesReceta: async () => {
+        const response = await fetch(`${API_BASE}/recetas/componentes`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener componentes'));
+        return response.json();
+    },
+    limpiarIngredientesReceta: async (recetaId) => {
+        const response = await fetch(`${API_BASE}/recetas/${recetaId}/ingredientes`, { method: 'DELETE' });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al limpiar los ingredientes de la receta'));
+        return response.json();
+    },
+    getCategoriasAlimentos: async () => {
+        const response = await fetch(`${API_BASE}/recetas/categorias`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener categorías'));
+        return response.json();
+    },
+    createIngredienteDesdeReceta: async (data) => {
+        const response = await fetch(`${API_BASE}/recetas/ingredientes-nuevos`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al crear el ingrediente'));
+        return response.json();
+    },
     // ==========================================
     // COSTOS Y CATÁLOGO
     // ==========================================
@@ -823,17 +1004,25 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener histórico'));
         return response.json();
     },
-
     // ==========================================
-    // PADRÓN Y ESTADÍSTICAS
+    // PADRÓN Y ESTADÍSTICAS (COM-86: filtros de fecha y comedor)
     // ==========================================
-    getPadronStats: async () => {
-        const response = await fetch(`${API_BASE}/padron/stats`);
+    getPadronStats: async (params = {}) => {
+        const qs = new URLSearchParams();
+        if (params.fecha) qs.append('fecha', params.fecha);
+        if (params.comedor_id) qs.append('comedor_id', params.comedor_id);
+        const suffix = qs.toString() ? `?${qs.toString()}` : '';
+        const response = await fetch(`${API_BASE}/padron/stats${suffix}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener estadísticas'));
         return response.json();
     },
-    getVentasHoy: async () => {
-        const response = await fetch(`${API_BASE}/padron/hoy`);
+    // COM-86: getVentasHoy acepta fecha y comedor_id opcionales
+    getVentasHoy: async (params = {}) => {
+        const qs = new URLSearchParams();
+        if (params.fecha) qs.append('fecha', params.fecha);
+        if (params.comedor_id) qs.append('comedor_id', params.comedor_id);
+        const suffix = qs.toString() ? `?${qs.toString()}` : '';
+        const response = await fetch(`${API_BASE}/padron/hoy${suffix}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener ventas'));
         return response.json();
     },
@@ -842,28 +1031,68 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener predicción'));
         return response.json();
     },
-
     // ==========================================
-    // COMENSALES Y VENTAS (POS)
+    // COMENSALES Y VENTAS (POS) — COM-62 v2 + COM-63
     // ==========================================
-    buscarComensal: async (doc) => fetch(`${API_BASE}/comensales/${doc}`),
-    registrarComensal: async (data) => fetch(`${API_BASE}/comensales/registrar`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data)
-    }),
-    registrarVenta: async (data) => fetch(`${API_BASE}/padron`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data)
-    }),
-    modificarVenta: async (id, data) => fetch(`${API_BASE}/padron/${id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data)
-    }),
-    eliminarVenta: async (id) => fetch(`${API_BASE}/padron/${id}`, { method: 'DELETE' }),
-
+    buscarComensalesPorNombre: async (q = '', limite = 8) => {
+        const response = await fetch(`${API_BASE}/comensales/buscar-por-nombre?q=${encodeURIComponent(q)}&limite=${limite}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al buscar comensales por nombre'));
+        return response.json();
+    },
+    editarComensal: async (comensalId, data) => {
+        const response = await fetch(`${API_BASE}/comensales/${comensalId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al editar el comensal'));
+        return response.json();
+    },
+    buscarComensal: async (doc) => {
+        const response = await fetch(`${API_BASE}/comensales/${doc}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Comensal no encontrado'));
+        return response.json();
+    },
+    registrarComensal: async (data) => {
+        const response = await fetch(`${API_BASE}/comensales/registrar`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al registrar el comensal'));
+        return response.json();
+    },
+    registrarVenta: async (data) => {
+        const response = await fetch(`${API_BASE}/padron`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al registrar la venta'));
+        return response.json();
+    },
+    modificarVenta: async (id, data) => {
+        const response = await fetch(`${API_BASE}/padron/${id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al modificar la venta'));
+        return response.json();
+    },
+    eliminarVenta: async (id) => {
+        const response = await fetch(`${API_BASE}/padron/${id}`, { method: 'DELETE' });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al eliminar la venta'));
+        return response.json();
+    },
+    cargaMasivaHistorica: async (formData) => {
+        const response = await fetch(`${API_BASE}/padron/carga-masiva`, {
+            method: 'POST',
+            body: formData
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al cargar archivo histórico'));
+        return response.json();
+    },
     // ==========================================
     // PRESUPUESTO
     // ==========================================
@@ -899,7 +1128,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al calcular presupuesto'));
         return response.json();
     },
-
     // ==========================================
     // PLANIFICACIONES GUARDADAS
     // ==========================================
@@ -913,11 +1141,12 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener detalle de planificación'));
         return response.json();
     },
-    getListaCompras: async (planificacionId, dia = null) => {
-        const url = dia
-            ? `${API_BASE}/planificaciones/${planificacionId}/lista-compras?dia=${dia}`
-            : `${API_BASE}/planificaciones/${planificacionId}/lista-compras`;
-        const response = await fetch(url);
+    getListaCompras: async (planificacionId, dia = null, comedorId = null) => {
+        const qs = new URLSearchParams();
+        if (dia) qs.append('dia', dia);
+        if (comedorId) qs.append('comedor_id', comedorId);
+        const suffix = qs.toString() ? `?${qs.toString()}` : '';
+        const response = await fetch(`${API_BASE}/planificaciones/${planificacionId}/lista-compras${suffix}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar lista de compras'));
         return response.json();
     },
@@ -925,5 +1154,88 @@ export const api = {
         const response = await fetch(`${API_BASE}/planificaciones/${id}`, { method: 'DELETE' });
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al eliminar planificación'));
         return response.json();
-    }
+    },
+    // ==========================================
+    // COM-43: SCRAPER SISAP (solo Admin de Sistemas)
+    // ==========================================
+    ejecutarScraper: async (data) => {
+        const response = await fetch(`${API_BASE}/scraper/ejecutar`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al lanzar el scraper'));
+        return response.json();
+    },
+    getEstadoScraper: async (usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/scraper/estado?usuario_solicitante_id=${usuarioSolicitanteId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al consultar el estado del scraper'));
+        return response.json();
+    },
+    getHistorialScraper: async (usuarioSolicitanteId, limite = 20) => {
+        const response = await fetch(`${API_BASE}/scraper/historial?usuario_solicitante_id=${usuarioSolicitanteId}&limite=${limite}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al consultar el historial del scraper'));
+        return response.json();
+    },
+    // ==========================================
+    // COM-77: REPORTES OPERATIVOS DEL COMEDOR (y alcance unificado COM-77/78)
+    // ==========================================
+    getAlcanceReportesAvanzados: async (usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/reportes-avanzados/alcance?usuario_solicitante_id=${usuarioSolicitanteId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener alcance de reportes'));
+        return response.json();
+    },
+    getReporteEstadoResultados: async (params) => {
+        const qs = new URLSearchParams({ usuario_solicitante_id: params.usuario_solicitante_id, comedor_id: params.comedor_id, anio: params.anio, mes: params.mes });
+        const response = await fetch(`${API_BASE}/reportes-avanzados/estado-resultados?${qs}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar estado de resultados'));
+        return response.json();
+    },
+    getReporteConsumoSubsidio: async (params) => {
+        const qs = new URLSearchParams({ usuario_solicitante_id: params.usuario_solicitante_id, comedor_id: params.comedor_id, anio: params.anio, mes: params.mes });
+        const response = await fetch(`${API_BASE}/reportes-avanzados/consumo-subsidio?${qs}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar tablero de subsidio'));
+        return response.json();
+    },
+    getReporteInteligenciaCompras: async (params) => {
+        const qs = new URLSearchParams({ usuario_solicitante_id: params.usuario_solicitante_id, comedor_id: params.comedor_id, anio: params.anio, mes: params.mes });
+        const response = await fetch(`${API_BASE}/reportes-avanzados/inteligencia-compras?${qs}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar inteligencia de compras'));
+        return response.json();
+    },
+    getReporteMermaDemanda: async (params) => {
+        const qs = new URLSearchParams({ usuario_solicitante_id: params.usuario_solicitante_id, comedor_id: params.comedor_id, anio: params.anio, mes: params.mes });
+        const response = await fetch(`${API_BASE}/reportes-avanzados/merma-demanda?${qs}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar análisis de merma'));
+        return response.json();
+    },
+    getReporteSemaforoNutricional: async (params) => {
+        const qs = new URLSearchParams({ usuario_solicitante_id: params.usuario_solicitante_id, comedor_id: params.comedor_id, anio: params.anio, mes: params.mes });
+        const response = await fetch(`${API_BASE}/reportes-avanzados/semaforo-nutricional?${qs}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar semáforo nutricional'));
+        return response.json();
+    },
+    // ==========================================
+    // COM-78: REPORTES MACRO DE MUNICIPIO (dashboard / observatorio / cobertura)
+    // ==========================================
+    getDashboardDistrital: async (params) => {
+        const qs = new URLSearchParams({ usuario_solicitante_id: params.usuario_solicitante_id, anio: params.anio, mes: params.mes });
+        if (params.zona) qs.append('zona', params.zona);
+        const response = await fetch(`${API_BASE}/reportes-municipio/dashboard?${qs}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar dashboard distrital'));
+        return response.json();
+    },
+    getObservatorioPrecios: async (params) => {
+        const qs = new URLSearchParams({ usuario_solicitante_id: params.usuario_solicitante_id, dias: params.dias || 90 });
+        const response = await fetch(`${API_BASE}/reportes-municipio/observatorio?${qs}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar observatorio de precios'));
+        return response.json();
+    },
+    getCoberturaFocalizacion: async (params) => {
+        const qs = new URLSearchParams({ usuario_solicitante_id: params.usuario_solicitante_id, anio: params.anio, mes: params.mes });
+        if (params.zona) qs.append('zona', params.zona);
+        const response = await fetch(`${API_BASE}/reportes-municipio/cobertura?${qs}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar cobertura y focalización'));
+        return response.json();
+    },
 };

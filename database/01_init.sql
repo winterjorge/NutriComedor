@@ -1,10 +1,28 @@
 -- =========================================================================
 -- Script de Creación de Tablas - NutriComedor OSB
 -- =========================================================================
+-- Historial:
+--  - Sprint 1/2: versión original.
+--  - COM-48 (este archivo): esquema multi-componente de recetas:
+--      * Nueva tabla recetas_componentes (catálogo extensible: Ensalada, Plato de
+--        fondo, Refresco, Fruta; permite agregar Sopa u otros sin tocar código).
+--      * receta_ingrediente gana componente_id (FK NOT NULL) y la unicidad pasa a ser
+--        (receta_id, ingrediente_id, componente_id, unidad_medida_id): el mismo
+--        ingrediente puede usarse en varios componentes con cantidades INDEPENDIENTES
+--        (ej. limón en Ensalada y en Refresco).
+--      * COM-48 Parte 2: componente_id tiene DEFAULT fn_componente_default()
+--        ('Plato de fondo'), de modo que los scripts de carga iniciales HISTÓRICOS
+--        (04_poblar_recetas.sql sin columna de componente) sigan funcionando sin
+--        modificarse: todas las líneas legacy caen en 'Plato de fondo', que es lo que
+--        eran las recetas hasta COM-48. La nutrición (6 campos) sigue POR RACIÓN en
+--        recetas_almuerzo; cantidades y precios se dividen entre raciones (COM-47 v2).
+--    Las definiciones anteriores (UNIQUE sin componente, columna sin default) quedan
+--    COMENTADAS por trazabilidad.
 DROP TABLE IF EXISTS padron_diario CASCADE;
 DROP TABLE IF EXISTS comensales CASCADE;
 DROP TABLE IF EXISTS presupuesto_semanal CASCADE;
 DROP TABLE IF EXISTS receta_ingrediente CASCADE;
+DROP TABLE IF EXISTS recetas_componentes CASCADE;
 DROP TABLE IF EXISTS recetas_almuerzo CASCADE;
 DROP TABLE IF EXISTS historial_precios CASCADE;
 DROP TABLE IF EXISTS insumos CASCADE;
@@ -58,12 +76,12 @@ CREATE TABLE historial_precios (
     UNIQUE(fecha, insumo_id, mercado)
 );
 
--- MODIFICACIÓN: Agregar campo raciones
+-- Tabla de recetas: nutrición POR RACIÓN (6 valores) y raciones para análisis por porción
 CREATE TABLE recetas_almuerzo (
     id SERIAL PRIMARY KEY,
     nombre VARCHAR(150) NOT NULL UNIQUE,
     descripcion TEXT,
-    raciones INT NOT NULL DEFAULT 4,  -- NUEVO: Número de raciones que produce la receta
+    raciones INT NOT NULL DEFAULT 4,
     viabilidad_historica BOOLEAN DEFAULT TRUE,
     hierro_mg NUMERIC(8, 2),
     proteina_g NUMERIC(8, 2),
@@ -74,14 +92,38 @@ CREATE TABLE recetas_almuerzo (
     fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP - INTERVAL '5 hours'
 );
 
--- CORRECCIÓN: receta_ingrediente ahora tiene unidad_medida_id
+-- COM-48: catálogo de componentes (categorías) dentro de una receta.
+-- Extensible: basta INSERTar 'Sopa' para habilitarlo en toda la aplicación.
+CREATE TABLE recetas_componentes (
+    id SERIAL PRIMARY KEY,
+    nombre VARCHAR(50) NOT NULL UNIQUE,
+    descripcion TEXT,
+    orden INT NOT NULL DEFAULT 0,
+    estado_activo BOOLEAN NOT NULL DEFAULT TRUE,
+    fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP - INTERVAL '5 hours'
+);
+
+-- COM-48 Parte 2: función de default para compatibilidad con cargas iniciales
+-- históricas (04_poblar_recetas.sql sin columna componente_id). Devuelve el id del
+-- componente 'Plato de fondo'; se evalúa al momento de cada INSERT.
+CREATE OR REPLACE FUNCTION fn_componente_default() RETURNS INT AS $$
+    SELECT id FROM recetas_componentes WHERE nombre = 'Plato de fondo';
+$$ LANGUAGE sql STABLE;
+
+-- COM-48: puente receta-ingrediente CON componente. Cada fila es independiente:
+-- el mismo ingrediente puede repetirse en componentes distintos con cantidades propias.
 CREATE TABLE receta_ingrediente (
     id SERIAL PRIMARY KEY,
     receta_id INT REFERENCES recetas_almuerzo(id) ON DELETE CASCADE,
     ingrediente_id INT REFERENCES ingredientes(id) ON DELETE CASCADE,
+    -- COM-48 Parte 2 (trazabilidad): definición anterior comentada:
+    -- componente_id INT NOT NULL REFERENCES recetas_componentes(id),
+    componente_id INT NOT NULL DEFAULT fn_componente_default() REFERENCES recetas_componentes(id),
     unidad_medida_id INT REFERENCES unidades_medida(id),
     cantidad_requerida NUMERIC(8, 2) NOT NULL,
-    UNIQUE(receta_id, ingrediente_id, unidad_medida_id)
+    -- COM-48 (trazabilidad): unicidad anterior COMENTADA (no distinguía componente):
+    -- UNIQUE(receta_id, ingrediente_id, unidad_medida_id)
+    UNIQUE(receta_id, ingrediente_id, componente_id, unidad_medida_id)
 );
 
 CREATE TABLE presupuesto_semanal (
@@ -140,7 +182,6 @@ CREATE TABLE padron_diario (
 ALTER TABLE presupuesto_semanal
 DROP COLUMN IF EXISTS comensales_diarios,
 DROP COLUMN IF EXISTS presupuesto_por_racion;
-
 ALTER TABLE presupuesto_semanal
 ADD COLUMN IF NOT EXISTS fecha_referencia DATE,
 ADD COLUMN IF NOT EXISTS costo_total_semana NUMERIC(10, 2),
@@ -165,5 +206,4 @@ CREATE TABLE IF NOT EXISTS planificacion_dia (
     recoleccion_proyectada NUMERIC(10, 2) NOT NULL,
     fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP - INTERVAL '5 hours'
 );
-
 CREATE INDEX IF NOT EXISTS idx_planificacion_dia_presupuesto ON planificacion_dia(presupuesto_semanal_id);

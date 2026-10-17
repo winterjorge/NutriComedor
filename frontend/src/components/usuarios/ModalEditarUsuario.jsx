@@ -5,16 +5,30 @@
  *           (municipalidades o comedores) mediante el endpoint detalle-flujo, y
  *           permite modificar datos, perfil/rol y alcance con las mismas reglas
  *           dinámicas de la creación (sin campo de contraseña).
- * Uso: Abierto por las vistas de gestión de usuarios pasando el `usuarioId` a editar;
- *      `onExito` al guardar. El backend valida la matriz de creación, el alcance y
- *      la unicidad de cargos permanentes (excluyendo al propio usuario editado).
- * Nota: Los nombres describen funcionalidad (no referencian tickets).
+ * Historial:
+ *  - COM-26: versión original (autocompletes de municipalidades y comedores).
+ *  - COM-56 (este archivo):
+ *      * Se AGREGA la cascada de ubicación geográfica (COM-27) precargada desde la
+ *        geografía anotada por el backend (detalle-flujo COM-56 refuerzo): para
+ *        Administrativos desde su municipalidad; para Directivo/Operativo desde el
+ *        primer comedor.
+ *      * ADMINISTRATIVO: se ELIMINA el autocomplete "Municipalidades de acceso"
+ *        (bloque COMENTADO); la municipalidad única es la de la cascada y se envía
+ *        como municipalidad_ids: [municipalidad_id]. Si el usuario tenía varias
+ *        municipalidades legacy, se muestra aviso y al guardar queda solo la elegida.
+ *      * DIRECTIVO/OPERATIVO: "Comedores de acceso" filtrado por la municipalidad de
+ *        la cascada (permitidos = alcance ∩ jurisdicción); al cambiar de municipalidad
+ *        se retiran comedores fuera de jurisdicción.
+ * Uso: Abierto por las vistas de gestión pasando `usuarioId`; `onExito` al guardar.
+ * Referencia: tickets COM-26 / COM-27 / COM-56 (solo trazabilidad).
  */
 import React, { useState, useEffect } from 'react';
-import { X, UserCog, Loader2, AlertCircle, ShieldCheck } from 'lucide-react';
+import { X, UserCog, Loader2, AlertCircle, ShieldCheck, MapPin, Building2, Store } from 'lucide-react';
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { AutocompleteBusqueda } from '../common/AutocompleteBusqueda';
+// COM-56: cascada de ubicación para editar el alcance geográfico
+import { SelectorUbicacionCascada } from '../common/SelectorUbicacionCascada';
 
 // Etiquetas legibles de los perfiles objetivo
 const ETIQUETAS_PERFIL = {
@@ -22,6 +36,14 @@ const ETIQUETAS_PERFIL = {
     ADMINISTRATIVO: 'Administrativo (Municipalidad)',
     DIRECTIVO: 'Directivo (Comedor)',
     OPERATIVO: 'Operativo (Comedor)',
+};
+
+// COM-56: estado inicial de la cascada
+const UBICACION_INICIAL = {
+    departamento_id: null,
+    provincia_id: null,
+    distrito_id: null,
+    municipalidad_id: null,
 };
 
 export const ModalEditarUsuario = ({ usuarioId, onClose, onExito }) => {
@@ -42,13 +64,15 @@ export const ModalEditarUsuario = ({ usuarioId, onClose, onExito }) => {
         apellido_materno: '',
         fecha_nacimiento: '',
     });
-
     // Perfil objetivo, grupo/rol y alcance seleccionado (precargados)
     const [perfilObjetivo, setPerfilObjetivo] = useState('');
     const [rolId, setRolId] = useState('');
+    // COM-56 (trazabilidad): multi-select de municipalidades conservado sin uso UI
     const [municipalidadesSel, setMunicipalidadesSel] = useState([]);
     const [comedoresSel, setComedoresSel] = useState([]);
-
+    // COM-56: cascada de ubicación precargada desde la geografía anotada
+    const [ubicacion, setUbicacion] = useState(UBICACION_INICIAL);
+    const [avisoMuniMultiple, setAvisoMuniMultiple] = useState('');
     const [error, setError] = useState('');
     const [guardando, setGuardando] = useState(false);
 
@@ -76,6 +100,32 @@ export const ModalEditarUsuario = ({ usuarioId, onClose, onExito }) => {
                 setRolId(det.rol_id ? String(det.rol_id) : '');
                 setMunicipalidadesSel(det.municipalidades || []);
                 setComedoresSel(det.comedores || []);
+
+                // COM-56: precarga de la cascada desde la geografía anotada por el backend
+                if (det.perfil_objetivo === 'ADMINISTRATIVO' && (det.municipalidades || []).length > 0) {
+                    const m0 = det.municipalidades[0];
+                    setUbicacion({
+                        departamento_id: m0.departamento_id || null,
+                        provincia_id: m0.provincia_id || null,
+                        distrito_id: m0.distrito_id || null,
+                        municipalidad_id: m0.id,
+                    });
+                    if (det.municipalidades.length > 1) {
+                        setAvisoMuniMultiple(
+                            `Este usuario tenía ${det.municipalidades.length} municipalidades; ` +
+                            `con la regla COM-56 al guardar conservará solo la seleccionada en la cascada.`
+                        );
+                    }
+                } else if ((det.perfil_objetivo === 'DIRECTIVO' || det.perfil_objetivo === 'OPERATIVO')
+                    && (det.comedores || []).length > 0) {
+                    const c0 = det.comedores[0];
+                    setUbicacion({
+                        departamento_id: c0.departamento_id || null,
+                        provincia_id: c0.provincia_id || null,
+                        distrito_id: c0.distrito_id || null,
+                        municipalidad_id: c0.municipalidad_id || null,
+                    });
+                }
             } catch (e) {
                 setErrorCarga(e.message);
             } finally {
@@ -87,6 +137,19 @@ export const ModalEditarUsuario = ({ usuarioId, onClose, onExito }) => {
 
     // Grupo del catálogo correspondiente al perfil objetivo elegido
     const grupoPerfil = contexto?.grupos?.find(g => g.perfil === perfilObjetivo) || null;
+    const esAdministrativo = perfilObjetivo === 'ADMINISTRATIVO';
+    const esComedor = perfilObjetivo === 'DIRECTIVO' || perfilObjetivo === 'OPERATIVO';
+    const requiereUbicacion = !!perfilObjetivo && perfilObjetivo !== 'ADMINISTRADOR_SISTEMA';
+
+    // COM-56: comedores permitidos = alcance del solicitante ∩ municipalidad de la cascada
+    const idsComedoresPermitidos = (() => {
+        const base = contexto?.comedores || [];
+        if (!esComedor) return base.map(c => c.id);
+        if (!ubicacion.municipalidad_id) return (detalle?.comedores || []).map(c => c.id);
+        return base
+            .filter(c => c.municipalidad_id === ubicacion.municipalidad_id)
+            .map(c => c.id);
+    })();
 
     // Al cambiar el perfil objetivo se resetean el rol y el alcance seleccionado
     const cambiarPerfil = (perfil) => {
@@ -94,22 +157,35 @@ export const ModalEditarUsuario = ({ usuarioId, onClose, onExito }) => {
         setRolId('');
         setMunicipalidadesSel([]);
         setComedoresSel([]);
+        setUbicacion(UBICACION_INICIAL);
+        setAvisoMuniMultiple('');
     };
 
-    // Ids permitidos según el alcance del creador (para filtrar el autocompletado)
-    const idsMunicipalidadesPermitidas = (contexto?.municipalidades || []).map(m => m.id);
-    const idsComedoresPermitidos = (contexto?.comedores || []).map(c => c.id);
-
-    const esAdministrativo = perfilObjetivo === 'ADMINISTRATIVO';
-    const esComedor = perfilObjetivo === 'DIRECTIVO' || perfilObjetivo === 'OPERATIVO';
+    // COM-56: al cambiar la municipalidad, retira comedores fuera de jurisdicción
+    const handleUbicacionChange = (nueva) => {
+        setUbicacion(nueva);
+        if (nueva.municipalidad_id !== ubicacion.municipalidad_id && comedoresSel.length) {
+            const permitidos = new Set(
+                (contexto?.comedores || [])
+                    .filter(c => c.municipalidad_id === nueva.municipalidad_id)
+                    .map(c => c.id)
+            );
+            const filtrados = comedoresSel.filter(c => permitidos.has(c.id));
+            if (filtrados.length !== comedoresSel.length) setComedoresSel(filtrados);
+        }
+    };
 
     const validar = () => {
         if (!form.documento_identidad.trim()) return 'El documento es obligatorio.';
         if (!form.nombres.trim()) return 'Los nombres son obligatorios.';
         if (!perfilObjetivo) return 'Seleccione el perfil del usuario.';
         if (!grupoPerfil || !rolId) return 'Seleccione el rol del usuario.';
-        if (esAdministrativo && municipalidadesSel.length === 0) {
-            return 'Debe seleccionar al menos una municipalidad para el perfil Administrativo.';
+        if (requiereUbicacion &&
+            (!ubicacion.departamento_id || !ubicacion.provincia_id || !ubicacion.distrito_id)) {
+            return 'Complete la ubicación geográfica (departamento, provincia y distrito).';
+        }
+        if (esAdministrativo && !ubicacion.municipalidad_id) {
+            return 'Seleccione la municipalidad en la cascada: el personal administrativo pertenece a una única municipalidad.';
         }
         if (esComedor && comedoresSel.length === 0) {
             return 'Debe seleccionar al menos un comedor para este perfil.';
@@ -137,7 +213,10 @@ export const ModalEditarUsuario = ({ usuarioId, onClose, onExito }) => {
                 perfil_objetivo: perfilObjetivo,
                 grupo_id: grupoPerfil.grupo_id,
                 rol_id: Number(rolId),
-                municipalidad_ids: esAdministrativo ? municipalidadesSel.map(m => m.id) : [],
+                // COM-56 (trazabilidad): antes multi-select de municipalidades:
+                // municipalidad_ids: esAdministrativo ? municipalidadesSel.map(m => m.id) : [],
+                // COM-56: municipalidad ÚNICA desde la cascada
+                municipalidad_ids: esAdministrativo ? [ubicacion.municipalidad_id] : [],
                 comedor_ids: esComedor ? comedoresSel.map(c => c.id) : [],
                 usuario_solicitante_id: usuario.id,
             });
@@ -161,7 +240,6 @@ export const ModalEditarUsuario = ({ usuarioId, onClose, onExito }) => {
                         <X size={22} />
                     </button>
                 </div>
-
                 <form onSubmit={handleSubmit} className="p-6 space-y-4 overflow-y-auto">
                     {errorCarga && (
                         <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-center gap-2 text-sm">
@@ -173,7 +251,11 @@ export const ModalEditarUsuario = ({ usuarioId, onClose, onExito }) => {
                             <AlertCircle size={16} /> {error}
                         </div>
                     )}
-
+                    {avisoMuniMultiple && (
+                        <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-xs flex items-center gap-2">
+                            <Building2 size={14} /> {avisoMuniMultiple}
+                        </div>
+                    )}
                     {cargando ? (
                         <div className="p-8 text-center text-emerald-600">
                             <Loader2 className="animate-spin mx-auto" size={28} />
@@ -199,14 +281,12 @@ export const ModalEditarUsuario = ({ usuarioId, onClose, onExito }) => {
                                         className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
                                 </div>
                             </div>
-
                             <div>
                                 <label className="block text-xs font-semibold text-slate-600 mb-1">Nombres *</label>
                                 <input type="text" value={form.nombres}
                                     onChange={(e) => setForm({ ...form, nombres: e.target.value })}
                                     className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
                             </div>
-
                             <div className="grid grid-cols-2 gap-3">
                                 <div>
                                     <label className="block text-xs font-semibold text-slate-600 mb-1">Apellido paterno</label>
@@ -221,14 +301,12 @@ export const ModalEditarUsuario = ({ usuarioId, onClose, onExito }) => {
                                         className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
                                 </div>
                             </div>
-
                             <div>
                                 <label className="block text-xs font-semibold text-slate-600 mb-1">Fecha de nacimiento</label>
                                 <input type="date" value={form.fecha_nacimiento}
                                     onChange={(e) => setForm({ ...form, fecha_nacimiento: e.target.value })}
                                     className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
                             </div>
-
                             {/* Perfil objetivo */}
                             <div>
                                 <label className="block text-xs font-semibold text-slate-600 mb-1">Perfil del usuario *</label>
@@ -245,7 +323,6 @@ export const ModalEditarUsuario = ({ usuarioId, onClose, onExito }) => {
                                     las de otros grupos no se alteran.
                                 </p>
                             </div>
-
                             {/* Rol del grupo correspondiente */}
                             {perfilObjetivo && grupoPerfil && (
                                 <div>
@@ -262,8 +339,27 @@ export const ModalEditarUsuario = ({ usuarioId, onClose, onExito }) => {
                                     </select>
                                 </div>
                             )}
+                            {/* COM-56: cascada de ubicación (personal no-admin) */}
+                            {requiereUbicacion && (
+                                <div>
+                                    <label className="flex items-center gap-1 text-xs font-semibold text-slate-600 mb-1">
+                                        <MapPin size={12} className="text-emerald-600" /> Ubicación geográfica *
+                                    </label>
+                                    <SelectorUbicacionCascada
+                                        valores={ubicacion}
+                                        onCambiar={handleUbicacionChange}
+                                        mostrarMunicipalidad={true}
+                                    />
+                                    {esAdministrativo && (
+                                        <p className="mt-1 text-[11px] text-slate-500 flex items-center gap-1">
+                                            <Building2 size={11} /> La municipalidad seleccionada es el vínculo único
+                                            del administrativo (COM-56).
+                                        </p>
+                                    )}
+                                </div>
+                            )}
 
-                            {/* Alcance: municipalidades (solo Administrativo) */}
+                            {/* COM-56 (trazabilidad): autocomplete "Municipalidades de acceso" COMENTADO.
                             {esAdministrativo && (
                                 <div>
                                     <label className="block text-xs font-semibold text-slate-600 mb-1">Municipalidades de acceso *</label>
@@ -279,11 +375,14 @@ export const ModalEditarUsuario = ({ usuarioId, onClose, onExito }) => {
                                     />
                                 </div>
                             )}
+                            */}
 
-                            {/* Alcance: comedores (Directivo y Operativo) */}
+                            {/* Alcance: comedores (Directivo y Operativo), COM-56 filtrado por jurisdicción */}
                             {esComedor && (
                                 <div>
-                                    <label className="block text-xs font-semibold text-slate-600 mb-1">Comedores de acceso *</label>
+                                    <label className="flex items-center gap-1 text-xs font-semibold text-slate-600 mb-1">
+                                        <Store size={12} className="text-emerald-600" /> Comedores de acceso *
+                                    </label>
                                     <AutocompleteBusqueda
                                         placeholder="Buscar comedor..."
                                         buscarFn={api.buscarComedores}
@@ -291,17 +390,19 @@ export const ModalEditarUsuario = ({ usuarioId, onClose, onExito }) => {
                                         onSeleccionar={(item) => setComedoresSel([...comedoresSel, item])}
                                         onQuitar={(item) => setComedoresSel(comedoresSel.filter(c => c.id !== item.id))}
                                         getLabel={(c) => c.nombre}
-                                        getSubLabel={(c) => `${c.distrito}, ${c.ciudad}`}
+                                        getSubLabel={(c) => `${c.distrito || ''}${c.ciudad ? ', ' + c.ciudad : ''}`}
                                         permitidos={idsComedoresPermitidos}
                                     />
                                     <p className="mt-1 text-[11px] text-slate-400 flex items-center gap-1">
                                         <ShieldCheck size={11} /> Los cargos Presidente, Tesorero y Secretario no pueden repetirse por comedor.
                                     </p>
+                                    <p className="mt-1 text-[11px] text-slate-500">
+                                        Solo se listan comedores de la municipalidad seleccionada y dentro de su alcance.
+                                    </p>
                                 </div>
                             )}
                         </>
                     )}
-
                     {/* Acciones */}
                     <div className="flex justify-end gap-3 pt-2">
                         <button type="button" onClick={onClose}
