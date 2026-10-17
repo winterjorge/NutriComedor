@@ -64,6 +64,9 @@ getCoberturaFocalizacion).
 COM-80 (este archivo): marcarInsumoPrincipal (PUT /ingredientes-admin/insumos/{id}/principal):
 marca el insumo canónico del ingrediente; el motor de costeo lo prefiere cuando
 tiene precio en la fecha. Ningún método existente se elimina ni se renombra.
+COM-86 (este archivo): getVentasHoy y getPadronStats aceptan parámetros opcionales
+`fecha` (YYYY-MM-DD) y `comedor_id` para filtrar ventas y estadísticas por
+fecha y comedor. Sin parámetros, comportamiento legacy (hoy, todos los comedores).
 */
 const API_BASE = '/api/v1';
 
@@ -304,10 +307,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al desvincular el insumo'));
         return response.json();
     },
-    // COM-80: marca el insumo como PRINCIPAL de su ingrediente (desmarca hermanos y
-    // hereda equivalencias de hermanos para las unidades de uso faltantes). El motor
-    // de costeo (optimizador / precios_insumos / lista de compras) lo prefiere cuando
-    // tiene precio en la fecha; si no, conserva el comportamiento legacy.
     marcarInsumoPrincipal: async (insumoId, usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/ingredientes-admin/insumos/${insumoId}/principal`, {
             method: 'PUT',
@@ -391,7 +390,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al detectar duplicados'));
         return response.json();
     },
-    // COM-57: sinónimos fusionados ([OBSOLETO]) con líneas/insumos atrapados
     getObsoletosIngredientes: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/ingredientes-admin/obsoletos?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al listar sinónimos obsoletos'));
@@ -406,9 +404,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al fusionar ingredientes'));
         return response.json();
     },
-    // COM-68: reactivar un sinónimo obsoleto (quita el prefijo [OBSOLETO] y lo
-    // devuelve al catálogo activo). El backend rechaza (400) si ya existe un
-    // ingrediente activo con el mismo nombre normalizado.
     reactivarIngrediente: async (ingredienteId, data) => {
         const response = await fetch(`${API_BASE}/ingredientes-admin/${ingredienteId}/reactivar`, {
             method: 'POST',
@@ -418,7 +413,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al reactivar el ingrediente'));
         return response.json();
     },
-    // LEGACY COM-37 v1: precios manuales por ingrediente (fallback de resolución)
     getPreciosManuales: async (ingredienteId, usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/ingredientes-admin/${ingredienteId}/precios-manuales?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener precios manuales'));
@@ -606,7 +600,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al desbloquear por intentos'));
         return response.json();
     },
-    // COM-38: reseteo/cambio de contraseña de CUALQUIER usuario por Admin de Sistemas.
     resetearClaveUsuario: async (usuarioId, data) => {
         const response = await fetch(`${API_BASE}/usuarios/${usuarioId}/reset-clave`, {
             method: 'POST',
@@ -833,7 +826,6 @@ export const api = {
     // ==========================================
     // SUBSIDIO DE VÍVERES (COM-59A + COM-69)
     // ==========================================
-    // COM-59A: líneas del subsidio del mes calendario con equivalencia en gramos.
     getSubsidioMes: async (params) => {
         const qs = new URLSearchParams();
         qs.append('comedor_id', params.comedor_id);
@@ -844,7 +836,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el subsidio del mes'));
         return response.json();
     },
-    // COM-59A: alta/actualización (upsert por período) de una línea de subsidio.
     registrarSubsidio: async (data) => {
         const response = await fetch(`${API_BASE}/subsidio`, {
             method: 'POST',
@@ -854,7 +845,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al registrar el subsidio'));
         return response.json();
     },
-    // COM-59A: edición de cantidad/unidad/observación de una línea existente.
     editarSubsidio: async (subsidioId, data) => {
         const response = await fetch(`${API_BASE}/subsidio/${subsidioId}`, {
             method: 'PUT',
@@ -864,7 +854,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al editar el subsidio'));
         return response.json();
     },
-    // COM-59A: baja de una línea del período.
     eliminarSubsidio: async (subsidioId, usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/subsidio/${subsidioId}?usuario_solicitante_id=${usuarioSolicitanteId}`, {
             method: 'DELETE'
@@ -872,15 +861,11 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al eliminar el subsidio'));
         return response.json();
     },
-    // COM-69: comedores cuyas lecturas de subsidio están permitidas al usuario
-    // (Admin: todos; Directivo: los suyos; municipal con módulo 'subsidio': su distrito).
     getComedoresVisiblesSubsidio: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/subsidio/comedores-visibles?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al listar comedores visibles'));
         return response.json();
     },
-    // COM-69: reporte de uso del subsidio por comedor y mes (stock vs consumo
-    // proyectado acumulado de las planificaciones del mes, con estados).
     getReporteSubsidio: async (params) => {
         const qs = new URLSearchParams();
         qs.append('usuario_solicitante_id', params.usuario_solicitante_id);
@@ -894,15 +879,11 @@ export const api = {
     // ==========================================
     // PRECIOS DE VENTA (COM-59A) — exclusivo Admin de Sistemas
     // ==========================================
-    // COM-59A: precio único vigente por tipo de comensal.
     getPreciosVentaVigentes: async () => {
         const response = await fetch(`${API_BASE}/precios-venta/vigentes`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener los precios vigentes'));
         return response.json();
     },
-    // COM-59A v2: historial de cambios de precio (auditoría). Envía
-    // usuario_solicitante_id (el backend v2 lo exige para el gate de Admin); acepta
-    // { usuario_solicitante_id, tipo_comensal? }.
     getHistorialPreciosVenta: async (params = {}) => {
         const qs = new URLSearchParams();
         if (params.usuario_solicitante_id) qs.append('usuario_solicitante_id', params.usuario_solicitante_id);
@@ -911,8 +892,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener el historial de precios'));
         return response.json();
     },
-    // COM-59A: registra un nuevo precio vigente (el anterior queda en historial y el
-    // parámetro legacy PRECIO_* se espeja para POS/consumidores antiguos).
     registrarPrecioVenta: async (data) => {
         const response = await fetch(`${API_BASE}/precios-venta`, {
             method: 'POST',
@@ -983,25 +962,21 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al eliminar ingrediente'));
         return response.json();
     },
-    // COM-48: catálogo activo de componentes de receta (Ensalada, Plato de fondo, ...)
     getComponentesReceta: async () => {
         const response = await fetch(`${API_BASE}/recetas/componentes`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener componentes'));
         return response.json();
     },
-    // COM-48: elimina TODAS las líneas de ingredientes de una receta (edición)
     limpiarIngredientesReceta: async (recetaId) => {
         const response = await fetch(`${API_BASE}/recetas/${recetaId}/ingredientes`, { method: 'DELETE' });
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al limpiar los ingredientes de la receta'));
         return response.json();
     },
-    // COM-48 v2: catálogo de categorías de alimentos (sub-formulario de nuevo ingrediente)
     getCategoriasAlimentos: async () => {
         const response = await fetch(`${API_BASE}/recetas/categorias`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener categorías'));
         return response.json();
     },
-    // COM-48 v2: crea un ingrediente de catálogo desde el modal de receta
     createIngredienteDesdeReceta: async (data) => {
         const response = await fetch(`${API_BASE}/recetas/ingredientes-nuevos`, {
             method: 'POST',
@@ -1030,15 +1005,24 @@ export const api = {
         return response.json();
     },
     // ==========================================
-    // PADRÓN Y ESTADÍSTICAS
+    // PADRÓN Y ESTADÍSTICAS (COM-86: filtros de fecha y comedor)
     // ==========================================
-    getPadronStats: async () => {
-        const response = await fetch(`${API_BASE}/padron/stats`);
+    getPadronStats: async (params = {}) => {
+        const qs = new URLSearchParams();
+        if (params.fecha) qs.append('fecha', params.fecha);
+        if (params.comedor_id) qs.append('comedor_id', params.comedor_id);
+        const suffix = qs.toString() ? `?${qs.toString()}` : '';
+        const response = await fetch(`${API_BASE}/padron/stats${suffix}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener estadísticas'));
         return response.json();
     },
-    getVentasHoy: async () => {
-        const response = await fetch(`${API_BASE}/padron/hoy`);
+    // COM-86: getVentasHoy acepta fecha y comedor_id opcionales
+    getVentasHoy: async (params = {}) => {
+        const qs = new URLSearchParams();
+        if (params.fecha) qs.append('fecha', params.fecha);
+        if (params.comedor_id) qs.append('comedor_id', params.comedor_id);
+        const suffix = qs.toString() ? `?${qs.toString()}` : '';
+        const response = await fetch(`${API_BASE}/padron/hoy${suffix}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener ventas'));
         return response.json();
     },
@@ -1050,13 +1034,11 @@ export const api = {
     // ==========================================
     // COMENSALES Y VENTAS (POS) — COM-62 v2 + COM-63
     // ==========================================
-    // COM-62 v2: autocompletado por nombre (excluye al Cliente Genérico).
     buscarComensalesPorNombre: async (q = '', limite = 8) => {
         const response = await fetch(`${API_BASE}/comensales/buscar-por-nombre?q=${encodeURIComponent(q)}&limite=${limite}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al buscar comensales por nombre'));
         return response.json();
     },
-    // COM-62 v2: edición de ficha (incluye completar/corregir DNI después).
     editarComensal: async (comensalId, data) => {
         const response = await fetch(`${API_BASE}/comensales/${comensalId}`, {
             method: 'PUT',
@@ -1066,13 +1048,11 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al editar el comensal'));
         return response.json();
     },
-    // Búsqueda exacta por documento (usada por TablaVentasHoy y flujos antiguos).
     buscarComensal: async (doc) => {
         const response = await fetch(`${API_BASE}/comensales/${doc}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Comensal no encontrado'));
         return response.json();
     },
-    // COM-62 v2: alta con documento OPCIONAL (sin DNI => '00000000', reutiliza ficha por nombre).
     registrarComensal: async (data) => {
         const response = await fetch(`${API_BASE}/comensales/registrar`, {
             method: 'POST',
@@ -1082,7 +1062,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al registrar el comensal'));
         return response.json();
     },
-    // COM-62 v2: registro de venta con manejo de errores visible.
     registrarVenta: async (data) => {
         const response = await fetch(`${API_BASE}/padron`, {
             method: 'POST',
@@ -1106,7 +1085,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al eliminar la venta'));
         return response.json();
     },
-    // COM-63: carga masiva de atenciones históricas desde CSV.
     cargaMasivaHistorica: async (formData) => {
         const response = await fetch(`${API_BASE}/padron/carga-masiva`, {
             method: 'POST',
@@ -1115,27 +1093,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al cargar archivo histórico'));
         return response.json();
     },
-    // COM-62 v2 (TRAZABILIDAD): versiones originales raw-fetch COMENTADAS. Eran la
-    // causa del bug "l.json is not a function": retornaban el Response crudo y los
-    // modales llamaban .json() sobre un objeto ya parseado (o viceversa). Se
-    // conservan aquí para auditoría del cambio:
-    // buscarComensal: async (doc) => fetch(`${API_BASE}/comensales/${doc}`),
-    // registrarComensal: async (data) => fetch(`${API_BASE}/comensales/registrar`, {
-    //     method: 'POST',
-    //     headers: { 'Content-Type': 'application/json' },
-    //     body: JSON.stringify(data)
-    // }),
-    // registrarVenta: async (data) => fetch(`${API_BASE}/padron`, {
-    //     method: 'POST',
-    //     headers: { 'Content-Type': 'application/json' },
-    //     body: JSON.stringify(data)
-    // }),
-    // modificarVenta: async (id, data) => fetch(`${API_BASE}/padron/${id}`, {
-    //     method: 'PUT',
-    //     headers: { 'Content-Type': 'application/json' },
-    //     body: JSON.stringify(data)
-    // }),
-    // eliminarVenta: async (id) => fetch(`${API_BASE}/padron/${id}`, { method: 'DELETE' }),
     // ==========================================
     // PRESUPUESTO
     // ==========================================
@@ -1184,9 +1141,6 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al obtener detalle de planificación'));
         return response.json();
     },
-    // COM-65: filtro opcional por día (1=Lunes, 7=Domingo).
-    // COM-69: `comedorId` opcional -> query comedor_id para que el backend aplique
-    // la cobertura del subsidio del mes (ítems SUBSIDIADOS en la lista).
     getListaCompras: async (planificacionId, dia = null, comedorId = null) => {
         const qs = new URLSearchParams();
         if (dia) qs.append('dia', dia);
@@ -1204,7 +1158,6 @@ export const api = {
     // ==========================================
     // COM-43: SCRAPER SISAP (solo Admin de Sistemas)
     // ==========================================
-    // Lanza una corrida web del scraper existente (día o rango); responde al instante.
     ejecutarScraper: async (data) => {
         const response = await fetch(`${API_BASE}/scraper/ejecutar`, {
             method: 'POST',
@@ -1214,13 +1167,11 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al lanzar el scraper'));
         return response.json();
     },
-    // Progreso en vivo del job + última fecha en BD + hueco de días faltantes.
     getEstadoScraper: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/scraper/estado?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al consultar el estado del scraper'));
         return response.json();
     },
-    // Historial auditado de corridas (scraper_corridas).
     getHistorialScraper: async (usuarioSolicitanteId, limite = 20) => {
         const response = await fetch(`${API_BASE}/scraper/historial?usuario_solicitante_id=${usuarioSolicitanteId}&limite=${limite}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al consultar el historial del scraper'));

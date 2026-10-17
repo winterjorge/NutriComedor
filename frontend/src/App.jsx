@@ -599,7 +599,7 @@ function AppContent() {
                 {activeTab === 'propuestas' && <GenerarPropuestasView />} {/* COM-8 */}
                 {activeTab === 'comedores' && <ComedoresView />}
                 {activeTab === 'grupos' && <GruposView />}
-                {activeTab === 'reportes' && <ReportesView />}
+                {activeTab === 'reportes' && <ReportesView onNavigate={setActiveTab} />}
                 {activeTab === 'catalog' && <CatalogView />}
                 {activeTab === 'pos' && <POSView />}
                 {activeTab === 'usuarios' && tieneModulosAdmin && (
