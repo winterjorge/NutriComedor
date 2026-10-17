@@ -1,31 +1,37 @@
 /**
 components/ingredients/GestionIngredientesView.jsx
 Objetivo: COM-37 v5/v6 + COM-57 + COM-68: pestaña "Gestión de Ingredientes" (exclusiva
-      Admin de Sistemas) sobre el modelo de DOS CONCEPTOS (ingrediente=uso / insumo=compra).
-      Secciones:
-        A) Catálogo de ingredientes (crear/editar sin borrado, con advertencia).
-        A2) COM-57: "Sinónimos obsoletos": ingredientes [OBSOLETO] (fusionados en
-            COM-37 v8) que aún conservan líneas de receta o insumos atrapados;
-            selector de ingrediente activo de destino + botón "Migrar" con
-            confirmación (reutiliza POST /{destino}/fusionar, que desde COM-57
-            acepta orígenes obsoletos). Al migrar, las recetas heredan precios y
-            el prefijo [OBSOLETO] deja de aparecer en el recetario.
-            COM-68: botón "Reactivar" (devuelve un canónico genérico al catálogo
-            activo quitándole el prefijo, con confirmación) y filtro
-            "Mostrar solo con referencias atrapadas" (default activado) para
-            ocultar el ruido de obsoletos vacíos.
-        B) Emparejamiento ingrediente<->insumo con precio vigente hoy y fuente.
-        C) Equivalencias unidad de USO -> gramos (CRUD + desactivar).
-        D) Precios manuales POR INSUMO (períodos con vigencia opcional).
+Admin de Sistemas) sobre el modelo de DOS CONCEPTOS (ingrediente=uso / insumo=compra).
+Secciones:
+A) Catálogo de ingredientes (crear/editar sin borrado, con advertencia).
+A2) COM-57: "Sinónimos obsoletos": ingredientes [OBSOLETO] (fusionados en
+COM-37 v8) que aún conservan líneas de receta o insumos atrapados;
+selector de ingrediente activo de destino + botón "Migrar" con
+confirmación (reutiliza POST /{destino}/fusionar, que desde COM-57
+acepta orígenes obsoletos). Al migrar, las recetas heredan precios y
+el prefijo [OBSOLETO] deja de aparecer en el recetario.
+COM-68: botón "Reactivar" (devuelve un canónico genérico al catálogo
+activo quitándole el prefijo, con confirmación) y filtro
+"Mostrar solo con referencias atrapadas" (default activado) para
+ocultar el ruido de obsoletos vacíos.
+B) Emparejamiento ingrediente <-> insumo con precio vigente hoy y fuente.
+C) Equivalencias unidad de USO -> gramos (CRUD + desactivar).
+D) Precios manuales POR INSUMO (períodos con vigencia opcional).
 Historial:
 COM-37 v5: vista original de dos secciones (emparejamiento + precios manuales).
 COM-37 v6: scroll automático al panel, precio por unidad de compra hoy, precarga
 de períodos en Sección D.
 COM-57: sección A2 de sinónimos obsoletos con migración asistida.
-COM-68 (este archivo): reactivación de obsoletos desde UI + filtro de ruido.
+COM-68: reactivación de obsoletos desde UI + filtro de ruido.
+COM-79 (este archivo): FIX del bug de validación HTML5 al capturar precios.
+Los inputs de precio usaban min="0.01" step="0.10", lo que hacía que valores
+enteros como 20 fueran inválidos (el navegador sugería 19.91 y 20.01).
+Se cambia a min="0" step="0.01" en el modal de insumo manual y en Sección D,
+y se agrega validación cliente de precio > 0 en submitInsumoManual y
+submitPer (min="0" permitiría enviar 0 al backend).
 Nada existente se elimina; lo ajustado queda comentado por trazabilidad.
 Uso: Montada por App.jsx en la pestaña "Gestión de Ingredientes".
-Referencia: tickets COM-37 / COM-57 / COM-68 (solo trazabilidad).
+Referencia: tickets COM-37 / COM-57 / COM-68 / COM-79 (solo trazabilidad).
 */
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
@@ -49,6 +55,7 @@ export const GestionIngredientesView = () => {
     const { usuario } = useAuth();
     // COM-37 v6: referencia del panel para scroll automático al seleccionar ingrediente
     const panelRef = useRef(null);
+
     // ===== Sección A: catálogo =====
     const [ingredientes, setIngredientes] = useState([]);
     const [unidades, setUnidades] = useState([]);
@@ -56,23 +63,28 @@ export const GestionIngredientesView = () => {
     const [error, setError] = useState('');
     const [exito, setExito] = useState('');
     const [reemparejando, setReemparejando] = useState(false);
+
     // ===== COM-57: sinónimos obsoletos y migración =====
     const [obsoletos, setObsoletos] = useState([]);
     const [cargandoObs, setCargandoObs] = useState(false);
     const [destinoObs, setDestinoObs] = useState({});      // { origen_id: destino_id (string) }
     const [confMigracion, setConfMigracion] = useState(null); // { origen, destinoId }
     const [migrandoObs, setMigrandoObs] = useState(false);
+
     // ===== COM-68: reactivación de obsoletos + filtro de ruido =====
     const [confReactivar, setConfReactivar] = useState(null); // obs a reactivar
     const [reactivando, setReactivando] = useState(false);
     const [soloConReferencias, setSoloConReferencias] = useState(true);
+
     // Modal crear/editar ingrediente
     const [modalIng, setModalIng] = useState(null);
     const [formIng, setFormIng] = useState({ nombre: '', categoria_id: '', unidad_medida_id: '', peso_estimado_g: 100 });
     const [guardandoIng, setGuardandoIng] = useState(false);
     const [confEdicion, setConfEdicion] = useState(null);
+
     // ===== Ingrediente seleccionado para secciones B/C/D =====
     const [ingSel, setIngSel] = useState(null);
+
     // ===== Sección B: insumos del ingrediente =====
     const [insumos, setInsumos] = useState([]);
     const [cargandoInsumos, setCargandoInsumos] = useState(false);
@@ -86,12 +98,14 @@ export const GestionIngredientesView = () => {
         fecha_inicio: '', fecha_fin: '', observacion: '', equivalencias: [],
     });
     const [guardandoInsumo, setGuardandoInsumo] = useState(false);
+
     // ===== Sección C: equivalencias =====
     const [equivalencias, setEquivalencias] = useState([]);
     const [cargandoEq, setCargandoEq] = useState(false);
     const [formEq, setFormEq] = useState({ insumo_id: '', unidad_uso_id: '', gramos_por_unidad_uso: '', observacion: '' });
     const [eqEditId, setEqEditId] = useState(null);
     const [guardandoEq, setGuardandoEq] = useState(false);
+
     // ===== Sección D: precios manuales por insumo =====
     const [insumoPreciosSel, setInsumoPreciosSel] = useState('');
     const [periodos, setPeriodos] = useState([]);
@@ -372,14 +386,20 @@ export const GestionIngredientesView = () => {
 
     const submitInsumoManual = async (e) => {
         e.preventDefault();
-        setGuardandoInsumo(true);
         setErrorSeccion('');
+        // COM-79: validación cliente de precio (min="0" permitiría enviar 0 al backend)
+        const precio = Number(formInsumoManual.precio_por_unidad);
+        if (!formInsumoManual.precio_por_unidad || isNaN(precio) || precio <= 0) {
+            setErrorSeccion('El precio por unidad de compra debe ser un número mayor a 0.');
+            return;
+        }
+        setGuardandoInsumo(true);
         try {
             const res = await api.crearInsumoManual(ingSel.id, {
                 usuario_solicitante_id: usuario.id,
                 nombre: formInsumoManual.nombre.trim(),
                 unidad_medida_id: Number(formInsumoManual.unidad_medida_id),
-                precio_por_unidad: Number(formInsumoManual.precio_por_unidad),
+                precio_por_unidad: precio,
                 usar_rango: formInsumoManual.usar_rango,
                 fecha_inicio: formInsumoManual.usar_rango ? formInsumoManual.fecha_inicio : null,
                 fecha_fin: formInsumoManual.usar_rango ? (formInsumoManual.fecha_fin || null) : null,
@@ -466,12 +486,18 @@ export const GestionIngredientesView = () => {
     // ---------- Sección D: precios manuales por insumo ----------
     const submitPer = async (e) => {
         e.preventDefault();
-        setGuardandoPer(true);
         setErrorSeccion('');
+        // COM-79: validación cliente de precio (min="0" permitiría enviar 0 al backend)
+        const precio = Number(formPer.precio_por_unidad);
+        if (!formPer.precio_por_unidad || isNaN(precio) || precio <= 0) {
+            setErrorSeccion('El precio por unidad de compra debe ser un número mayor a 0.');
+            return;
+        }
+        setGuardandoPer(true);
         try {
             const payload = {
                 usuario_solicitante_id: usuario.id,
-                precio_por_unidad: Number(formPer.precio_por_unidad),
+                precio_por_unidad: precio,
                 usar_rango: formPer.usar_rango,
                 fecha_inicio: formPer.usar_rango ? formPer.fecha_inicio : null,
                 fecha_fin: formPer.usar_rango ? (formPer.fecha_fin || null) : null,
@@ -551,11 +577,13 @@ export const GestionIngredientesView = () => {
                     </button>
                 </div>
             </div>
+
             {error && (
                 <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-center gap-2 text-sm">
                     <AlertCircle size={16} /> {error}
                 </div>
             )}
+
             {/* ===== Sección A: catálogo de ingredientes ===== */}
             <div className="overflow-x-auto rounded-lg border border-slate-200">
                 <table className="w-full text-left border-collapse whitespace-nowrap text-sm">
@@ -609,6 +637,7 @@ export const GestionIngredientesView = () => {
                     </tbody>
                 </table>
             </div>
+
             {/* ===== COM-57 / COM-68: Sección A2 — Sinónimos obsoletos ===== */}
             <div className="bg-white border border-slate-200 rounded-xl p-5">
                 <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
@@ -707,6 +736,7 @@ export const GestionIngredientesView = () => {
                     </div>
                 )}
             </div>
+
             {/* ===== Panel del ingrediente seleccionado: secciones B, C y D ===== */}
             {ingSel && (
                 <div ref={panelRef} className="bg-white border border-emerald-300 rounded-xl p-5 space-y-6 shadow-sm">
@@ -732,11 +762,13 @@ export const GestionIngredientesView = () => {
                             </button>
                         </div>
                     </div>
+
                     {errorSeccion && (
                         <div className="p-2.5 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-center gap-2 text-xs">
                             <AlertCircle size={14} /> {errorSeccion}
                         </div>
                     )}
+
                     {/* ----- Sección B: insumos vinculados ----- */}
                     <div>
                         <p className="text-xs font-bold text-slate-700 mb-2 flex items-center gap-1"><Link2 size={13} /> Insumos vinculados (unidad de compra) y precio vigente hoy</p>
@@ -779,8 +811,8 @@ export const GestionIngredientesView = () => {
                                                     {ins.fuente_precio_hoy ? (
                                                         <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
                                                             ins.fuente_precio_hoy === 'MANUAL_PERIODO' ? 'bg-red-100 text-red-700'
-                                                            : ins.fuente_precio_hoy === 'SCRAPER_DIA' ? 'bg-emerald-100 text-emerald-700'
-                                                            : 'bg-amber-100 text-amber-700'}`}>
+                                                                : ins.fuente_precio_hoy === 'SCRAPER_DIA' ? 'bg-emerald-100 text-emerald-700'
+                                                                    : 'bg-amber-100 text-amber-700'}`}>
                                                             {ins.fuente_precio_hoy}
                                                         </span>
                                                     ) : (
@@ -814,6 +846,7 @@ export const GestionIngredientesView = () => {
                             </div>
                         )}
                     </div>
+
                     {/* ----- Sección C: equivalencias ----- */}
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
                         <div>
@@ -897,6 +930,7 @@ export const GestionIngredientesView = () => {
                             </div>
                         </form>
                     </div>
+
                     {/* ----- Sección D: precios manuales por insumo ----- */}
                     <div>
                         <p className="text-xs font-bold text-slate-700 mb-2 flex items-center gap-1"><Coins size={13} /> Precios manuales por insumo (unidad de compra)</p>
@@ -945,7 +979,10 @@ export const GestionIngredientesView = () => {
                                     <div className="grid grid-cols-2 gap-2">
                                         <div>
                                             <label className={labelCls}>Precio por unidad de compra</label>
-                                            <input type="number" min="0.01" step="0.10" value={formPer.precio_por_unidad}
+                                            {/* COM-79 FIX: antes min="0.01" step="0.10" rechazaba enteros como 20
+                                                (sugería 19.91/20.01). Con min="0" step="0.01" cualquier valor con
+                                                centavos es válido; el submit valida > 0. */}
+                                            <input type="number" min="0" step="0.01" value={formPer.precio_por_unidad}
                                                 onChange={(e) => setFormPer({ ...formPer, precio_por_unidad: e.target.value })}
                                                 className={inputCls} required />
                                         </div>
@@ -994,6 +1031,7 @@ export const GestionIngredientesView = () => {
                     </div>
                 </div>
             )}
+
             {/* ===== Modal crear/editar ingrediente ===== */}
             {modalIng && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
@@ -1048,6 +1086,7 @@ export const GestionIngredientesView = () => {
                     </div>
                 </div>
             )}
+
             {/* ===== Modal buscar insumo del scraper ===== */}
             {modalBuscarInsumo && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
@@ -1093,6 +1132,7 @@ export const GestionIngredientesView = () => {
                     </div>
                 </div>
             )}
+
             {/* ===== Modal crear insumo manual ===== */}
             {modalInsumoManual && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
@@ -1120,7 +1160,10 @@ export const GestionIngredientesView = () => {
                                 </div>
                                 <div>
                                     <label className={labelCls}>Precio por unidad de compra (S/)</label>
-                                    <input type="number" min="0.01" step="0.10" value={formInsumoManual.precio_por_unidad}
+                                    {/* COM-79 FIX: antes min="0.01" step="0.10" rechazaba enteros como 20
+                                        (el navegador sugería 19.91 y 20.01). Con min="0" step="0.01"
+                                        cualquier valor con centavos es válido; el submit valida > 0. */}
+                                    <input type="number" min="0" step="0.01" value={formInsumoManual.precio_por_unidad}
                                         onChange={(e) => setFormInsumoManual({ ...formInsumoManual, precio_por_unidad: e.target.value })}
                                         className={inputCls} required />
                                 </div>
@@ -1209,6 +1252,7 @@ export const GestionIngredientesView = () => {
                     </div>
                 </div>
             )}
+
             {/* Advertencia COM-37 ante edición de ingrediente */}
             <ModalConfirmacion
                 isOpen={!!confEdicion}
