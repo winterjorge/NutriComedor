@@ -759,16 +759,19 @@ def listar_insumos_del_ingrediente(
             ORDER BY ins.es_principal DESC, ins.origen, ins.nombre;
         """, (ingrediente_id,))
         filas = cur.fetchall()
-        precios_hoy = precios_por_gramo_por_insumo(cur, fecha_obj)
+        
+        # COM-86 FIX: Extraer los IDs de los insumos de este ingrediente para filtrar
+        # el cálculo de precios. Esto evita que precios_por_gramo_por_insumo intente
+        # predecir con Random Forest para TODOS los insumos del sistema (causa de 28s de demora).
+        insumo_ids = [f['id'] for f in filas]
+        precios_hoy = precios_por_gramo_por_insumo(cur, fecha_obj, insumo_ids=insumo_ids)
+        
         for f in filas:
             opc = precios_hoy.get(f['id'])
             f['precio_por_gramo_hoy'] = opc['ppg'] if opc else None
             f['fuente_precio_hoy'] = opc['fuente'] if opc else None
             f['detalle_precio_hoy'] = opc['detalle'] if opc else None
-            # COM-37 v6: precio legible en unidad de compra (S/ por Kg, L, und...)
-            f['precio_por_unidad_hoy'] = (
-                _precio_por_unidad_hoy(cur, f['id'], opc['fuente'], fecha_obj) if opc else None
-            )
+            f['precio_por_unidad_hoy'] = opc.get('precio_por_unidad') if opc else None
         return filas
     except HTTPException:
         raise
