@@ -13,8 +13,8 @@ COM-64: predicción de demanda con datos reales de padron_diario (pasa el cursor
 al motor de IA para entrenar con historial real ≥30 días).
 COM-64 v3: /padron/prediccion_demanda NULL-SAFE (sin_datos=True en vez de 500) y
 /padron/hoy con LEFT JOIN + COALESCE para no ocultar filas sin comensal vinculado.
-COM-64 v4 (este archivo): el endpoint de predicción transmite además los
-indicadores de calidad del motor: confianza_pct, n_muestras y r2 por tipo.
+COM-64 v4: el endpoint de predicción transmite además los indicadores de calidad
+del motor: confianza_pct, n_muestras y r2 por tipo.
 La predicción expuesta es la PURA del modelo (el motor ya no aplica pisos
 mínimos IA_MIN_/IA_FINDE_; esos parámetros quedan en BD sin uso activo).
 Trazabilidad: la respuesta v3 (solo pred[0..2] y sum(pred)) queda comentada.
@@ -69,13 +69,7 @@ class EditarComensalPOSInput(BaseModel):
 def predecir_demanda_diaria(fecha_str: str = None, db=Depends(get_db)):
     """
     COM-64 v4: predice la demanda diaria con datos reales de padron_diario y expone
-    la predicción PURA del modelo más sus indicadores de calidad:
-    - confianza_pct: nivel de confianza según muestras del día de semana.
-    - n_muestras: días históricos del mismo día de semana.
-    - r2: R² por tipo (Social/Afiliado/Normal) con validación cruzada.
-    Si el motor devuelve None (menos de 4 históricos del día de semana, o menos de
-    30 días totales), responde 200 con sin_datos=True y valores null: NUNCA 500
-    (el TypeError de v2 rompía el Promise.all de usePOS.js y vaciaba stats/ventas).
+    la predicción PURA del modelo más sus indicadores de calidad.
     """
     fecha_eval = datetime.strptime(fecha_str, "%Y-%m-%d").date() if fecha_str else date.today()
     # 1. Leer parámetros de IA desde la BD (COM-64 v4: se conservan por compatibilidad
@@ -441,8 +435,6 @@ def obtener_ventas_hoy(
             # Filtrar por comedor: JOIN padron_diario -> comensales -> usuario_comedor
             # Nota: padron_diario no tiene comedor_id directo; usamos la relación
             # comensal -> usuario_comedor para inferir el comedor.
-            # Alternativa: si todas las ventas del piloto son del mismo comedor,
-            # se puede usar un filtro directo.
             cur.execute("""
                 SELECT pd.*,
                        COALESCE(c.nombres, 'Carga masiva (sin comensal)') AS nombres,
