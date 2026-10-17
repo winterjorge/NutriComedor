@@ -8,10 +8,11 @@ COM-86 (este archivo):
   - Administrativo municipal: Comedores (con selector), Usuarios, Recetas, Planificaciones.
   - Directivo de comedor: Usuarios del comedor, Recetas, Planificaciones (sin Comedores).
   - Operativo de comedor: Recetas, Planificaciones (sin Comedores ni Usuarios).
-* Selector de comedor para Admin/Municipal (default: todos).
 * KPIs clickeables: Usuarios → tab 'usuarios', Recetas → tab 'recipes',
   Planificaciones → tab 'planificaciones', Comedores → tab 'comedores'.
 * onNavigate(prop) recibido desde App.jsx para cambiar de tab.
+* Ventas del día: usa getPadronStats() que devuelve totales agrupados por tipo
+  (Social/Afiliado/Normal/Cocinera) en lugar de getVentasHoy() que devuelve lista.
 Historial:
 Sprint 3/4: versión original (KPIs + ventas del día).
 COM-50 v1/v2: integración del panel ejecutivo (comedor único).
@@ -19,8 +20,8 @@ COM-50 v3: matriz de alcances completa, panel reactivo al `tipo_alcance` del bac
 y tabla agregada `por_comedor` en macro/zona.
 COM-77: segmento "Reportes operativos" que monta ReportesComedorView.
 COM-78: segmento "Supervisión distrital" que monta ReportesMunicipioView.
-COM-86 (este archivo): KPIs adaptativos por perfil, selector de comedor,
-navegación por clic en KPIs.
+COM-86 (este archivo): KPIs adaptativos por perfil, KPIs clickeables con navegación,
+fix de ventas del día usando getPadronStats() en lugar de getVentasHoy().
 Uso: Renderizado por App.jsx en la pestaña "Reportes" (módulo 'reportes').
 Recibe prop onNavigate(tabId) para cambiar de tab al hacer clic en KPIs.
 Referencia: tickets COM-50 / HU-10 / COM-77 / COM-78 / COM-86 (solo trazabilidad).
@@ -74,7 +75,7 @@ const KpiCard = ({ label, value, icon: Icon, color, onClick }) => (
 );
 
 export const ReportesView = ({ onNavigate }) => {
-  const { usuario } = useAuth();
+  const { usuario, seleccion } = useAuth();
   const esAdminSistema = usuario?.rol === 'Administrador Sistema';
 
   // COM-77/78: segmento activo y alcance avanzado
@@ -82,7 +83,7 @@ export const ReportesView = ({ onNavigate }) => {
   const [alcanceAv, setAlcanceAv] = useState(null);
   const [cargandoAlcanceAv, setCargandoAlcanceAv] = useState(true);
 
-  // COM-86: filtro de comedor
+  // COM-86: filtro de comedor (solo Admin/Municipal)
   const [comedorSel, setComedorSel] = useState('');
 
   // --- KPIs operativos (A) ---
@@ -93,7 +94,7 @@ export const ReportesView = ({ onNavigate }) => {
     usuarios: null,
     recetas: 0,
     planificaciones: 0,
-    ventasHoy: null
+    ventasHoy: { Social: 0, Afiliado: 0, Normal: 0, Cocinera: 0 }
   });
 
   // --- Alcance y panel ejecutivo (B) COM-50 v3 ---
@@ -108,37 +109,27 @@ export const ReportesView = ({ onNavigate }) => {
   const [cargandoReporte, setCargandoReporte] = useState(false);
   const [errorReporte, setErrorReporte] = useState('');
 
-  // COM-86: detectar perfil para visibilidad de KPIs
-  const [perfilNav, setPerfilNav] = useState(null);
+  // COM-86: detectar perfil para visibilidad de KPIs (usando seleccion.perfil y usuario.rol)
+  const perfilNav = useMemo(() => {
+    if (!usuario || !seleccion) return null;
+    if (seleccion.perfil === 'SISTEMA' || esAdminSistema) return 'SISTEMA';
+    if (seleccion.perfil === 'ADMINISTRATIVO') return 'MUNICIPAL';
+    // Para comedor, necesitamos verificar membresías (se hace en useEffect)
+    return 'COMEDOR';
+  }, [usuario, seleccion, esAdminSistema]);
 
+  // COM-86: determinar si es Directivo u Operativo (para perfil COMEDOR)
+  const [esDirectivo, setEsDirectivo] = useState(false);
   useEffect(() => {
-    if (!usuario) {
-      setPerfilNav(null);
-      return;
-    }
-    // COM-85: usar el contexto de selección del AuthContext si está disponible
-    const seleccion = usuario.seleccion || null;
-    if (seleccion?.perfil === 'SISTEMA' || usuario.rol === 'Administrador Sistema') {
-      setPerfilNav('SISTEMA');
-    } else if (seleccion?.perfil === 'ADMINISTRATIVO') {
-      setPerfilNav('MUNICIPAL');
-    } else if (seleccion?.perfil === 'COMEDOR') {
-      // Determinar si es Directivo u Operativo
-      api.getGruposDeUsuario(usuario.id).then(membresias => {
-        const esDirectivo = membresias.some(m => m.estado_activo && m.grupo === 'Directivo');
-        setPerfilNav(esDirectivo ? 'DIRECTIVO' : 'OPERATIVO');
-      }).catch(() => setPerfilNav('OPERATIVO'));
-    } else {
-      // Fallback: intentar detectar por membresías
-      api.getGruposDeUsuario(usuario.id).then(membresias => {
-        const esAdmin = membresias.some(m => m.estado_activo && m.grupo === 'Administrativo');
-        const esDirectivo = membresias.some(m => m.estado_activo && m.grupo === 'Directivo');
-        if (esAdmin) setPerfilNav('MUNICIPAL');
-        else if (esDirectivo) setPerfilNav('DIRECTIVO');
-        else setPerfilNav('OPERATIVO');
-      }).catch(() => setPerfilNav('OPERATIVO'));
-    }
-  }, [usuario]);
+    if (!usuario || perfilNav !== 'COMEDOR') return;
+    let vivo = true;
+    api.getGruposDeUsuario(usuario.id).then(membresias => {
+      if (!vivo) return;
+      const esDir = membresias.some(m => m.estado_activo && m.grupo === 'Directivo');
+      setEsDirectivo(esDir);
+    }).catch(() => setEsDirectivo(false));
+    return () => { vivo = false; };
+  }, [usuario, perfilNav]);
 
   // COM-77/78: alcance avanzado
   useEffect(() => {
@@ -176,12 +167,12 @@ export const ReportesView = ({ onNavigate }) => {
       setCargando(true);
       setError('');
       try {
-        // Ventas del día con filtros
-        const paramsVentas = {};
+        // COM-86: usar getPadronStats() en lugar de getVentasHoy() para obtener totales
+        const paramsStats = {};
         if (comedorSel && perfilNav !== 'SISTEMA') {
-          paramsVentas.comedor_id = comedorSel;
+          paramsStats.comedor_id = comedorSel;
         }
-        const ventasHoy = await api.getVentasHoy(paramsVentas).catch(() => null);
+        const statsVentas = await api.getPadronStats(paramsStats).catch(() => ({ Social: 0, Afiliado: 0, Normal: 0, Cocinera: 0 }));
 
         // Comedores (solo Admin/Municipal)
         let comedores = [];
@@ -189,14 +180,12 @@ export const ReportesView = ({ onNavigate }) => {
           comedores = await api.getComedores().catch(() => []);
         }
 
-        // Usuarios (Admin: todos; Directivo: del comedor)
+        // Usuarios (Admin: todos; Directivo: del comedor; Municipal: todos)
         let usuarios = null;
-        if (esAdminSistema) {
+        if (esAdminSistema || perfilNav === 'MUNICIPAL') {
           usuarios = await api.getUsuarios({ usuario_solicitante_id: usuario.id }).catch(() => []);
-        } else if (perfilNav === 'DIRECTIVO' && comedorSel) {
-          usuarios = await api.getUsuariosComedor(comedorSel).catch(() => []);
-        } else if (perfilNav === 'MUNICIPAL') {
-          usuarios = await api.getUsuarios({ usuario_solicitante_id: usuario.id }).catch(() => []);
+        } else if (esDirectivo && seleccion?.comedor_id) {
+          usuarios = await api.getUsuariosComedor(seleccion.comedor_id).catch(() => []);
         }
 
         // Recetas y Planificaciones (todos los perfiles)
@@ -213,7 +202,7 @@ export const ReportesView = ({ onNavigate }) => {
           usuarios: Array.isArray(usuarios) ? usuarios.length : null,
           recetas: totalRecetas,
           planificaciones: Array.isArray(planificaciones) ? planificaciones.length : 0,
-          ventasHoy
+          ventasHoy: statsVentas
         });
       } catch (e) {
         setError(e.message);
@@ -222,7 +211,7 @@ export const ReportesView = ({ onNavigate }) => {
       }
     };
     cargar();
-  }, [esAdminSistema, usuario?.id, comedorSel, perfilNav]);
+  }, [esAdminSistema, esDirectivo, usuario?.id, comedorSel, perfilNav, seleccion?.comedor_id]);
 
   // Alcance de reportería COM-50 v3
   useEffect(() => {
@@ -304,7 +293,7 @@ export const ReportesView = ({ onNavigate }) => {
 
   // Derivados de KPIs
   const ventas = kpis.ventasHoy || {};
-  const totalVentas = (ventas.social || 0) + (ventas.afiliado || 0) + (ventas.normal || 0);
+  const totalVentas = (ventas.Social || 0) + (ventas.Afiliado || 0) + (ventas.Normal || 0);
   const pctVenta = (v) => totalVentas > 0 ? Math.round((v / totalVentas) * 100) : 0;
 
   // COM-86: KPIs visibles según perfil
@@ -315,7 +304,7 @@ export const ReportesView = ({ onNavigate }) => {
       kpis.push({ label: 'Comedores registrados', value: kpis.comedores, icon: Store, color: 'emerald', tab: 'comedores' });
     }
     // Usuarios: Admin (todos), Municipal (todos), Directivo (del comedor)
-    if (perfilNav === 'SISTEMA' || perfilNav === 'MUNICIPAL' || perfilNav === 'DIRECTIVO') {
+    if (perfilNav === 'SISTEMA' || perfilNav === 'MUNICIPAL' || esDirectivo) {
       kpis.push({ label: 'Usuarios', value: kpis.usuarios === null ? '—' : kpis.usuarios, icon: Users, color: 'blue', tab: 'usuarios' });
     }
     // Recetas: todos
@@ -323,7 +312,7 @@ export const ReportesView = ({ onNavigate }) => {
     // Planificaciones: todos
     kpis.push({ label: 'Planificaciones guardadas', value: kpis.planificaciones, icon: ClipboardList, color: 'purple', tab: 'planificaciones' });
     return kpis;
-  }, [perfilNav, kpis]);
+  }, [perfilNav, esDirectivo, kpis]);
 
   // Derivados del reporte
   const resumen = reporte?.resumen || null;
@@ -423,9 +412,9 @@ export const ReportesView = ({ onNavigate }) => {
             ) : (
               <div className="space-y-3">
                 {[
-                  { label: 'Social', value: ventas.social || 0, color: 'bg-red-500' },
-                  { label: 'Afiliado', value: ventas.afiliado || 0, color: 'bg-blue-500' },
-                  { label: 'Normal', value: ventas.normal || 0, color: 'bg-emerald-500' },
+                  { label: 'Social', value: ventas.Social || 0, color: 'bg-red-500' },
+                  { label: 'Afiliado', value: ventas.Afiliado || 0, color: 'bg-blue-500' },
+                  { label: 'Normal', value: ventas.Normal || 0, color: 'bg-emerald-500' },
                 ].map(barra => (
                   <div key={barra.label}>
                     <div className="flex justify-between text-xs text-slate-600 mb-1">
