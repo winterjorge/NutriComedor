@@ -43,9 +43,9 @@ Referencia: tickets COM-37 / COM-49 / COM-75 / COM-80 (solo trazabilidad).
 """
 from precios_manuales import obtener_precio_manual_por_gramo  # fallback legacy v1
 
-==========================================
-CONVERSIONES ESTÁNDAR DE UNIDADES -> GRAMOS
-==========================================
+#==========================================
+#CONVERSIONES ESTÁNDAR DE UNIDADES -> GRAMOS
+#==========================================
 def gramos_por_unidad_estandar(abrev, tipo_magnitud, factor_a_base, peso_estimado_g):
     """
     Reglas estándar compartidas (réplica del optimizador Sprint 2):
@@ -85,9 +85,9 @@ def gramos_por_unidad_estandar(abrev, tipo_magnitud, factor_a_base, peso_estimad
         return float(factor_a_base or 1.0)
     return float(peso_estimado_g or 100.0)
 
-==========================================
-EQUIVALENCIAS DE UNIDAD DE USO (COM-37 v5)
-==========================================
+#==========================================
+#EQUIVALENCIAS DE UNIDAD DE USO (COM-37 v5)
+#==========================================
 def obtener_equivalencia(cur, ingrediente_id, insumo_id, unidad_uso_id):
     """Fila activa de ingredientes_equivalencias para el trío, o None."""
     cur.execute("""
@@ -120,9 +120,9 @@ def gramos_por_unidad_compra(insumo_abrev, tipo_magnitud, factor_a_base, peso_es
     """Gramos de 1 unidad de COMPRA del insumo (regla estándar sobre su unidad)."""
     return gramos_por_unidad_estandar(insumo_abrev, tipo_magnitud, factor_a_base, peso_estimado_g)
 
-==========================================
-PRECIOS POR GRAMO POR INSUMO EN UNA FECHA
-==========================================
+#==========================================
+#PRECIOS POR GRAMO POR INSUMO EN UNA FECHA
+#==========================================
 def _fecha_scraper_efectiva(cur, fecha):
     """
     COM-37 v5-fix: si la fecha pedida no tiene corrida del scraper, devuelve la última
@@ -295,9 +295,9 @@ def precios_por_gramo_por_insumo(cur, fecha, fallback_ultima_fecha=False):
                 }
     return out
 
-==========================================
-COM-75: DIAGNÓSTICO DE FUENTE DE PRECIO (para prompt de precio manual)
-==========================================
+#==========================================
+#COM-75: DIAGNÓSTICO DE FUENTE DE PRECIO (para prompt de precio manual)
+#==========================================
 def diagnosticar_fuente_precio(cur, insumo_id, fecha):
     """
     COM-75: devuelve {'fuente', 'disponible', 'detalle'} con la fuente que se usaría
@@ -356,9 +356,9 @@ def ingredientes_requieren_precio_manual(cur, fecha) -> list:
                 x['ingrediente'] = nombres.get(x['ingrediente_id'])
     return out
 
-==========================================
-MEJOR OPCIÓN POR INGREDIENTE (para motores y optimizador)
-==========================================
+#==========================================
+#MEJOR OPCIÓN POR INGREDIENTE (para motores y optimizador)
+#==========================================
 _COLUMNA_PRINCIPAL_CACHE = None
 
 
