@@ -50,7 +50,7 @@ COM-65: getListaCompras documenta el filtro opcional por día (la firma ya lo
 traía; se agrega el comentario de trazabilidad en PLANIFICACIONES).
 COM-68: reactivarIngrediente (POST /ingredientes-admin/{id}/reactivar): quita el
 prefijo [OBSOLETO] y devuelve el canónico al catálogo activo.
-COM-69 (este archivo): tres adiciones marcadas, ninguna línea existente se elimina:
+COM-69: tres adiciones marcadas, ninguna línea existente se elimina:
 * getListaCompras acepta `comedorId` opcional (query comedor_id) para que el
 backend aplique la cobertura del subsidio del mes (Solución B).
 * getComedoresVisiblesSubsidio (GET /subsidio/comedores-visibles): selector
@@ -61,7 +61,7 @@ COM-43: bloque SCRAPER SISAP (ejecutarScraper, getEstadoScraper, getHistorialScr
 COM-77: bloque REPORTES AVANZADOS (alcance unificado + 5 reportes operativos).
 COM-78: bloque REPORTES MUNICIPIO (getDashboardDistrital, getObservatorioPrecios,
 getCoberturaFocalizacion).
-COM-80 (este archivo): marcarInsumoPrincipal (PUT /ingredientes-admin/insumos/{id}/principal):
+COM-80: marcarInsumoPrincipal (PUT /ingredientes-admin/insumos/{id}/principal):
 marca el insumo canónico del ingrediente; el motor de costeo lo prefiere cuando
 tiene precio en la fecha. Ningún método existente se elimina ni se renombra.
 COM-86 (este archivo): getVentasHoy y getPadronStats aceptan parámetros opcionales
