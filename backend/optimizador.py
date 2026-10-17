@@ -29,6 +29,18 @@ Historial:
   insumos del ingrediente. Sin principal marcado, el comportamiento es idéntico
   a COM-49 v2 (mínimo costo). Cada línea del detalle expone 'insumo_es_principal'
   para auditoría del modal de Evaluar.
+- COM-84 (este archivo): FIX del falso "Costo incompleto" en el modal Evaluar.
+  Los contadores ingredientes_con_precio / ingredientes_sin_precio / precio_completo
+  se calculaban con `costo_parcial == 0`, pero costo_parcial está REDONDEADO a 2
+  decimales: líneas con precio real cuyo costo es menor a un céntimo (ej. 1 g de
+  sal yodada a S/ 0.0010/g = S/ 0.001 -> S/ 0.00) eran contadas como "sin precio",
+  mostrando el banner "Costo incompleto (N ingrediente(s) sin precio)" y dejando
+  precio_completo=False (la receta quedaba excluida de propuestas pese a estar
+  costeada). Ahora cada línea del detalle expone el flag `tiene_precio`
+  (True si hubo fuente de precio: SCRAPER_DIA/MANUAL_PERIODO/PREDICHO/
+  SCRAPER_ULTIMO/LEGACY_INGREDIENTE; False solo si mejor is None) y los contadores
+  y precio_completo usan ese flag. El costo total NO cambia (ya sumaba costo_crudo
+  sin redondeo). Ninguna clave existente se elimina ni renombra.
 """
 import os
 import psycopg2
@@ -114,6 +126,10 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
     COM-80: entre los insumos con precio de la línea, se PREFIERE al marcado
     es_principal=True (si lo hay y tiene precio); solo si no existe principal con
     precio se usa el de mínimo costo (comportamiento COM-49 v2).
+    COM-84: cada línea expone `tiene_precio` (presencia de fuente de precio) y los
+    contadores de completitud (ingredientes_con_precio / ingredientes_sin_precio /
+    precio_completo) se calculan con ese flag, NO con costo_parcial redondeado
+    (antes una línea de S/ 0.001 redondeada a S/ 0.00 contaba como "sin precio").
     """
     conn = None
     cur = None
@@ -286,7 +302,10 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
                     "error": "Sin insumos disponibles" if not insumos_rows else "Sin precios para esta fecha",
                     "es_prediccion": False,
                     "es_manual": False,
+                    # COM-80: conservado por compatibilidad
                     "insumo_es_principal": False,
+                    # COM-84: sin fuente de precio para esta línea
+                    "tiene_precio": False,
                 })
                 continue
 
@@ -329,6 +348,9 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
                 "confianza_prediccion": f"{mejor['confianza']}%" if es_prediccion else None,
                 # COM-80: auditoría de si la línea usó el insumo principal
                 "insumo_es_principal": bool(mejor.get('es_principal', False)),
+                # COM-84: esta línea SÍ tiene fuente de precio (aunque su costo
+                # redondeado sea S/ 0.00 por ser menor a un céntimo, ej. sal yodada)
+                "tiene_precio": True,
             })
 
         costo_por_racion = costo_total_receta / raciones_receta
@@ -343,11 +365,18 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
             "costo_total_racion_compra": round(costo_total_compra / raciones_receta, 2),
             "detalle_insumos": detalle_costos,
             "total_ingredientes": len(detalle_costos),
-            "ingredientes_con_precio": sum(1 for d in detalle_costos if d['costo_parcial'] > 0),
-            "ingredientes_sin_precio": sum(1 for d in detalle_costos if d['costo_parcial'] == 0),
+            # COM-84 (FIX): contadores de completitud basados en `tiene_precio`
+            # (presencia de fuente de precio), NO en costo_parcial redondeado.
+            # COM-49 (trazabilidad): cálculo anterior, comentado porque una línea
+            # con costo real < S/ 0.005 redondeaba a 0.00 y contaba como "sin precio":
+            #   "ingredientes_con_precio": sum(1 for d in detalle_costos if d['costo_parcial'] > 0),
+            #   "ingredientes_sin_precio": sum(1 for d in detalle_costos if d['costo_parcial'] == 0),
+            #   "precio_completo": sum(1 for d in detalle_costos if d['costo_parcial'] == 0) == 0,
+            "ingredientes_con_precio": sum(1 for d in detalle_costos if d['tiene_precio']),
+            "ingredientes_sin_precio": sum(1 for d in detalle_costos if not d['tiene_precio']),
             "ingredientes_predichos": sum(1 for d in detalle_costos if d.get('es_prediccion', False)),
             "ingredientes_manuales": sum(1 for d in detalle_costos if d.get('es_manual', False)),
-            "precio_completo": sum(1 for d in detalle_costos if d['costo_parcial'] == 0) == 0,
+            "precio_completo": sum(1 for d in detalle_costos if not d['tiene_precio']) == 0,
             "componentes": sorted(
                 {(d['componente_nombre'], d['componente_orden']) for d in detalle_costos},
                 key=lambda t: t[1]
