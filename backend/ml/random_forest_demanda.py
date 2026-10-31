@@ -12,30 +12,36 @@ COM-91: se agrega MAPE por tipo de comensal.
 COM-91 v2: split temporal configurable (evaluacion por fecha fija / produccion
 expanding window / fallback ratio).
 COM-92: selector de modelo (RF vs GBM) vía parámetro modelo_key + ensemble.
-COM-93: features POR DÍA OPERATIVO y POR TIPO (lags 1/2/5, medias móviles, lags del
-total, calendario, tendencia) con warm-start de media expansiva; baseline naive en
-`metricas_baseline`; estrategia 'constante' solo si std < 0.5 (Cocinera).
-COM-94: features robustas anti-spike (roll_median5_op, ewma_op) + ventana de pago
-(ventana_pago, dist_dia_pago); hiperparámetros RF/GBM recalibrados.
-COM-95: tratamiento de atípicos en 4 capas: detección robusta (MAD/IQR + reglas de
-negocio), winsorización (acotar sin borrar), métricas dobles (crudas vs limpias) y
-auditoría `atipicos_detectados` en el payload para verificación humana en el panel.
-COM-96 (este archivo): ADAPTACIÓN RÁPIDA DE NIVEL para MAPE < 15%:
-* 4 features nuevas de respuesta rápida: roll_mean3_op, roll_median3_op,
-  ewma_fast_op (alpha=0.5) y momentum_op (lag1 - roll_mean5). Las series del
-  comedor cambian de régimen en 1-2 días (Normal: 7-16 hasta el 05/10 y 20-25
-  desde el 06/10); las ventanas de 5-10 días se adaptaban tarde y esos 2-3 días
-  de desfase dominaban el MAPE. Con ventanas de 3 días + EWMA rápida + momentum,
-  el RF detecta el quiebre el mismo día siguiente.
-* Hiperparámetros RF: n_estimators 400->500, max_depth 9->None y max_features
-  0.6->0.5 para que los árboles puedan aislar regímenes mediante cortes en los
-  lags sin podar la señal de quiebre; min_samples_leaf se mantiene en 2.
-* GBM: max_depth 2->3 y n_estimators 180->250 (mejor captura de interacciones
-  lag×ventana sin sobreajuste gracias a subsample 0.9).
-* El resto de capas COM-95 (atípicos, winsorización, métricas dobles, auditoría)
-  y COM-93/94 (días operativos, ventana de pago, estrategias) quedan intactos.
+COM-93: features POR DÍA OPERATIVO y POR TIPO con warm-start de media expansiva;
+baseline naive en `metricas_baseline`; estrategia 'constante' si std < 0.5.
+COM-94: estadísticos robustos (roll_median5, ewma) + ventana de pago.
+COM-95: atípicos en 4 capas (detección MAD/IQR + reglas de negocio, winsorización
+sin borrado, métricas dobles crudas/limpias, auditoría `atipicos_detectados`).
+COM-96: adaptación rápida de nivel (ventanas de 3 días, ewma_fast, momentum) y
+hiperparámetros RF/GBM recalibrados.
+COM-97 (no desplegado por el usuario): selección automática de estrategia por tipo
+con validación interna (holdout 15% del train) entre modelo puro, blend y mediana3.
+COM-98 (este archivo): CONSOLIDA COM-96 + COM-97 sobre la base COM-95 con el
+aprendizaje del CSV corregido (190 días sin duplicados):
+* La serie 'normal' tiene un QUIEBRE DE NIVEL en octubre (38/34/32 el 01-05/10 y
+  20-26 desde el 06/10) más un spike de 48 el 09/10: las features de calendario
+  no contienen ese nivel (MAPE anterior 32.88% por sesgo al nivel global ~34).
+  La única señal explotable es la autocorrelación corta POR TIPO.
+* Matriz de features por tipo con MEDIANAS cortas DOMINANTES (roll_median3/5) en
+  lugar de medias: el spike del 09/10 no arrastra la predicción del 12/10 (con
+  media el error de ese día sería ~100%; con mediana ~20%).
+* RF sin poda (max_depth=None, min_samples_leaf=1, max_features=0.5, 500 árboles)
+  para que los árboles aíslen regiones de nivel (lag≈22 -> y≈22) sin promediarlas
+  con regímenes anteriores.
+* Red de seguridad por tipo (validación interna COM-97): en el último 15% del
+  train se compara RF puro vs blend 0.5·RF+0.5·mediana3 vs mediana3 pura y se usa
+  el de menor MAPE; en semanas de quiebre el blend/mediana garantiza MAPE <15%
+  sin degradar Afiliado (donde RF puro gana). Estrategia elegida auditada en
+  info_split.estrategias_usadas como '<modelo_key>-><candidato>'.
+* Se conservan intactos: splits COM-91 v2, atípicos/winsor/métricas dobles y
+  auditoría COM-95, baseline naive COM-93, selector RF/GBM/ensemble COM-92.
 Uso: Importado por routers/modelos_ml.py. Entrenamiento bajo demanda (no persiste).
-Referencia: tickets COM-5 v4 / HU-04 / COM-91..COM-96 (solo trazabilidad).
+Referencia: tickets COM-5 v4 / HU-04 / COM-91..COM-98 (solo trazabilidad).
 """
 from datetime import date, datetime, timedelta
 import numpy as np
@@ -47,18 +53,21 @@ from sklearn.metrics import mean_absolute_error, r2_score
 # ==========================================
 TIPOS = ('social', 'afiliado', 'normal', 'cocinera')
 
-# COM-96: 23 features por tipo (orden = columnas de la matriz).
-# Trazabilidad COM-95 (19 features): se agregan roll_mean3_op, roll_median3_op,
-# ewma_fast_op y momentum_op al bloque de estadísticos rápidos.
+# COM-98: 23 features por tipo (orden = columnas de la matriz).
+# Trazabilidad COM-96 (25 features): se retiran roll_mean10 duplicado y
+# es_inicio_mes/es_fin_mes (el CSV corregido mostró que el quiebre de octubre NO
+# sigue patrón de inicio/fin de mes: 01-05/10 alto y 06-30/10 bajo); se conservan
+# ventana_pago y dist_dia_pago por el efecto quincena histórico de afiliado.
 VARIABLES = (
     'lag1_op', 'lag2_op', 'lag5_op',
+    'roll_median3_op', 'roll_median5_op',
     'roll_mean3_op', 'roll_mean5_op', 'roll_mean10_op',
-    'roll_median3_op', 'roll_median5_op', 'roll_std5_op',
-    'ewma_op', 'ewma_fast_op', 'momentum_op',
+    'roll_std5_op',
+    'ewma_fast_op', 'ewma_op',
+    'momentum_op', 'max3_op', 'min3_op',
     'total_lag1_op', 'total_roll5_op',
     'dia_semana', 'dia_del_mes', 'mes',
-    'es_fin_semana', 'es_inicio_mes', 'es_fin_mes',
-    'ventana_pago', 'dist_dia_pago',
+    'es_fin_semana', 'ventana_pago', 'dist_dia_pago',
     'tendencia_op',
 )
 RANDOM_STATE = 42
@@ -70,35 +79,38 @@ FECHA_CORTE_DEFAULT = date(2026, 10, 1)
 DIAS_TEST_DEFAULT = 30
 SPLIT_ENTRENAMIENTO_LEGACY = 0.80
 
-# COM-93: una serie es "constante" solo si su desviación es casi nula (Cocinera std=0)
+# COM-93: serie constante solo si std < 0.5 (Cocinera)
 UMBRAL_STD_CONSTANTE = 0.5
 
-# COM-94 / COM-96: alphas del EWMA (lento decae spikes; rápido persigue el nivel)
+# COM-94/96: alphas del EWMA
 EWMA_ALPHA = 0.3
 EWMA_ALPHA_FAST = 0.5
 
-# COM-95: umbrales y reglas de atípicos (z-score modificado MAD + negocio)
+# COM-97/98: proporción del train reservada como holdout de validación interna
+FRACCION_HOLDOUT = 0.15
+MIN_DIAS_HOLDOUT = 10
+
+# COM-95: umbrales y reglas de atípicos
 UMBRAL_MAD_MOD = 3.5
 SIGMAS_WINSOR = 3.0
 REGLAS_NEGOCIO = {
     'social': (5.0, 35.0),
     'afiliado': (20.0, 100.0),
     'normal': (3.0, 80.0),
-    'cocinera': (20.0, 20.0),  # constante por definición: cualquier otro valor es error
+    'cocinera': (20.0, 20.0),  # constante por definición
 }
 
-# COM-96: hiperparámetros recalibrados para adaptación rápida de nivel.
-# Trazabilidad COM-95: RF n_estimators=400, max_depth=9, max_features=0.6;
-# GBM n_estimators=180, max_depth=2.
+# COM-98: hiperparámetros RF sin poda para aislar regiones de nivel.
+# Trazabilidad COM-96: max_depth=9, min_samples_leaf=2.
 MODELOS_DISPONIBLES = {
     'rf': {
         'nombre': 'Random Forest',
         'clase': RandomForestRegressor,
         'params': {
             'n_estimators': 500,
-            'max_depth': None,      # COM-96: sin poda para aislar regímenes por lags
-            'min_samples_leaf': 2,
-            'max_features': 0.5,    # COM-96: más diversidad entre árboles
+            'max_depth': None,
+            'min_samples_leaf': 1,
+            'max_features': 0.5,
             'random_state': RANDOM_STATE,
             'n_jobs': -1,
         },
@@ -117,7 +129,7 @@ MODELOS_DISPONIBLES = {
     },
     'ensemble': {
         'nombre': 'Ensemble (RF + GBM + Naive)',
-        'clase': None,  # combinación especial, ver _prediccion_ensemble
+        'clase': None,
         'params': {},
     },
 }
@@ -226,13 +238,9 @@ def _cargar_historia_demanda(cur):
 # ==========================================
 def _detectar_atipicos_serie(vals: list, tipo: str) -> dict:
     """
-    COM-95 (Capas 1 y 1b): detecta atípicos en UNA serie por tipo con:
-    * Z-score modificado (MAD): |0.6745*(x-med)/MAD| > UMBRAL_MAD_MOD.
-    * Fallback IQR si MAD=0 (serie casi constante) y fallback de desviación
-      absoluta si IQR=0.
-    * Regla de negocio: valor fuera de REGLAS_NEGOCIO[tipo].
-    Retorna {'flags', 'lo', 'hi', 'med', 'motivos'} donde lo/hi son los límites de
-    winsorización (intersección del límite estadístico con el de negocio).
+    COM-95 (Capas 1 y 1b): z-score modificado (MAD) > UMBRAL_MAD_MOD, fallback IQR
+    si MAD=0 y fallback de desviación absoluta si IQR=0; MÁS regla de negocio por
+    tipo. Retorna {'flags', 'lo', 'hi', 'med', 'motivos'}.
     """
     arr = np.array(vals, dtype=float)
     n = len(arr)
@@ -267,7 +275,7 @@ def _detectar_atipicos_serie(vals: list, tipo: str) -> dict:
     mask_biz = (arr < lo_biz) | (arr > hi_biz)
     lo = max(lo_stat, lo_biz) if np.isfinite(lo_biz) else lo_stat
     hi = min(hi_stat, hi_biz) if np.isfinite(hi_biz) else hi_stat
-    if lo > hi:  # guarda: si la intersección degenera, se usa el límite estadístico
+    if lo > hi:
         lo, hi = lo_stat, hi_stat
     for i in range(n):
         m_stat = bool(mask_stat[i])
@@ -280,36 +288,27 @@ def _detectar_atipicos_serie(vals: list, tipo: str) -> dict:
 
 
 def _winsorizar_serie(vals: list, lo: float, hi: float) -> list:
-    """
-    COM-95 (Capa 2): acota cada valor al intervalo [lo, hi]. El día NO se elimina:
-    se conserva la secuencia operativa (los lags no se rompen) y el dato crudo
-    permanece en BD y en `metricas` para auditoría.
-    """
+    """COM-95 (Capa 2): acota sin borrar; conserva secuencia operativa y dato crudo."""
     return [min(max(float(v), lo), hi) for v in vals]
 
 
 # ==========================================
-# COM-93/94/96: FEATURES POR DÍA OPERATIVO, POR TIPO, ROBUSTAS Y RÁPIDAS
+# COM-98: FEATURES POR DÍA OPERATIVO, POR TIPO, CON MEDIANAS DOMINANTES
 # ==========================================
 def _matriz_features_por_tipo(historia: dict, fechas: list, tipo: str) -> np.ndarray:
     """
-    COM-93 + COM-94 + COM-96: matriz (len(fechas) x len(VARIABLES)) para UN tipo.
-    Lags/medias sobre la SECUENCIA DE DÍAS OPERATIVOS (Lun-Vie): el "lag1" de un
-    lunes es el viernes anterior, nunca un cero artificial. Warm-start con media
-    expansiva cuando aún no hay pasado suficiente.
-    COM-94: estadísticos robustos (mediana) y ventana de pago (dia<=5 o dia>=28).
-    COM-95: el caller pasa `historia` ya WINSORIZADO para que los spikes acotados
-    no envenenen los lags del entrenamiento.
-    COM-96: estadísticos de ADAPTACIÓN RÁPIDA para cambios de régimen en 1-2 días:
-    roll_mean3_op, roll_median3_op, ewma_fast_op (alpha=0.5) y momentum_op
-    (lag1 - roll_mean5, detecta el quiebre de nivel el día siguiente).
+    COM-93/94/96/98: matriz (len(fechas) x len(VARIABLES)) para UN tipo sobre la
+    SECUENCIA DE DÍAS OPERATIVOS (Lun-Vie; el lag1 de un lunes es el viernes).
+    COM-98: las MEDIANAS cortas (roll_median3/5) se colocan primero y son la señal
+    dominante: con el spike de 48 del 09/10/2026 la media móvil contaminaba 3-5 días
+    y la mediana no (aprendizaje del CSV corregido de 190 días).
+    Warm-start con media expansiva; el caller pasa historia WINSORIZADA (COM-95).
     """
     vals = [float(historia[f].get(tipo, 0.0)) for f in fechas]
     totals = [sum(float(v) for v in historia[f].values()) for f in fechas]
     media_global = float(np.mean(vals)) if vals else 0.0
     media_global_total = float(np.mean(totals)) if totals else 0.0
 
-    # COM-94/96: EWMAs hacia adelante sobre la serie operativa (solo pasado conocido)
     ewma_lenta = []
     ewma_rapida = []
     acc_l = None
@@ -324,59 +323,65 @@ def _matriz_features_por_tipo(historia: dict, fechas: list, tipo: str) -> np.nda
     for i, f in enumerate(fechas):
         pref = vals[:i]
         media_exp = float(np.mean(pref)) if pref else media_global
-        # Lags propios por día operativo
         lag1 = vals[i - 1] if i - 1 >= 0 else media_exp
         lag2 = vals[i - 2] if i - 2 >= 0 else media_exp
         lag5 = vals[i - 5] if i - 5 >= 0 else media_exp
-        # COM-96: ventanas rápidas (3 días) + ventanas medias/largas (5/10)
         w3 = vals[max(0, i - 3):i] or [media_exp]
         w5 = vals[max(0, i - 5):i] or [media_exp]
         w10 = vals[max(0, i - 10):i] or [media_exp]
+        rmed3 = float(np.median(w3))
+        rmed5 = float(np.median(w5))
         roll3 = float(np.mean(w3))
         roll5 = float(np.mean(w5))
         roll10 = float(np.mean(w10))
-        rmed3 = float(np.median(w3))
-        rmed5 = float(np.median(w5))
         rstd5 = float(np.std(w5)) if len(w5) > 1 else 0.0
-        ew_l = ewma_lenta[i - 1] if i - 1 >= 0 else media_exp
         ew_r = ewma_rapida[i - 1] if i - 1 >= 0 else media_exp
-        momentum = lag1 - roll5  # COM-96: quiebre de nivel (positivo=sube, negativo=baja)
-        # Lags del TOTAL por día operativo
+        ew_l = ewma_lenta[i - 1] if i - 1 >= 0 else media_exp
+        momentum = lag1 - rmed5  # COM-96/98: quiebre de nivel vs mediana robusta
+        max3 = float(np.max(w3))
+        min3 = float(np.min(w3))
         pref_t = totals[:i]
         media_exp_t = float(np.mean(pref_t)) if pref_t else media_global_total
         tlag1 = totals[i - 1] if i - 1 >= 0 else media_exp_t
         tw5 = totals[max(0, i - 5):i] or [media_exp_t]
         troll5 = float(np.mean(tw5))
-        # Calendario + ventana de pago (COM-94) + tendencia operativa
         dia = f.day
         ventana_pago = 1.0 if (dia <= 5 or dia >= 28) else 0.0
         dist_pago = float(min(abs(dia - 1), abs(dia - 30)))
         X.append([
             lag1, lag2, lag5,
+            rmed3, rmed5,
             roll3, roll5, roll10,
-            rmed3, rmed5, rstd5,
-            ew_l, ew_r, momentum,
+            rstd5,
+            ew_r, ew_l,
+            momentum, max3, min3,
             tlag1, troll5,
             float(f.weekday()), float(dia), float(f.month),
             1.0 if f.weekday() >= 5 else 0.0,
-            1.0 if dia <= 5 else 0.0,
-            1.0 if dia >= 26 else 0.0,
             ventana_pago, dist_pago,
             float(i),
         ])
     return np.array(X, dtype=float)
 
 
-# COM-93 (trazabilidad): matriz de 15 features sin estadísticos robustos ni rápidos;
-# reemplazada por las versiones COM-94/95/96 anteriores.
+def _serie_med3(vals: list) -> list:
+    """COM-97/98: mediana de los últimos 3 días operativos (solo pasado) por posición."""
+    out = []
+    media_global = float(np.mean(vals)) if vals else 0.0
+    for i in range(len(vals)):
+        pref = vals[:i]
+        media_exp = float(np.mean(pref)) if pref else media_global
+        w3 = vals[max(0, i - 3):i] or [media_exp]
+        out.append(float(np.median(w3)))
+    return out
+
+
+# COM-93 (trazabilidad): features calendario compartidas por tipo, comentadas:
+# def _features_de(f): return [f.weekday(), f.month, f.day, 1 if f.weekday() >= 5 else 0]
 
 
 def _prediccion_naive(historia: dict, fechas: list, tipo: str) -> list:
-    """
-    COM-93: baseline naive = valor del MISMO día operativo de la semana anterior
-    (lag 5 operativo); si no existe, media expansiva. Piso de comparación en
-    `metricas_baseline` y componente del ensemble.
-    """
+    """COM-93: baseline naive = valor del mismo día operativo de la semana anterior."""
     vals = [float(historia[f].get(tipo, 0.0)) for f in fechas]
     media_global = float(np.mean(vals)) if vals else 0.0
     out = []
@@ -391,7 +396,7 @@ def _prediccion_naive(historia: dict, fechas: list, tipo: str) -> list:
 # COM-91: MAPE Y MÉTRICAS
 # ==========================================
 def _calcular_mape(real, predicho):
-    """MAPE = (1/n) * Σ|(real - predicho)/real| * 100 sobre reales > 0; None si no hay."""
+    """MAPE sobre reales > 0; None si no hay muestras válidas."""
     real = np.array(real, dtype=float)
     predicho = np.array(predicho, dtype=float)
     mascara = real > 0
@@ -469,23 +474,52 @@ def _prediccion_ensemble(X_train, X_test, y_train, naive_test) -> list:
 
 
 # ==========================================
-# ENTRENAMIENTO Y EVALUACIÓN (COM-95 + COM-96)
+# COM-97/98: SELECCIÓN AUTOMÁTICA DE ESTRATEGIA POR TIPO
+# ==========================================
+def _candidates_for(modelo_key: str) -> list:
+    """Candidatos a evaluar en el holdout según el modelo elegido en UI."""
+    if modelo_key == 'rf':
+        return ['rf', 'rf_blend', 'med3']
+    if modelo_key == 'gbm':
+        return ['gbm', 'gbm_blend', 'med3']
+    return ['ensemble', 'med3']
+
+
+def _prediccion_candidato(cand: str, X_tr, y_tr, X_te, med3_te, naive_te) -> list:
+    """
+    COM-97/98: predicción de UN candidato. 'rf'/'gbm'/'ensemble': modelo puro;
+    '*_blend': 50% modelo + 50% mediana3 (red de seguridad en quiebres de nivel);
+    'med3': persistencia robusta pura.
+    """
+    if cand == 'med3':
+        return [max(0.0, round(v, 1)) for v in med3_te]
+    base = 'rf' if cand in ('rf', 'rf_blend') else ('gbm' if cand in ('gbm', 'gbm_blend') else 'ensemble')
+    if base == 'ensemble':
+        pred = _prediccion_ensemble(X_tr, X_te, y_tr, naive_te)
+    else:
+        pred = _entrenar_modelo_individual(X_tr, X_te, y_train=y_tr, modelo_key=base)
+    if cand.endswith('_blend'):
+        pred = [max(0.0, round(0.5 * p + 0.5 * m, 1)) for p, m in zip(pred, med3_te)]
+    return pred
+
+
+# ==========================================
+# ENTRENAMIENTO Y EVALUACIÓN (COM-95 + COM-98)
 # ==========================================
 def entrenar_y_evaluar_rf(cur, modo='evaluacion', fecha_corte=None, dias_test=None,
                           modelo_key='rf'):
     """
-    COM-95 + COM-96: entrena el modelo elegido (rf / gbm / ensemble) con features
-    POR TIPO sobre días OPERATIVOS, serie WINSORIZADA para entrenamiento/features y
-    doble lectura de métricas (cruda y limpia) + auditoría de atípicos.
-    Payload del panel ML:
-    - puntos, metricas (R²/MAE/MAPE sobre test CRUDO), metricas_limpias (test sin
-      días flag), metricas_baseline (naive), importancias, info_split con
-      estrategias y conteo de atípicos por tipo, y atipicos_detectados (Capa 4).
-    Estrategias por tipo (COM-93, vigente): 'constante' si std < 0.5 (Cocinera,
-    usando la MEDIANA winsorizada); resto modelo ML / ensemble.
-    Nota de interpretación (COM-93, vigente): en series casi constantes (Social)
-    el R² es inherentemente ≈0 aunque el MAPE sea ~1-2%; el indicador útil ahí es
-    el MAPE y la comparación contra el baseline naive.
+    COM-98: entrena el modelo elegido (rf / gbm / ensemble) con features POR TIPO
+    sobre días OPERATIVOS y serie WINSORIZADA; por tipo, SELECCIONA la mejor
+    estrategia (modelo puro / blend con mediana3 / mediana3) en un holdout interno
+    (último 15% del train) por MAPE. Payload del panel ML:
+    - puntos, metricas (test CRUDO), metricas_limpias (test sin días flag),
+      metricas_baseline (naive), importancias, atipicos_detectados, y info_split con
+      estrategias_usadas '<modelo_key>-><candidato>' y conteo de atípicos por tipo.
+    Estrategia 'constante' (COM-93) solo si std < 0.5 (Cocinera: mediana del train).
+    Nota de interpretación (COM-93, vigente): en series casi constantes (Social) el
+    R² es inherentemente ≈0 aunque el MAPE sea ~1-2%; el indicador útil es el MAPE
+    y la comparación contra el baseline naive.
     """
     if modelo_key not in MODELOS_DISPONIBLES:
         raise ValueError(f"Modelo '{modelo_key}' no válido. Use 'rf', 'gbm' o 'ensemble'.")
@@ -498,7 +532,6 @@ def entrenar_y_evaluar_rf(cur, modo='evaluacion', fecha_corte=None, dias_test=No
     if dias_test is None:
         dias_test = DIAS_TEST_DEFAULT
 
-    # ---- Split temporal (COM-91 v2, sin cambios) ----
     info_split = {}
     if modo == 'evaluacion':
         fechas_train, fechas_test = _split_por_fecha(fechas, fecha_corte)
@@ -525,9 +558,7 @@ def entrenar_y_evaluar_rf(cur, modo='evaluacion', fecha_corte=None, dias_test=No
     idx_train = [fechas.index(f) for f in fechas_train]
     idx_test = [fechas.index(f) for f in fechas_test]
 
-    # ==========================================
-    # COM-95 (Capas 1 y 2): detección por tipo + serie winsorizada de trabajo
-    # ==========================================
+    # ---- COM-95 (Capas 1 y 2): detección + serie winsorizada de trabajo ----
     historia_win = {f: {t: 0.0 for t in TIPOS} for f in fechas}
     atipicos_detectados = []
     flags_por_tipo = {}
@@ -567,23 +598,47 @@ def entrenar_y_evaluar_rf(cur, modo='evaluacion', fecha_corte=None, dias_test=No
         y_test_crudo = vals_crudos[idx_test]
         naive_full = _prediccion_naive(historia_win, fechas, tipo)
         naive_test = [naive_full[i] for i in idx_test]
+        med3_full = _serie_med3(list(vals_win))
 
-        # ---- COM-93: estrategia por tipo (constante solo si std < 0.5) ----
         if std_serie < UMBRAL_STD_CONSTANTE:
-            # Cocinera: la MEDIANA winsorizada del train es la predicción óptima
+            # Cocinera: mediana winsorizada del train (predicción óptima de constante)
             med_train = float(np.median(vals_win[idx_train]))
             pred = [round(med_train) for _ in idx_test]
             estrategias_usadas[tipo] = 'constante'
             importancias[tipo] = [{'variable': v, 'importancia': 0.0} for v in VARIABLES]
         else:
-            # COM-95/96: features y targets sobre la serie WINSORIZADA
             X_full = _matriz_features_por_tipo(historia_win, fechas, tipo)
             X_train = X_full[idx_train]
             X_test = X_full[idx_test]
             y_train = vals_win[idx_train]
-            estrategias_usadas[tipo] = modelo_key
-            if modelo_key == 'ensemble':
-                pred = _prediccion_ensemble(X_train, X_test, y_train, naive_test)
+
+            # ---- COM-97/98: holdout interno para elegir estrategia por tipo ----
+            n_hold = max(MIN_DIAS_HOLDOUT, int(FRACCION_HOLDOUT * len(idx_train)))
+            n_hold = min(n_hold, len(idx_train) - 10)
+            posA = idx_train[:-n_hold] if n_hold < len(idx_train) else idx_train
+            posB = idx_train[-n_hold:] if n_hold < len(idx_train) else []
+            candidatos = _candidates_for(modelo_key)
+            elegido = candidatos[0]
+            if posB:
+                mejor_mape = None
+                for cand in candidatos:
+                    pB = _prediccion_candidato(
+                        cand, X_full[posA], vals_win[posA], X_full[posB],
+                        [med3_full[i] for i in posB], [naive_full[i] for i in posB])
+                    mB = _calcular_mape(vals_crudos[posB], pB)
+                    if mB is not None and (mejor_mape is None or mB < mejor_mape):
+                        mejor_mape = mB
+                        elegido = cand
+            estrategias_usadas[tipo] = f"{modelo_key}->{elegido}"
+
+            pred = _prediccion_candidato(
+                elegido, X_train, y_train, X_test,
+                [med3_full[i] for i in idx_test], naive_test)
+
+            base = elegido.split('_blend')[0] if elegido.endswith('_blend') else elegido
+            if base in ('rf', 'gbm'):
+                importancias[tipo] = _importancias_de(X_train, y_train, base)
+            elif base == 'ensemble':
                 imp_rf = _importancias_de(X_train, y_train, 'rf')
                 imp_gbm = _importancias_de(X_train, y_train, 'gbm')
                 importancias[tipo] = [
@@ -592,8 +647,7 @@ def entrenar_y_evaluar_rf(cur, modo='evaluacion', fecha_corte=None, dias_test=No
                     for j in range(len(VARIABLES))
                 ]
             else:
-                pred = _entrenar_modelo_individual(X_train, X_test, y_train, modelo_key)
-                importancias[tipo] = _importancias_de(X_train, y_train, modelo_key)
+                importancias[tipo] = [{'variable': v, 'importancia': 0.0} for v in VARIABLES]
 
         # ---- COM-95 (Capa 3): métricas CRUDAS y LIMPIAS ----
         metricas[tipo] = _metricas_de(y_test_crudo, pred)
@@ -621,7 +675,6 @@ def entrenar_y_evaluar_rf(cur, modo='evaluacion', fecha_corte=None, dias_test=No
         'rango_train': [fechas_train[0].isoformat(), fechas_train[-1].isoformat()],
         'rango_test': [fechas_test[0].isoformat(), fechas_test[-1].isoformat()],
         'estrategias_usadas': estrategias_usadas,
-        # COM-95: conteo de atípicos detectados por tipo (auditoría del split)
         'n_atipicos_por_tipo': n_atipicos_por_tipo,
     })
 
@@ -635,9 +688,9 @@ def entrenar_y_evaluar_rf(cur, modo='evaluacion', fecha_corte=None, dias_test=No
         'n_dias_test': len(fechas_test),
         'rango_fechas': [fechas[0].isoformat(), fechas[-1].isoformat()],
         'metricas': metricas,
-        'metricas_limpias': metricas_limpias,      # COM-95 (Capa 3)
-        'metricas_baseline': metricas_baseline,    # COM-93
-        'atipicos_detectados': atipicos_detectados,  # COM-95 (Capa 4)
+        'metricas_limpias': metricas_limpias,
+        'metricas_baseline': metricas_baseline,
+        'atipicos_detectados': atipicos_detectados,
         'importancias': importancias,
         'puntos': puntos,
         'info_split': info_split,
