@@ -743,9 +743,10 @@ export const api = {
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al consultar el estado de los modelos'));
         return response.json();
     },
-    getScatterRandomForest: async (usuarioSolicitanteId) => {
-        const response = await fetch(`${API_BASE}/modelos-ml/random-forest?usuario_solicitante_id=${usuarioSolicitanteId}`);
-        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar el gráfico de Random Forest'));
+// COM-92: getScatterRandomForest ahora acepta parámetro modelo ('rf' o 'gbm')
+    getScatterRandomForest: async (usuarioSolicitanteId, modelo = 'rf') => {
+        const response = await fetch(`${API_BASE}/modelos-ml/random-forest?usuario_solicitante_id=${usuarioSolicitanteId}&modelo=${modelo}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar el gráfico'));
         return response.json();
     },
     getScatterKmeans: async (usuarioSolicitanteId) => {
