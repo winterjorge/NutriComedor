@@ -1,21 +1,31 @@
 /**
 components/ml/ModelosMLView.jsx
-Objetivo: Panel de gráficos de Machine Learning con selector de modelo (COM-92),
-MAPE (COM-91) y auditoría de atípicos + métricas limpias (COM-95).
+Objetivo: Panel de gráficos de Machine Learning con selector de modelo activo
+(COM-92), MAPE (COM-91), vista de métricas crudas/limpias y auditoría de atípicos
+(COM-95).
 Historial:
-COM-5 v4 / COM-8 v7: versión original.
+COM-5 v4 / COM-8 v7: versión original del panel (3 gráficos SVG propios).
 COM-60: scatter K-means con 6 variables nutricionales.
-COM-76: precio fuera del tooltip K-means.
-COM-91: MAPE en métricas RF.
-COM-92: selector de modelo RF vs GBM con comparación de métricas
-(fix: TIPOS_COMENSAL local en ComparadorMetricas).
-COM-95 (este archivo):
-* Conmutador de vista de métricas: CRUDAS vs LIMPIAS (test sin días atípicos).
-* Panel "Auditoría de atípicos" que lista rf.atipicos_detectados (fecha, tipo,
-  valor real, valor acotado, límites y motivo) con nota de trazabilidad:
-  el dato se ACOTA para entrenar pero NUNCA se borra del libro de ventas.
+COM-76: precio fuera del tooltip y del rótulo del scatter K-means.
+COM-91: MAPE en las métricas por tipo de comensal.
+COM-92: selector de modelo (RF vs GBM) y comparación lado a lado
+        (fix: TIPOS_COMENSAL local en lugar de la constante del backend).
+COM-95: conmutador de métricas CRUDAS vs LIMPIAS + panel "Auditoría de atípicos"
+        (lista atipicos_detectados con valor real, acotado, límites y motivo).
+COM-98 v2 (este archivo):
+* Se ELIMINA el cuadro de comparación RF vs GBM (ComparadorMetricas) y la segunda
+  llamada al endpoint /modelos-ml/random-forest: el panel muestra SOLO los
+  indicadores del MODELO ACTIVO (el selector rf/gbm/ensemble se conserva para
+  elegir cuál es el activo). Beneficio colateral: 1 entrenamiento por petición.
+* La tabla de importancias pasa a ser CONSCIENTE DE LA ESTRATEGIA elegida por tipo
+  (info_split.estrategias_usadas): si la estrategia es 'constante' o termina en
+  '->med3' (persistencia robusta, sin árboles), se muestra una nota explicativa en
+  lugar de barras en 0.0% (caso real observado en 'social', donde med3 gana el
+  holdout interno y no hay importancias de árboles que mostrar).
+* Badge con la estrategia activa por tipo junto al título de importancias.
 Uso: Montada por App.jsx en la pestaña "Modelos ML" (gate por módulo 'modelos_ml').
-Referencia: tickets COM-5 v4 / COM-8 v7 / COM-60 / COM-76 / COM-91 / COM-92 / COM-95.
+Referencia: tickets COM-5 v4 / COM-8 v7 / COM-60 / COM-76 / COM-91 / COM-92 /
+COM-95 / COM-98 v2 (solo trazabilidad).
 */
 import React, { useState, useEffect, useCallback } from 'react';
 import {
@@ -42,13 +52,13 @@ const VARIABLES_KMEANS_DEFAULT = [
     'energia_kcal', 'hierro_mg', 'proteina_g', 'vitamina_a_ug', 'zinc_mg', 'carbohidratos_g',
 ];
 
-// COM-92: modelos disponibles
+// COM-92: modelos que pueden ser "el activo"
 const MODELOS_ML = [
     { key: 'rf', label: 'Random Forest', descripcion: 'Ensemble de árboles, robusto a outliers' },
     { key: 'gbm', label: 'Gradient Boosting', descripcion: 'Boosting secuencial, mejor para patrones temporales' },
 ];
 
-// COM-95 FIX: tipos de comensal locales (antes se usaba TIPOS del backend, inexistente aquí)
+// COM-92 fix / COM-95: tipos de comensal locales (la constante TIPOS vive en el backend)
 const TIPOS_COMENSAL = ['social', 'afiliado', 'normal', 'cocinera'];
 
 // ==========================================
@@ -74,8 +84,25 @@ const metricasDe = (modelo, tipo, vista) => {
     return modelo.metricas?.[tipo] || {};
 };
 
+// COM-98 v2: etiqueta legible de la estrategia elegida por tipo (info_split)
+const etiquetaEstrategia = (estr) => {
+    if (!estr) return null;
+    if (estr === 'constante') return 'constante (mediana histórica)';
+    if (estr.endsWith('->med3')) return 'persistencia robusta (mediana 3 días)';
+    if (estr.endsWith('->rf_blend')) return 'Random Forest + mediana 3 días (blend)';
+    if (estr.endsWith('->gbm_blend')) return 'Gradient Boosting + mediana 3 días (blend)';
+    if (estr.endsWith('->rf')) return 'Random Forest puro';
+    if (estr.endsWith('->gbm')) return 'Gradient Boosting puro';
+    if (estr.endsWith('->ensemble')) return 'Ensemble RF + GBM + naive';
+    return estr;
+};
+
+// COM-98 v2: true si la estrategia del tipo no usa árboles (no hay importancias reales)
+const estrategiaSinArboles = (estr) =>
+    !estr || estr === 'constante' || estr.endsWith('->med3');
+
 // ==========================================
-// GRÁFICO 1: DISPERSIÓN (COM-92: muestra modelo seleccionado)
+// GRÁFICO 1: DISPERSIÓN DEL MODELO ACTIVO
 // ==========================================
 const ScatterRF = ({ puntos, modeloKey }) => {
     const W = 560, H = 360, M = { t: 16, r: 16, b: 48, l: 56 };
@@ -109,60 +136,6 @@ const ScatterRF = ({ puntos, modeloKey }) => {
                 Comensales PREDICHOS ({MODELOS_ML.find(m => m.key === modeloKey)?.label || 'Modelo'})
             </text>
         </svg>
-    );
-};
-
-// COM-92 + COM-95: comparador que respeta la vista de métricas seleccionada
-const ComparadorMetricas = ({ rf, gbm, vista }) => {
-    if (!rf || !gbm) return null;
-    return (
-        <div className="bg-slate-50 rounded-lg p-3 mt-4">
-            <p className="text-xs font-bold text-slate-700 mb-2 flex items-center gap-1">
-                <GitCompare size={14} /> Comparación de modelos
-                <span className="ml-2 font-normal text-slate-500">
-                    (vista: {vista === 'limpias' ? 'métricas LIMPIAS sin atípicos' : 'métricas CRUDAS'})
-                </span>
-            </p>
-            <div className="grid grid-cols-3 gap-2 text-xs">
-                <div className="text-slate-600 font-semibold">Tipo</div>
-                <div className="text-center text-slate-700 font-semibold">{rf.modelo_key === 'rf' ? 'Random Forest' : 'Gradient Boosting'}</div>
-                <div className="text-center text-slate-700 font-semibold">{gbm.modelo_key === 'gbm' ? 'Gradient Boosting' : 'Random Forest'}</div>
-            </div>
-            {TIPOS_COMENSAL.map(tipo => {
-                const m1 = metricasDe(rf, tipo, vista);
-                const m2 = metricasDe(gbm, tipo, vista);
-                const mejorR2 = (m1.r2 ?? -99) > (m2.r2 ?? -99) ? 1 : 2;
-                const mejorMAPE = (m1.mape ?? 999) < (m2.mape ?? 999) ? 1 : 2;
-                return (
-                    <div key={tipo} className="mt-2">
-                        <div className="font-bold text-slate-800 mb-1 capitalize">{tipo}</div>
-                        <div className="grid grid-cols-3 gap-2 text-xs">
-                            <div className="text-slate-600">R²</div>
-                            <div className={`text-center font-bold ${mejorR2 === 1 ? 'text-emerald-700' : 'text-slate-700'}`}>
-                                {m1.r2 ?? '—'} {mejorR2 === 1 && '✓'}
-                            </div>
-                            <div className={`text-center font-bold ${mejorR2 === 2 ? 'text-emerald-700' : 'text-slate-700'}`}>
-                                {m2.r2 ?? '—'} {mejorR2 === 2 && '✓'}
-                            </div>
-                        </div>
-                        <div className="grid grid-cols-3 gap-2 text-xs mt-1">
-                            <div className="text-slate-600">MAE</div>
-                            <div className="text-center text-slate-700">{m1.mae ?? '—'}</div>
-                            <div className="text-center text-slate-700">{m2.mae ?? '—'}</div>
-                        </div>
-                        <div className="grid grid-cols-3 gap-2 text-xs mt-1">
-                            <div className="text-slate-600">MAPE</div>
-                            <div className={`text-center font-bold ${mejorMAPE === 1 ? 'text-emerald-700' : 'text-slate-700'}`}>
-                                {m1.mape !== null && m1.mape !== undefined ? `${m1.mape}%` : '—'} {mejorMAPE === 1 && '✓'}
-                            </div>
-                            <div className={`text-center font-bold ${mejorMAPE === 2 ? 'text-emerald-700' : 'text-slate-700'}`}>
-                                {m2.mape !== null && m2.mape !== undefined ? `${m2.mape}%` : '—'} {mejorMAPE === 2 && '✓'}
-                            </div>
-                        </div>
-                    </div>
-                );
-            })}
-        </div>
     );
 };
 
@@ -230,7 +203,7 @@ const PanelAtipicos = ({ atipicos, nPorTipo }) => {
 };
 
 // ==========================================
-// VISTA PRINCIPAL (COM-92 + COM-95)
+// VISTA PRINCIPAL (COM-98 v2: solo indicadores del modelo activo)
 // ==========================================
 export const ModelosMLView = () => {
     const { usuario } = useAuth();
@@ -242,13 +215,13 @@ export const ModelosMLView = () => {
     const [error, setError] = useState('');
     const [tipoRF, setTipoRF] = useState('social');
     const [metricaSerie, setMetricaSerie] = useState(METRICAS_SERIE[0]);
-    // COM-92: selector de modelo
+    // COM-92: modelo activo
     const [modeloSeleccionado, setModeloSeleccionado] = useState('rf');
-    const [modeloComparar, setModeloComparar] = useState(null);
-    const [cargandoComparacion, setCargandoComparacion] = useState(false);
     // COM-95: vista de métricas (crudas vs limpias)
     const [vistaMetricas, setVistaMetricas] = useState('crudas');
 
+    // COM-98 v2: una sola llamada (modelo activo); se eliminó la carga del modelo
+    // alternativo que alimentaba al cuadro de comparación RF vs GBM.
     const cargarTodo = useCallback(async () => {
         setCargando(true);
         setError('');
@@ -268,22 +241,7 @@ export const ModelosMLView = () => {
         }
     }, [usuario.id, modeloSeleccionado]);
 
-    const cargarComparacion = useCallback(async () => {
-        if (!estado?.random_forest?.suficiente) return;
-        setCargandoComparacion(true);
-        try {
-            const modeloAlt = modeloSeleccionado === 'rf' ? 'gbm' : 'rf';
-            const data = await api.getScatterRandomForest(usuario.id, modeloAlt);
-            setModeloComparar(data);
-        } catch (e) {
-            console.error('Error cargando modelo para comparación:', e);
-        } finally {
-            setCargandoComparacion(false);
-        }
-    }, [usuario.id, modeloSeleccionado, estado]);
-
     useEffect(() => { cargarTodo(); }, [cargarTodo]);
-    useEffect(() => { cargarComparacion(); }, [cargarComparacion]);
 
     const tarjetaEstado = (icono, titulo, detalle, ok) => (
         <div className={`bg-white border rounded-xl p-3 text-center ${ok ? 'border-slate-200' : 'border-amber-300 bg-amber-50'}`}>
@@ -291,6 +249,11 @@ export const ModelosMLView = () => {
             <p className="text-[11px] text-slate-500 mt-1">{detalle}</p>
         </div>
     );
+
+    // COM-98 v2: estrategia activa del tipo seleccionado (viene del holdout interno)
+    const estrActiva = rf?.info_split?.estrategias_usadas?.[tipoRF] || null;
+    const sinArboles = estrategiaSinArboles(estrActiva);
+    const importanciasTipo = rf?.importancias?.[tipoRF] || [];
 
     return (
         <div className="animate-in fade-in duration-300 space-y-6">
@@ -341,11 +304,11 @@ export const ModelosMLView = () => {
                         </div>
                     )}
 
-                    {/* COM-92: Selector de modelo */}
+                    {/* COM-92: selector de modelo activo + COM-95: vista de métricas */}
                     <div className="bg-white border border-slate-200 rounded-xl p-4">
                         <h3 className="font-bold text-slate-800 text-sm mb-3 flex items-center gap-2">
                             <GitCompare size={16} className="text-emerald-600" />
-                            Selector de modelo de demanda
+                            Modelo activo de demanda
                         </h3>
                         <div className="flex flex-wrap gap-2">
                             {MODELOS_ML.map(m => (
@@ -363,7 +326,6 @@ export const ModelosMLView = () => {
                                 </button>
                             ))}
                         </div>
-                        {/* COM-95: conmutador de vista de métricas */}
                         <div className="flex flex-wrap items-center gap-2 mt-3">
                             <span className="text-[11px] font-semibold text-slate-600">Métricas:</span>
                             <button
@@ -386,14 +348,14 @@ export const ModelosMLView = () => {
                         )}
                     </div>
 
-                    {/* ===== GRÁFICO 1: MODELO SELECCIONADO ===== */}
+                    {/* ===== GRÁFICO 1: MODELO ACTIVO ===== */}
                     <div className="bg-white border border-slate-200 rounded-xl p-4">
                         <h3 className="font-bold text-slate-800 text-sm mb-1">
                             1. {MODELOS_ML.find(m => m.key === modeloSeleccionado)?.label} — Demanda real vs predicha
                         </h3>
                         <p className="text-[11px] text-slate-500 mb-3">
-                            Features por día operativo y por tipo (lags 1/2/5, medias móviles, mediana y EWMA
-                            robustas, ventana de pago, calendario) · Split temporal configurable ·
+                            Features por día operativo y por tipo (lags 1/2/5, medianas y medias móviles,
+                            EWMA, momentum, ventana de pago, calendario) · Split temporal configurable ·
                             La línea punteada es la predicción perfecta (y = x).
                         </p>
                         {!rf ? (
@@ -421,20 +383,37 @@ export const ModelosMLView = () => {
                                         })}
                                     </div>
                                 </div>
+                                {/* COM-98 v2: importancias conscientes de la estrategia */}
                                 <div className="bg-slate-50 rounded-lg p-3">
-                                    <p className="text-xs font-bold text-slate-700 mb-2">
+                                    <p className="text-xs font-bold text-slate-700 mb-2 flex flex-wrap items-center gap-2">
                                         Importancia de variables ({tipoRF})
+                                        {estrActiva && (
+                                            <span className="px-2 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-full text-[10px] font-bold">
+                                                {etiquetaEstrategia(estrActiva)}
+                                            </span>
+                                        )}
                                     </p>
-                                    {(rf.importancias[tipoRF] || []).map(iv => (
-                                        <div key={iv.variable} className="mb-2">
-                                            <div className="flex justify-between text-[11px] text-slate-600 mb-0.5">
-                                                <span>{iv.variable}</span><span className="font-bold">{fmt(iv.importancia * 100, 1)}%</span>
+                                    {sinArboles ? (
+                                        <p className="text-[11px] text-slate-500 leading-relaxed mt-1">
+                                            La estrategia activa para <b className="capitalize">{tipoRF}</b> es{' '}
+                                            <b>{etiquetaEstrategia(estrActiva)}</b>: la predicción sigue el nivel
+                                            reciente de la serie (o su mediana histórica) sin usar un modelo de
+                                            árboles, por lo que <b>no hay importancias de variables que mostrar</b>.
+                                            El motor eligió esta estrategia en su validación interna porque supera
+                                            al RF en esta serie (COM-98).
+                                        </p>
+                                    ) : (
+                                        importanciasTipo.map(iv => (
+                                            <div key={iv.variable} className="mb-2">
+                                                <div className="flex justify-between text-[11px] text-slate-600 mb-0.5">
+                                                    <span>{iv.variable}</span><span className="font-bold">{fmt(iv.importancia * 100, 1)}%</span>
+                                                </div>
+                                                <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
+                                                    <div className="h-full rounded-full" style={{ width: `${iv.importancia * 100}%`, backgroundColor: COLOR_TIPO[tipoRF] }} />
+                                                </div>
                                             </div>
-                                            <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
-                                                <div className="h-full rounded-full" style={{ width: `${iv.importancia * 100}%`, backgroundColor: COLOR_TIPO[tipoRF] }} />
-                                            </div>
-                                        </div>
-                                    ))}
+                                        ))
+                                    )}
                                     <p className="text-[10px] text-slate-400 mt-2">
                                         {rf.n_dias_entrenamiento} días de entrenamiento · {rf.n_dias_test} días de prueba
                                         ({rf.rango_fechas[0]} → {rf.rango_fechas[1]})
@@ -443,17 +422,6 @@ export const ModelosMLView = () => {
                             </div>
                         )}
                     </div>
-
-                    {/* COM-92: Comparación de modelos (COM-95: respeta vista de métricas) */}
-                    {modeloComparar && (
-                        <div className="bg-white border border-emerald-200 rounded-xl p-4">
-                            <h3 className="font-bold text-slate-800 text-sm mb-3 flex items-center gap-2">
-                                <GitCompare size={16} className="text-emerald-600" />
-                                Comparación: {MODELOS_ML.find(m => m.key === modeloSeleccionado)?.label} vs {MODELOS_ML.find(m => m.key !== modeloSeleccionado)?.label}
-                            </h3>
-                            <ComparadorMetricas rf={rf} gbm={modeloComparar} vista={vistaMetricas} />
-                        </div>
-                    )}
 
                     {/* COM-95: Auditoría de atípicos */}
                     {rf && (rf.atipicos_detectados?.length > 0 || rf.info_split?.n_atipicos_por_tipo) && (
