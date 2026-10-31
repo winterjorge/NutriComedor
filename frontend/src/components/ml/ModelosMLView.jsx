@@ -4,7 +4,7 @@ Objetivo: Panel de gráficos de Machine Learning (COM-5 v4 / COM-8 v7), exclusiv
       Administrador de Sistemas (módulo 'modelos_ml'). Tres gráficos SVG propios
       (sin librerías externas), todos con sus VARIABLES/INDICADORES rotulados:
       1) Random Forest: dispersión REAL vs PREDICHO de la demanda diaria por tipo
-         de comensal, con línea de referencia y=x, métricas R²/MAE por tipo y
+         de comensal, con línea de referencia y=x, métricas R²/MAE/MAPE por tipo y
          barras de importancia de las variables del modelo.
       2) K-means: dispersión PCA-2D de las recetas coloreada por cluster, con
          centroides proyectados, varianza explicada de PC1/PC2 y tabla de cargas
@@ -16,15 +16,15 @@ Historial:
 COM-5 v4 / COM-8 v7: versión original del panel.
 COM-60: el scatter K-means proyecta las 6 variables nutricionales; el precio queda
       solo como campo de tooltip informativo.
-COM-76 (este archivo): el precio SALE también del tooltip del scatter K-means y del
-      rótulo de "variables originales" (D3: el front no muestra precio por cluster).
-      El tooltip ahora rotula nombre, cluster y hierro (variable de prioridad
-      Anemia Cero). El caption de variables se alimenta de data.variables (las 6
-      nutricionales que devuelve el backend). Los gráficos de Random Forest y
-      Greedy (que sí manejan demanda y costos del menú, no del cluster) quedan
-      intactos.
+COM-76: el precio SALE también del tooltip del scatter K-means y del rótulo de
+      "variables originales" (D3: el front no muestra precio por cluster).
+COM-91 (este archivo): se agrega MAPE (Mean Absolute Percentage Error) junto a MAE
+      en los botones de tipo de comensal del gráfico Random Forest. El MAPE se
+      expresa en porcentaje y es más intuitivo para comparar precisión entre tipos
+      con escalas diferentes. Si el backend no devuelve MAPE (versiones antiguas),
+      se muestra solo MAE (compatibilidad hacia atrás).
 Uso: Montada por App.jsx en la pestaña "Modelos ML" (gate por módulo 'modelos_ml').
-Referencia: tickets COM-5 v4 / COM-8 v7 / COM-60 / COM-76 (solo trazabilidad).
+Referencia: tickets COM-5 v4 / COM-8 v7 / COM-60 / COM-76 / COM-91 (solo trazabilidad).
 */
 import React, { useState, useEffect, useCallback } from 'react';
 import {
@@ -138,8 +138,6 @@ const ScatterKmeans = ({ data }) => {
             {data.puntos.map(p => (
                 <circle key={p.receta_id} cx={sx(p.x)} cy={sy(p.y)} r="4.5"
                     fill={COLOR_CLUSTER[p.cluster_codigo] || '#64748b'} fillOpacity="0.7">
-                    {/* COM-76 (trazabilidad): tooltip COM-60 con precio, comentado:
-                        <title>{`${p.nombre} · ${p.cluster_etiqueta} · S/ ${p.precio_soles} · Fe ${p.hierro_mg} mg`}</title> */}
                     <title>{`${p.nombre} · ${p.cluster_etiqueta} · Fe ${p.hierro_mg} mg · Prot ${p.proteina_g} g`}</title>
                 </circle>
             ))}
@@ -376,15 +374,22 @@ export const ModelosMLView = () => {
                                 <div className="lg:col-span-2">
                                     <ScatterRF puntos={rf.puntos} />
                                     <div className="flex flex-wrap gap-3 justify-center mt-2">
-                                        {rf.tipos.map(t => (
-                                            <button key={t} onClick={() => setTipoRF(t)}
-                                                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold transition-colors ${
-                                                    tipoRF === t ? 'text-white' : 'text-slate-600 bg-slate-100 hover:bg-slate-200'}`}
-                                                style={tipoRF === t ? { backgroundColor: COLOR_TIPO[t] } : {}}>
-                                                <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: COLOR_TIPO[t] }} />
-                                                {t} · R² {rf.metricas[t]?.r2 ?? '—'} · MAE {rf.metricas[t]?.mae ?? '—'}
-                                            </button>
-                                        ))}
+                                        {rf.tipos.map(t => {
+                                            const m = rf.metricas[t] || {};
+                                            // COM-91: mostrar MAPE si está disponible, sino solo MAE
+                                            const mapeText = m.mape !== null && m.mape !== undefined 
+                                                ? ` · MAPE ${m.mape}%` 
+                                                : '';
+                                            return (
+                                                <button key={t} onClick={() => setTipoRF(t)}
+                                                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold transition-colors ${
+                                                        tipoRF === t ? 'text-white' : 'text-slate-600 bg-slate-100 hover:bg-slate-200'}`}
+                                                    style={tipoRF === t ? { backgroundColor: COLOR_TIPO[t] } : {}}>
+                                                    <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: COLOR_TIPO[t] }} />
+                                                    {t} · R² {m.r2 ?? '—'} · MAE {m.mae ?? '—'}{mapeText}
+                                                </button>
+                                            );
+                                        })}
                                     </div>
                                 </div>
                                 {/* Importancia de variables del tipo seleccionado */}
@@ -414,9 +419,6 @@ export const ModelosMLView = () => {
                     {/* ===== GRÁFICO 2: K-MEANS PCA (COM-76: sin precio) ===== */}
                     <div className="bg-white border border-slate-200 rounded-xl p-4">
                         <h3 className="font-bold text-slate-800 text-sm mb-1">2. K-means — Recetas en espacio PCA (4 clusters)</h3>
-                        {/* COM-76: caption alimentado por data.variables (6 nutricionales);
-                            trazabilidad COM-60 del caption con precio, comentada:
-                            Variables originales: energia_kcal, hierro_mg, proteina_g, precio_soles */}
                         <p className="text-[11px] text-slate-500 mb-3">
                             Variables originales: {(km?.variables || VARIABLES_KMEANS_DEFAULT).join(', ')} ·
                             Los rombos con borde oscuro son los centroides de cada cluster.

@@ -1,25 +1,31 @@
 """
 ml/random_forest_demanda.py
 Objetivo: Modelo Random Forest de demanda diaria de comensales (social / afiliado /
-          normal) para el panel de gráficos de Machine Learning (COM-5 v4 / COM-8 v7).
-          Entrena con el historial del padrón/ventas y devuelve los datos del gráfico
-          de dispersión REAL vs PREDICHO con split temporal 80/20, métricas R²/MAE por
-          tipo de comensal y la relevancia de cada variable (feature importances), de
-          modo que el gráfico pueda exhibir sus indicadores/variables.
+normal) para el panel de gráficos de Machine Learning (COM-5 v4 / COM-8 v7).
+Entrena con el historial del padrón/ventas y devuelve los datos del gráfico
+de dispersión REAL vs PREDICHO con split temporal 80/20, métricas R²/MAE/MAPE por
+tipo de comensal y la relevancia de cada variable (feature importances), de
+modo que el gráfico pueda exhibir sus indicadores/variables.
 Variables (features) usadas:
-          - dia_semana (0=Lunes .. 6=Domingo)
-          - mes (1-12)
-          - dia_del_mes (1-31)
-          - es_fin_de_semana (0/1)
+- dia_semana (0=Lunes .. 6=Domingo)
+- mes (1-12)
+- dia_del_mes (1-31)
+- es_fin_de_semana (0/1)
 Targets:  raciones diarias por tipo: social, afiliado, normal.
 Uso: Importado por routers/modelos_ml.py (Parte 3). Todas las funciones reciben un
-     cursor psycopg2 (RealDictCursor); el entrenamiento es bajo demanda (no se persiste).
+cursor psycopg2 (RealDictCursor); el entrenamiento es bajo demanda (no se persiste).
 Nota: Detección defensiva del esquema (padron_diario / ventas / comensales), coherente
-      con el resto de motores del proyecto.
-Referencia: ticket COM-5 v4 / HU-04 (solo trazabilidad; los nombres obedecen a la funcionalidad).
+con el resto de motores del proyecto.
+Historial:
+COM-5 v4 / COM-8 v7: versión original con R² y MAE.
+COM-91 (este archivo): se agrega MAPE (Mean Absolute Percentage Error) por tipo de
+comensal. El MAPE es más intuitivo que el MAE porque se expresa en porcentaje,
+permitiendo comparar la precisión del modelo entre tipos de comensal con escalas
+diferentes (ej. social ~20 vs normal ~80). Se calcula solo sobre muestras donde
+real > 0 para evitar división por cero; si no hay tales muestras, retorna None.
+Referencia: ticket COM-5 v4 / HU-04 / COM-91 (solo trazabilidad).
 """
 from datetime import date, datetime
-
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, r2_score
@@ -91,9 +97,8 @@ def _cargar_historia_demanda(cur):
     tabla = _detectar_tabla_ventas(cur, tablas)
     if not tabla:
         raise ValueError(
-            "No se detectó la tabla de padrón/ventas (padron_diario, ventas, ...). "
+            f"No se detectó la tabla de padrón/ventas (padron_diario, ventas, ...). "
             f"Tablas públicas: {', '.join(sorted(tablas))}.")
-
     cols = _columnas(cur, tabla)
     col_fecha = _col(cols, ['fecha', 'fecha_venta', 'fecha_registro', 'dia'], contiene='fecha')
     col_cant = _col(cols, ['raciones', 'cantidad', 'menus', 'total'], contiene='racion') or \
@@ -101,7 +106,6 @@ def _cargar_historia_demanda(cur):
     col_tipo = _col(cols, ['tipo_comensal', 'tipo_comensal_venta', 'tipo', 'categoria'], contiene='tipo')
     if not col_fecha or not col_cant:
         raise ValueError(f"La tabla '{tabla}' no tiene columnas de fecha/cantidad reconocibles: {cols}")
-
     if col_tipo:
         cur.execute(f"""
             SELECT {col_fecha} AS f, LOWER({col_tipo}::text) AS t, SUM({col_cant}) AS n
@@ -122,7 +126,6 @@ def _cargar_historia_demanda(cur):
             JOIN comensales c ON c.id = v.{col_cid}
             GROUP BY 1, 2;
         """)
-
     historia = {}
     for r in cur.fetchall():
         f = _a_fecha(r['f'])
@@ -141,15 +144,39 @@ def _features_de(f: date):
 
 
 # ==========================================
+# COM-91: CÁLCULO DE MAPE
+# ==========================================
+def _calcular_mape(real, predicho):
+    """
+    COM-91: calcula el Mean Absolute Percentage Error (MAPE) entre arrays de valores
+    reales y predichos. Solo considera muestras donde real > 0 para evitar división
+    por cero. Si no hay tales muestras, retorna None.
+    Fórmula: MAPE = (1/n) * Σ|(real - predicho) / real| * 100
+    """
+    real = np.array(real)
+    predicho = np.array(predicho)
+    # Filtrar solo donde real > 0
+    mascara = real > 0
+    if not mascara.any():
+        return None
+    real_filtrado = real[mascara]
+    pred_filtrado = predicho[mascara]
+    errores_pct = np.abs((real_filtrado - pred_filtrado) / real_filtrado)
+    return float(np.mean(errores_pct) * 100)
+
+
+# ==========================================
 # ENTRENAMIENTO Y EVALUACIÓN (split temporal)
 # ==========================================
 def entrenar_y_evaluar_rf(cur):
     """
     Entrena un RandomForestRegressor por tipo de comensal con split temporal 80/20 y
     retorna el payload completo para el gráfico de dispersión del panel ML:
-      - puntos: [{fecha, tipo, real, predicho}] del conjunto de prueba
-      - metricas: R² y MAE por tipo
-      - importancias: relevancia de cada variable por tipo (indicadores del gráfico)
+    - puntos: [{fecha, tipo, real, predicho}] del conjunto de prueba
+    - metricas: R², MAE y MAPE por tipo (COM-91: se agrega MAPE)
+    - importancias: relevancia de cada variable por tipo (indicadores del gráfico)
+    COM-91: el MAPE se expresa en porcentaje y es más intuitivo que el MAE para
+    comparar precisión entre tipos de comensal con escalas diferentes.
     """
     historia = _cargar_historia_demanda(cur)
     fechas = sorted(historia.keys())
@@ -157,16 +184,13 @@ def entrenar_y_evaluar_rf(cur):
         raise ValueError(
             f"Historial insuficiente para Random Forest: {len(fechas)} día(s) "
             f"(mínimo {MIN_DIAS}). Registre ventas del padrón antes de ver el gráfico.")
-
     X = np.array([_features_de(f) for f in fechas])
     Y = np.array([[historia[f][t] for t in TIPOS] for f in fechas])
     corte = int(len(fechas) * SPLIT_ENTRENAMIENTO)
     if corte < 10 or (len(fechas) - corte) < 5:
         raise ValueError("Historial demasiado corto para dividir en entrenamiento/prueba.")
-
     Xtr, Xte = X[:corte], X[corte:]
     Ytr, Yte = Y[:corte], Y[corte:]
-
     puntos = []
     metricas = {}
     importancias = {}
@@ -176,11 +200,15 @@ def entrenar_y_evaluar_rf(cur):
         rf.fit(Xtr, Ytr[:, i])
         pred = rf.predict(Xte)
         real = Yte[:, i]
-
         r2 = float(r2_score(real, pred)) if len(set(real.tolist())) > 1 else None
+        mae = float(mean_absolute_error(real, pred))
+        # COM-91: calcular MAPE (solo si hay muestras con real > 0)
+        mape = _calcular_mape(real, pred)
         metricas[t] = {
             'r2': round(r2, 4) if r2 is not None else None,
-            'mae': round(float(mean_absolute_error(real, pred)), 2),
+            'mae': round(mae, 2),
+            # COM-91: MAPE en porcentaje (None si no hay muestras válidas)
+            'mape': round(mape, 2) if mape is not None else None,
         }
         importancias[t] = [
             {'variable': VARIABLES[j], 'importancia': round(float(rf.feature_importances_[j]), 4)}
@@ -193,7 +221,6 @@ def entrenar_y_evaluar_rf(cur):
                 'real': round(float(re_), 1),
                 'predicho': round(float(pr_), 1),
             })
-
     return {
         'modelo': 'RandomForestRegressor(n_estimators=100)',
         'variables': list(VARIABLES),
