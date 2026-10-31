@@ -9,6 +9,13 @@ COM-62 v2: atención ágil sin DNI (autocompletado por nombre, DNI opcional, edi
 de ficha, Cliente Genérico reservado para cargas masivas).
 COM-63: carga masiva de atenciones históricas desde CSV + tipo "Cocinera"
 (menú a costo cero, comensal genérico CO000000).
+COM-63 v2 (este archivo): carga masiva IDEMPOTENTE por fecha. Antes de insertar,
+ELIMINA las filas históricas (observacion='Carga histórica COM-63') de las fechas
+presentes en el archivo, de modo que re-ejecutar la carga NO duplica atenciones
+(el ON CONFLICT DO NOTHING anterior nunca disparaba porque padron_diario no tiene
+unique (fecha, tipo)). Agrega múltiples filas CSV de una misma fecha SUMÁNDOLAS
+(si el archivo tuviera filas duplicadas erróneas, deben limpiarse antes: el motor
+no puede adivinar cuál es la buena).
 COM-64: predicción de demanda con datos reales de padron_diario (pasa el cursor
 al motor de IA para entrenar con historial real ≥30 días).
 COM-64 v3: /padron/prediccion_demanda NULL-SAFE (sin_datos=True en vez de 500) y
@@ -18,13 +25,12 @@ del motor: confianza_pct, n_muestras y r2 por tipo.
 La predicción expuesta es la PURA del modelo (el motor ya no aplica pisos
 mínimos IA_MIN_/IA_FINDE_; esos parámetros quedan en BD sin uso activo).
 Trazabilidad: la respuesta v3 (solo pred[0..2] y sum(pred)) queda comentada.
-COM-86 (este archivo): /padron/hoy y /padron/stats aceptan parámetros opcionales
+COM-86: /padron/hoy y /padron/stats aceptan parámetros opcionales
 `fecha` (YYYY-MM-DD) y `comedor_id` para filtrar ventas por fecha y comedor.
 Para filtrar por comedor se hace JOIN con usuario_comedor (comensal vinculado a
-comedor) o se usa el filtro directo si padron_diario tuviera comedor_id.
-Sin parámetros, comportamiento legacy (hoy, todos los comedores).
+comedor). Sin parámetros, comportamiento legacy (hoy, todos los comedores).
 Uso: Registrado en main.py sin prefijo propio (rutas /padron/* y /comensales/*).
-Referencia: tickets COM-62, COM-63, COM-64, COM-86 (solo trazabilidad).
+Referencia: tickets COM-62, COM-63, COM-63 v2, COM-64, COM-86 (solo trazabilidad).
 """
 from datetime import date, datetime
 from typing import Optional
@@ -37,10 +43,13 @@ import psycopg2
 from database import get_db, get_parametros_dict
 from schemas.comensal import RegistroVentaInput, ModificarVentaInput
 from ai_engine import predecir_demanda_raciones
+
 router = APIRouter(tags=["Padrón y POS"])
+
 # COM-62 v2: documento reservado para comensales atendidos solo por nombre.
 DNI_SIN_DATO = '00000000'
 TIPOS_COMENSAL_VALIDOS = ('Social', 'Afiliado', 'Normal', 'Cocinera')
+
 
 # ==========================================
 # COM-62 v2: MODELOS DE ENTRADA POS (locales, no rompen schemas.comensal)
@@ -54,6 +63,7 @@ class NuevoComensalPOSInput(BaseModel):
     apellido_materno: Optional[str] = None
     tipo_comensal: str = 'Normal'
 
+
 class EditarComensalPOSInput(BaseModel):
     """Edición de ficha; permite COMPLETAR el DNI tiempo después."""
     nombres: Optional[str] = None
@@ -61,6 +71,7 @@ class EditarComensalPOSInput(BaseModel):
     apellido_materno: Optional[str] = None
     tipo_comensal: Optional[str] = None
     documento_identidad: Optional[str] = None
+
 
 # ==========================================
 # PREDICCIÓN DE DEMANDA (COM-64 / v3 null-safe / v4 con confianza)
@@ -132,6 +143,7 @@ def predecir_demanda_diaria(fecha_str: str = None, db=Depends(get_db)):
         "r2": pred['r2'],
     }
 
+
 # ==========================================
 # COM-62 v2: AUTOCOMPLETADO POR NOMBRE (excluye al Cliente Genérico)
 # ==========================================
@@ -159,6 +171,7 @@ def buscar_comensales_por_nombre(q: str = '', limite: int = 8, db=Depends(get_db
     finally:
         cur.close()
 
+
 # ==========================================
 # BÚSQUEDA EXACTA POR DOCUMENTO
 # ==========================================
@@ -181,6 +194,7 @@ def buscar_comensal(documento: str, db=Depends(get_db)):
         return res
     finally:
         cur.close()
+
 
 # ==========================================
 # COM-62 v2: EDICIÓN DE FICHA (incluye completar/corregir DNI después)
@@ -240,6 +254,7 @@ def editar_comensal(comensal_id: int, data: EditarComensalPOSInput, db=Depends(g
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         cur.close()
+
 
 # ==========================================
 # REGISTRO DE COMENSAL (COM-62 v2: documento OPCIONAL)
@@ -319,6 +334,7 @@ def registrar_comensal_manual(data: NuevoComensalPOSInput, db=Depends(get_db)):
     finally:
         cur.close()
 
+
 # ==========================================
 # VENTAS (POS)
 # ==========================================
@@ -340,6 +356,7 @@ def registrar_venta_padron(data: RegistroVentaInput, db=Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         cur.close()
+
 
 @router.put("/padron/{venta_id}")
 def modificar_venta_padron(venta_id: int, data: ModificarVentaInput, db=Depends(get_db)):
@@ -392,6 +409,7 @@ def modificar_venta_padron(venta_id: int, data: ModificarVentaInput, db=Depends(
     finally:
         cur.close()
 
+
 @router.delete("/padron/{venta_id}")
 def eliminar_venta_padron(venta_id: int, db=Depends(get_db)):
     cur = db.cursor(cursor_factory=RealDictCursor)
@@ -412,6 +430,7 @@ def eliminar_venta_padron(venta_id: int, db=Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         cur.close()
+
 
 # ==========================================
 # COM-86: VENTAS DEL DÍA (con filtro por fecha y comedor)
@@ -464,6 +483,7 @@ def obtener_ventas_hoy(
     finally:
         cur.close()
 
+
 # ==========================================
 # COM-86: ESTADÍSTICAS DEL DÍA (con filtro por fecha y comedor)
 # ==========================================
@@ -512,8 +532,9 @@ def obtener_estadisticas_padron(
     finally:
         cur.close()
 
+
 # ==========================================
-# COM-63: CARGA MASIVA DE ATENCIONES HISTÓRICAS
+# COM-63 + COM-63 v2: CARGA MASIVA IDEMPOTENTE DE ATENCIONES HISTÓRICAS
 # ==========================================
 @router.post("/padron/carga-masiva")
 async def carga_masiva_historica(
@@ -529,20 +550,32 @@ async def carga_masiva_historica(
     Agrega múltiples filas CSV de una misma fecha SUMÁNDOLAS (si el archivo
     tuviera filas duplicadas erróneas, deben limpiarse antes: el motor no puede
     adivinar cuál es la buena).
-    Estructura CSV: fecha;afiliados;publico;sociales;cocineras
+    Estructura del CSV: fecha;afiliados;publico;sociales;cocineras
+    - fecha: YYYY-MM-DD o DD/MM/YYYY
+    - afiliados: int >= 0
+    - publico: int >= 0 (mapeado a 'Normal')
+    - sociales: int >= 0 (mapeado a 'Social')
+    - cocineras: int >= 0 (nuevo tipo, precio 0.00, comensal genérico CO000000)
+    Las filas históricas de Social/Afiliado/Normal se insertan con comensal_id NULL
+    (no existen fichas individuales para atenciones pasadas); las de Cocinera se
+    vinculan al comensal genérico. Retorna resumen con procesadas/omitidas/creadas
+    y filas históricas reemplazadas.
     """
     if not file.filename.endswith('.csv'):
         raise HTTPException(status_code=400, detail="El archivo debe ser CSV")
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
+        # Leer contenido del CSV
         contenido = await file.read()
-        texto = contenido.decode('utf-8-sig')
+        texto = contenido.decode('utf-8-sig')  # utf-8-sig maneja BOM de Excel
+        # Parsear CSV con separador ;
         reader = csv.DictReader(io.StringIO(texto), delimiter=';')
         agregado = {}          # fecha -> {tipo: cantidad acumulada}
         filas_omitidas = 0
         detalle_omitidas = []
-        for idx, fila in enumerate(reader, start=2):
+        for idx, fila in enumerate(reader, start=2):  # start=2 porque fila 1 es header
             try:
+                # Parsear fecha (aceptar YYYY-MM-DD o DD/MM/YYYY)
                 fecha_str = (fila.get('fecha') or '').strip()
                 if not fecha_str:
                     detalle_omitidas.append({"fila": idx, "razon": "fecha vacía"})
@@ -557,6 +590,7 @@ async def carga_masiva_historica(
                         detalle_omitidas.append({"fila": idx, "razon": f"fecha inválida: {fecha_str}"})
                         filas_omitidas += 1
                         continue
+                # Parsear cantidades
                 afi = int(fila.get('afiliados', 0) or 0)
                 pub = int(fila.get('publico', 0) or 0)
                 soc = int(fila.get('sociales', 0) or 0)
@@ -575,6 +609,7 @@ async def carga_masiva_historica(
                 filas_omitidas += 1
         if not agregado:
             raise HTTPException(status_code=400, detail="El CSV no contiene filas válidas.")
+        # Obtener comensal genérico "Cocinera"
         cur.execute("SELECT id FROM comensales WHERE documento_identidad = 'CO000000';")
         row_coc = cur.fetchone()
         if not row_coc:
