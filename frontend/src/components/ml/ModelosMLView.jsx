@@ -8,6 +8,10 @@ COM-60: scatter K-means con 6 variables nutricionales.
 COM-76: precio fuera del tooltip K-means.
 COM-91: MAPE en métricas RF.
 COM-92 (este archivo): selector de modelo RF vs GBM con comparación de métricas.
+COM-92 FIX: se reemplaza la constante `TIPOS` (indefinida en frontend) por el
+array local `TIPOS_COMENSAL` dentro del componente ComparadorMetricas.
+Uso: Montada por App.jsx en la pestaña "Modelos ML" (gate por módulo 'modelos_ml').
+Referencia: tickets COM-5 v4 / COM-8 v7 / COM-60 / COM-76 / COM-91 / COM-92.
 */
 import React, { useState, useEffect, useCallback } from 'react';
 import {
@@ -39,6 +43,9 @@ const MODELOS_ML = [
     { key: 'rf', label: 'Random Forest', descripcion: 'Ensemble de árboles, robusto a outliers' },
     { key: 'gbm', label: 'Gradient Boosting', descripcion: 'Boosting secuencial, mejor para patrones temporales' },
 ];
+
+// COM-92 FIX: tipos de comensal (antes se usaba TIPOS del backend, que no existe aquí)
+const TIPOS_COMENSAL = ['social', 'afiliado', 'normal'];
 
 // ==========================================
 // UTILIDADES SVG
@@ -95,6 +102,7 @@ const ScatterRF = ({ puntos, modeloKey }) => {
 };
 
 // COM-92: componente de comparación de métricas
+// COM-92 FIX: usa TIPOS_COMENSAL local en lugar de TIPOS (que no existe en frontend)
 const ComparadorMetricas = ({ rf, gbm }) => {
     if (!rf || !gbm) return null;
     return (
@@ -104,10 +112,14 @@ const ComparadorMetricas = ({ rf, gbm }) => {
             </p>
             <div className="grid grid-cols-3 gap-2 text-xs">
                 <div className="text-slate-600 font-semibold">Tipo</div>
-                <div className="text-center text-slate-700 font-semibold">{rf.modelo_key === 'rf' ? 'Random Forest' : 'Gradient Boosting'}</div>
-                <div className="text-center text-slate-700 font-semibold">{gbm.modelo_key === 'gbm' ? 'Gradient Boosting' : 'Random Forest'}</div>
+                <div className="text-center text-slate-700 font-semibold">
+                    {rf.modelo_key === 'rf' ? 'Random Forest' : 'Gradient Boosting'}
+                </div>
+                <div className="text-center text-slate-700 font-semibold">
+                    {gbm.modelo_key === 'gbm' ? 'Gradient Boosting' : 'Random Forest'}
+                </div>
             </div>
-            {TIPOS.map(tipo => {
+            {TIPOS_COMENSAL.map(tipo => {
                 const m1 = rf.metricas[tipo] || {};
                 const m2 = gbm.metricas[tipo] || {};
                 const mejorR2 = m1.r2 > m2.r2 ? 1 : 2;
@@ -292,8 +304,7 @@ export const ModelosMLView = () => {
                             1. {MODELOS_ML.find(m => m.key === modeloSeleccionado)?.label} — Demanda real vs predicha
                         </h3>
                         <p className="text-[11px] text-slate-500 mb-3">
-                            Variables: dia_semana, mes, dia_del_mes, es_fin_de_semana, tendencia, lag_1, lag_7, 
-                            media_movil_7, media_movil_14, codificación cíclica · Split temporal 80/20 ·
+                            Variables: dia_semana, mes, dia_del_mes, es_fin_de_semana · Split temporal 80/20 ·
                             La línea punteada es la predicción perfecta (y = x).
                         </p>
                         {!rf ? (
@@ -458,7 +469,9 @@ export const ModelosMLView = () => {
     );
 };
 
-// ScatterKmeans, BarrasGreedy, LineasGreedy se mantienen igual que en la versión anterior
+// ==========================================
+// COMPONENTES AUXILIARES (K-means y Greedy)
+// ==========================================
 const ScatterKmeans = ({ data }) => {
     const W = 560, H = 380, M = { t: 16, r: 16, b: 48, l: 56 };
     const xs = [...data.puntos.map(p => p.x), ...data.centroides.map(c => c.x)];
