@@ -41,8 +41,8 @@ COM-72: AFINADO ante clusters singleton y silhouette baja:
       < KMEANS_MIN_CLUSTER_RECETAS miembros) en parametros y en el resumen, para que
       el comité detecte singletons sin que el motor los fusione a ciegas.
     * No se elimina ningún helper, regla ni bloque de trazabilidad de COM-71.
-COM-76 (este archivo): CLUSTERING 100% NUTRICIONAL CON ETIQUETAS DE NEGOCIO Y
-    COSTEO ACOTADO (fix del 504 en /kmeans/entrenar):
+COM-76: CLUSTERING 100% NUTRICIONAL CON ETIQUETAS DE NEGOCIO Y COSTEO ACOTADO
+    (fix del 504 en /kmeans/entrenar):
     * D1: CODIGO_ETIQUETA restaura las etiquetas de negocio con códigos ESTABLES:
       1='Anti-Anemia Premium', 2='Fortalecimiento Balanceado',
       3='Ligero y Saludable', 4='All-Rounder'. Se conserva el guion en
@@ -76,9 +76,33 @@ COM-76 (este archivo): CLUSTERING 100% NUTRICIONAL CON ETIQUETAS DE NEGOCIO Y
       recetas_clusters.cluster_etiqueta (varchar 60); las nuevas caben.
     * El precio SOLO alimenta el flag `costeable` (R4), nivel_precio informativo y el
       post-hoc Fe/S/ (auditoría backend); NO es feature de distancia ni de etiquetado.
-Uso: Importado por routers/kmeans.py y por ml/greedy_search.py (reglas R1/R2).
-Referencia: tickets COM-5 / COM-37 / COM-47 / COM-60 / COM-71 / COM-72 / COM-76
-(trazabilidad).
+COM-100 (este archivo): SILHOUETTE > 0.5 CON k=4 FIJO Y CRITERIOS DE NEGOCIO INTACTOS.
+    * R5 GUARDARRAÍL DE PLAUSIBILIDAD NUTRICIONAL: topes biológicos por nutriente
+      (parametro opcional KMEANS_TOPES_NUTRICIONALES, default TOPE_NUTRICIONAL_DEFAULT).
+      Valores fuera de rango se WINZORIZAN (acotan) para el entrenamiento y se auditan
+      en `caps_nutricionales` (misma filosofía COM-95: nunca se borra la receta).
+      Detecta el caso real del recetario: receta 280 con proteina_g=398 (typo de 39.8)
+      que secuestraba un cluster completo (singleton 'All-Rounder', silhouette 0.1856).
+    * BÚSQUEDA DE ESPACIO DE FEATURES: 5 espacios candidatos 100% nutricionales
+      (ESPACIOS_CANDIDATOS): 6-vars log, 4-vars discriminantes (sin energía/carbo
+      casi-constantes que diluyen separación), 6-vars con pesos de negocio,
+      densidades por 1000 kcal y perfil %CDR normalizado por fila. Se entrena k=4 en
+      cada uno y se ELIGE el de mejor silhouette sujeto a restricción de tamaño
+      (ningún cluster < KMEANS_MIN_CLUSTER_RECETAS). La tabla de candidatos y el
+      espacio elegido se persisten en kmeans_modelos.parametros (sin DDL).
+    * construir_matriz_espacio() es PÚBLICO y lo reusa routers/modelos_ml.py para que
+      el scatter PCA del panel replique EXACTAMENTE la geometría de entrenamiento
+      (fix COM-100: antes el panel proyectaba crudo+RobustScaler mientras el modelo
+      entrenaba en log1p+RobustScaler -> clusters "no se veían diferenciados").
+    * Centroides en unidades reales: inverse_transform cuando el espacio es
+      invertible (log/pesos); en espacios de densidad/perfil se usan MEDIANAS de los
+      miembros como centroide real documentado (no existe inversa única).
+    * Etiquetado COM-76 (medianas, biyección), reglas R0/R1/R2, costeo acotado COM-76
+      y curva k informativa: SIN CAMBIOS. Los criterios de los 4 grupos se conservan.
+Uso: Importado por routers/kmeans.py, routers/modelos_ml.py (COM-100) y
+ml/greedy_search.py (reglas R1/R2).
+Referencia: tickets COM-5 / COM-37 / COM-47 / COM-60 / COM-71 / COM-72 / COM-76 /
+COM-100 (trazabilidad).
 """
 import re
 import json
@@ -165,6 +189,90 @@ INGREDIENTES_VETADOS_DEFAULT = [
 # RE_PROHIBIDO = re.compile(
 #     r'\b(res|vaca|vacuno|cerdo|chancho|porcino|chorizo|salchicha|bistec|bisteck|lomo|panceta|tocino|chicharron)\b')
 
+# ==========================================
+# COM-100: TOPES DE PLAUSIBILIDAD NUTRICIONAL (R5)
+# ==========================================
+# Rangos biológicos por ración de almuerzo (comedor popular). Un valor fuera de rango
+# es candidato a error de captura (caso real: receta 280 con proteina_g=398).
+# Se pueden sobrescribir vía parametro KMEANS_TOPES_NUTRICIONALES (JSON {campo: [min,max]}).
+TOPE_NUTRICIONAL_DEFAULT = {
+    'energia_kcal': (150.0, 1200.0),
+    'hierro_mg': (0.5, 40.0),
+    'proteina_g': (5.0, 60.0),
+    'vitamina_a_ug': (10.0, 8000.0),
+    'zinc_mg': (0.5, 15.0),
+    'carbohidratos_g': (20.0, 220.0),
+}
+
+# ==========================================
+# COM-100: REFERENCIAS CENAN/INS PARA ESPACIO PERFIL (%CDR por almuerzo)
+# ==========================================
+REF_CDR_ALMUERZO = {
+    'energia_kcal': 800.0,
+    'hierro_mg': 10.0,
+    'proteina_g': 30.0,
+    'vitamina_a_ug': 300.0,
+    'zinc_mg': 5.0,
+    'carbohidratos_g': 110.0,
+}
+
+# ==========================================
+# COM-100: ESPACIOS CANDIDATOS DE FEATURES (todos 100% nutricionales)
+# ==========================================
+# Cada spec: {nombre, features, labels, log, pesos, densidad_kcal, perfil}.
+# 'log': aplica log1p a las features crudas antes de escalar.
+# 'pesos': importancia relativa por feature DESPUÉS del RobustScaler.
+# 'densidad_kcal': convierte hierro/proteina/vitA/zinc a por-1000-kcal antes de escalar.
+# 'perfil': divide cada nutriente entre su referencia CDR y normaliza la fila a suma 1
+#           (forma del perfil nutricional, elimina el "tamaño" de la ración).
+ESPACIOS_CANDIDATOS = [
+    {
+        'nombre': 'log6_completo',
+        'features': FEATURES,
+        'labels': FEATURES,
+        'log': True, 'pesos': None, 'densidad_kcal': False, 'perfil': False,
+    },
+    {
+        # COM-100: sin energía/carbohidratos (casi constantes por diseño NTS-127,
+        # solo aportan varianza intra-cluster y diluyen la separación).
+        'nombre': 'log4_discriminante',
+        'features': ['hierro_mg', 'proteina_g', 'vitamina_a_ug', 'zinc_mg'],
+        'labels': ['hierro_mg', 'proteina_g', 'vitamina_a_ug', 'zinc_mg'],
+        'log': True, 'pesos': None, 'densidad_kcal': False, 'perfil': False,
+    },
+    {
+        # COM-100: pesos alineados a los criterios de negocio (hierro y proteína
+        # definen Anti-Anemia y Fortalecimiento; el resto acompaña).
+        'nombre': 'log6_pesos_negocio',
+        'features': FEATURES,
+        'labels': FEATURES,
+        'log': True,
+        'pesos': {'hierro_mg': 1.5, 'proteina_g': 1.5, 'vitamina_a_ug': 0.6,
+                  'zinc_mg': 0.6, 'energia_kcal': 0.4, 'carbohidratos_g': 0.4},
+        'densidad_kcal': False, 'perfil': False,
+    },
+    {
+        # COM-100: densidades por 1000 kcal + energía log: separa por CALIDAD
+        # nutricional relativa en vez de por tamaño absoluto de ración.
+        'nombre': 'densidades_proteicas',
+        'features': ['hierro_mg', 'proteina_g', 'vitamina_a_ug', 'zinc_mg', 'energia_kcal'],
+        'labels': ['hierro_x_1000kcal', 'proteina_x_1000kcal', 'vitamina_a_x_1000kcal',
+                   'zinc_x_1000kcal', 'energia_kcal'],
+        'log': True,
+        'pesos': {'hierro_x_1000kcal': 1.4, 'proteina_x_1000kcal': 1.4,
+                  'vitamina_a_x_1000kcal': 0.5, 'zinc_x_1000kcal': 0.5, 'energia_kcal': 0.3},
+        'densidad_kcal': True, 'perfil': False,
+    },
+    {
+        # COM-100: forma del perfil (%CDR por nutriente normalizado a suma 1):
+        # agrupa recetas por su BALANCE relativo, no por magnitudes.
+        'nombre': 'perfil_cdr_normalizado',
+        'features': FEATURES,
+        'labels': [f'pct_{c}' for c in FEATURES],
+        'log': False, 'pesos': None, 'densidad_kcal': False, 'perfil': True,
+    },
+]
+
 
 # ==========================================
 # COM-72: TRANSFORMACIÓN DEL ESPACIO DE FEATURES
@@ -181,6 +289,146 @@ def _transformar_features(X: np.ndarray) -> np.ndarray:
 def _inv_transformar_features(Xl: np.ndarray) -> np.ndarray:
     """COM-72: inversa de log1p para regresar centroides a unidades reales."""
     return np.expm1(Xl)
+
+
+# ==========================================
+# COM-100: TOPES R5 Y MATRIZ DE ESPACIO (pública para el panel ML)
+# ==========================================
+def _cargar_topes(cur):
+    """Lee KMEANS_TOPES_NUTRICIONALES (JSON) o cae al default biológico COM-100."""
+    cur.execute("SELECT valor FROM parametros_sistema WHERE clave = 'KMEANS_TOPES_NUTRICIONALES';")
+    fila = cur.fetchone()
+    topes = {k: (float(v[0]), float(v[1])) for k, v in TOPE_NUTRICIONAL_DEFAULT.items()}
+    if fila and fila.get('valor'):
+        try:
+            parsed = json.loads(fila['valor'])
+            if isinstance(parsed, dict):
+                for k, v in parsed.items():
+                    if k in topes and isinstance(v, (list, tuple)) and len(v) == 2:
+                        topes[k] = (float(v[0]), float(v[1]))
+        except Exception:
+            pass  # JSON inválido: se conserva el default (degradación controlada)
+    return topes
+
+
+def _aplicar_topes_nutricionales(filas, topes):
+    """
+    COM-100 (R5): winsoriza cada nutriente al intervalo plausible [min,max].
+    Retorna (filas_acotadas, auditoria_caps). La receta NO se excluye ni se borra:
+    el valor original queda auditado en auditoria_caps para corrección en el
+    recetario (misma filosofía COM-95 de atípicos en demanda).
+    """
+    caps = []
+    out = []
+    for f in filas:
+        g = dict(f)
+        for campo, (lo, hi) in topes.items():
+            v = g.get(campo)
+            if v is None:
+                continue
+            if v < lo or v > hi:
+                caps.append({
+                    'receta_id': g['receta_id'],
+                    'nombre': g['nombre'],
+                    'campo': campo,
+                    'valor_original': round(float(v), 2),
+                    'valor_aplicado': round(min(max(float(v), lo), hi), 2),
+                })
+                g[campo] = round(min(max(float(v), lo), hi), 2)
+        out.append(g)
+    return out, caps
+
+
+def _fila_cruda_a_vector(filas, spec):
+    """
+    COM-100: convierte filas (dicts con los 6 nutrientes) a la matriz CRUDA del
+    espacio `spec` (antes de escalar): aplica densidad_kcal o perfil si corresponde.
+    """
+    X = []
+    for f in filas:
+        if spec.get('perfil'):
+            vals = []
+            total = 0.0
+            tmp = []
+            for c in spec['features']:
+                r = float(f.get(c, 0.0) or 0.0) / REF_CDR_ALMUERZO.get(c, 1.0)
+                tmp.append(max(r, 0.0))
+                total += max(r, 0.0)
+            vals = [(t / total) if total > 0 else 0.0 for t in tmp]
+            X.append(vals)
+        elif spec.get('densidad_kcal'):
+            kcal = float(f.get('energia_kcal', 0.0) or 0.0)
+            factor = 1000.0 / kcal if kcal > 0 else 0.0
+            row = []
+            for c in spec['features']:
+                if c == 'energia_kcal':
+                    row.append(kcal)
+                else:
+                    row.append(float(f.get(c, 0.0) or 0.0) * factor)
+            X.append(row)
+        else:
+            X.append([float(f.get(c, 0.0) or 0.0) for c in spec['features']])
+    return np.array(X, dtype=float)
+
+
+def construir_matriz_espacio(filas, spec):
+    """
+    COM-100 (pública): matriz ESCALADA+PONDERADA del espacio `spec` para `filas`.
+    Pipeline: crudo (densidad/perfil si aplica) -> log1p si spec['log'] ->
+    RobustScaler -> multiplicación por pesos de negocio si spec['pesos'].
+    La usa entrenar_y_persistir Y routers/modelos_ml.py para que el scatter PCA del
+    panel replique EXACTAMENTE la geometría de entrenamiento (fix visual COM-100).
+    Retorna (Xs, scaler).
+    """
+    X = _fila_cruda_a_vector(filas, spec)
+    if spec.get('log'):
+        X = _transformar_features(X)
+    scaler = RobustScaler()
+    Xs = scaler.fit_transform(X)
+    pesos = spec.get('pesos')
+    if pesos:
+        w = np.array([float(pesos.get(lbl, 1.0)) for lbl in spec['labels']], dtype=float)
+        Xs = Xs * w
+    return Xs, scaler
+
+
+def _espacio_invertible_a_reales(spec) -> bool:
+    """True si el espacio permite devolver centroides a unidades reales exactas."""
+    return not spec.get('perfil') and not spec.get('densidad_kcal')
+
+
+def _centroides_reales_de(spec, scaler, centros_Xs, miembros_por_indice):
+    """
+    COM-100: centroides en UNIDADES REALES por cluster.
+    - Espacios invertibles (log/pesos): se deshace peso -> scaler -> log1p.
+    - Espacios no invertibles (densidad/perfil): se usan las MEDIANAS de los miembros
+      como centroide real documentado (no existe inversa única de la normalización).
+    Retorna dict {indice_cluster: {feature_real: valor}} sobre las 6 FEATURES.
+    """
+    out = {}
+    pesos = spec.get('pesos') or {}
+    for i, miembros in miembros_por_indice.items():
+        if _espacio_invertible_a_reales(spec) and miembros:
+            v = np.array([centros_Xs[i]], dtype=float)
+            w = np.array([float(pesos.get(lbl, 1.0)) for lbl in spec['labels']], dtype=float)
+            v = v / w  # deshace ponderación (w>0 siempre por construcción)
+            v = scaler.inverse_transform(v)
+            if spec.get('log'):
+                v = _inv_transformar_features(v)
+            vals = v[0]
+            # Mapea de vuelta a las 6 FEATURES (el espacio puede ser subconjunto)
+            reales = {}
+            for j, lbl in enumerate(spec['labels']):
+                base = lbl.replace('_x_1000kcal', '')
+                reales[base] = round(float(vals[j]), 2)
+            for c in FEATURES:
+                if c not in reales:
+                    reales[c] = round(_mediana([m.get(c, 0.0) for m in miembros]), 2)
+            out[i] = reales
+        else:
+            out[i] = {c: round(_mediana([m.get(c, 0.0) for m in miembros]), 2)
+                      for c in FEATURES} if miembros else {c: 0.0 for c in FEATURES}
+    return out
 
 
 # ==========================================
@@ -424,8 +672,8 @@ def _opcion_con_prediccion(cur, ing_id, fecha, precios_insumo, peso_estimado_g):
     """
     COM-37 v7 + COM-75: mejor opción de precio del ingrediente con la MISMA jerarquía
     que Evaluar (scraper día > manual > RF > scraper último, centralizada en
-    precios_insumos). El bloque RF explícito se conserva como DOBLE SEGURO por si el
-    mapa viniera vacío para un ingrediente concreto.
+    precios_insumos). El bloque RF explícito se conserva como DOBLE SEGURO por si
+    el mapa viniera vacío para un ingrediente concreto.
     COM-76: el mapa que recibe ya viene ACOTADO a los insumos del recetario activo
     (ver construir_dataset), por lo que la RF solo se entrena para insumos relevantes.
     """
@@ -886,13 +1134,14 @@ def _post_hoc_por_indice(filas, labels):
 
 
 # ==========================================
-# COM-60 + COM-72 + COM-76: DIAGNÓSTICO DE K ÓPTIMO (informativo, espacio log1p)
+# COM-60 + COM-72 + COM-76 + COM-100: DIAGNÓSTICO DE K ÓPTIMO (informativo)
 # ==========================================
 def diagnosticar_k(cur, k_max=K_DIAG_MAX, filas_pre=None, excluidas_pre=None):
     """
     COM-60 (criterio D5) + COM-72: curva silhouette/inercia k=2..k_max sobre el
-    dataset apto en espacio log1p+RobustScaler. Devuelve k_recomendado (mejor
-    silhouette). NO persiste nada ni cambia el k operativo (KMEANS_K).
+    dataset apto. COM-100: la curva se calcula en el espacio BASE 'log6_completo'
+    (comparable entre entrenamientos históricos) sobre filas YA capadas por R5 si
+    el caller las pasa capadas; NO cambia el k operativo (KMEANS_K).
     COM-76 (D4c): acepta `filas_pre`/`excluidas_pre` ya construidos por el caller
     (entrenar_y_persistir) para NO reconstruir el dataset ni re-ejecutar el costeo/RF
     una segunda vez dentro de la misma petición.
@@ -908,9 +1157,8 @@ def diagnosticar_k(cur, k_max=K_DIAG_MAX, filas_pre=None, excluidas_pre=None):
         raise ValueError(
             f"Solo {n} recetas aptas para diagnosticar k (mínimo 3). "
             f"Cargue precios/nutrición o amplíe el recetario.")
-    X = _transformar_features(np.array([[f[c] for c in FEATURES] for f in filas], dtype=float))
-    scaler = RobustScaler()
-    Xs = scaler.fit_transform(X)
+    # COM-100: curva sobre el espacio base (trazabilidad con modelos anteriores)
+    Xs, _scaler = construir_matriz_espacio(filas, ESPACIOS_CANDIDATOS[0])
     tope = min(k_max, n - 1)
     curva = []
     for kk in range(K_DIAG_MIN, tope + 1):
@@ -937,21 +1185,72 @@ def diagnosticar_k(cur, k_max=K_DIAG_MAX, filas_pre=None, excluidas_pre=None):
 
 
 # ==========================================
-# ENTRENAMIENTO Y PERSISTENCIA (COM-72 + COM-76)
+# COM-100: BÚSQUEDA DEL MEJOR ESPACIO (k=4 fijo, sin singletons)
+# ==========================================
+def _buscar_mejor_espacio(filas, k, n_init):
+    """
+    COM-100: entrena KMeans(k) en cada espacio candidato y devuelve
+    (mejor_spec, mejor_resultado, tabla_evaluacion).
+    Restricción de validez: todos los clusters con >= KMEANS_MIN_CLUSTER_RECETAS
+    miembros y n_clusters == k (rechaza particiones con singletons tipo receta 280).
+    Criterio de selección: mayor silhouette entre válidos; desempate por inercia.
+    """
+    tabla = []
+    mejor = None
+    mejor_spec = None
+    for spec in ESPACIOS_CANDIDATOS:
+        try:
+            Xs, scaler = construir_matriz_espacio(filas, spec)
+            km = KMeans(n_clusters=k, random_state=RANDOM_STATE, n_init=n_init)
+            labels = km.fit_predict(Xs)
+            n_cl = len(set(labels))
+            tamanos = {}
+            for lab in labels:
+                tamanos[lab] = tamanos.get(lab, 0) + 1
+            valido = (n_cl == k) and all(v >= KMEANS_MIN_CLUSTER_RECETAS for v in tamanos.values())
+            sil = 0.0
+            if valido and Xs.shape[0] > n_cl:
+                sil = float(silhouette_score(Xs, labels))
+            fila_eval = {
+                'espacio': spec['nombre'],
+                'silhouette': round(sil, 4),
+                'inercia': round(float(km.inertia_), 4),
+                'tamanos': {int(a): int(b) for a, b in tamanos.items()},
+                'valido': bool(valido),
+            }
+            tabla.append(fila_eval)
+            if valido and (mejor is None or sil > mejor['silhouette'] or
+                           (sil == mejor['silhouette'] and km.inertia_ < mejor['inercia'])):
+                mejor = {'silhouette': sil, 'inercia': float(km.inertia_),
+                         'labels': labels, 'Xs': Xs, 'scaler': scaler, 'km': km,
+                         'tamanos': tamanos}
+                mejor_spec = spec
+        except Exception as e:
+            tabla.append({'espacio': spec['nombre'], 'silhouette': None,
+                          'inercia': None, 'tamanos': {}, 'valido': False,
+                          'error': str(e)})
+    return mejor_spec, mejor, tabla
+
+
+# ==========================================
+# ENTRENAMIENTO Y PERSISTENCIA (COM-72 + COM-76 + COM-100)
 # ==========================================
 def entrenar_y_persistir(cur):
     """
-    COM-71 + COM-72 + COM-76: pipeline completo: dataset (R0-R2 + flags R3/R4, costeo
-    ACOTADO a insumos del recetario) -> log1p -> RobustScaler -> K-means(k=KMEANS_K,
-    n_init=KMEANS_N_INIT default 25) -> re-etiquetado de NEGOCIO por medianas de las 6
-    variables (COM-76 D2) -> métricas post-hoc (solo costeables, auditoría) ->
-    diagnóstico de k REUSANDO el dataset (COM-76 D4c) -> persistencia del modelo activo
-    y su asignación receta->cluster (incluye costeable).
-    COM-5 v6: centroides en UNIDADES REALES (inverse_transform + expm1 en COM-72).
+    COM-71 + COM-72 + COM-76 + COM-100: pipeline completo:
+    dataset (R0-R2 + flags R3/R4, costeo ACOTADO) -> R5 caps de plausibilidad ->
+    BÚSQUEDA DE ESPACIO (5 candidatos, k=4 fijo, sin singletons, mejor silhouette) ->
+    K-means en el espacio elegido (n_init=KMEANS_N_INIT) -> re-etiquetado de NEGOCIO
+    por medianas (COM-76 D2, criterios intactos) -> métricas post-hoc (solo costeables)
+    -> diagnóstico de k REUSANDO el dataset -> persistencia del modelo activo y su
+    asignación receta->cluster (incluye costeable).
+    COM-100: persiste en parametros el espacio elegido (features/labels/pesos/transform),
+    la tabla de espacios evaluados y la auditoría de caps nutricionales (R5).
+    COM-5 v6: centroides en UNIDADES REALES (inversos cuando el espacio lo permite;
+    medianas de miembros en espacios densidad/perfil, documentado).
     COM-37 v5-fix: silhouette solo si n_samples > n_clusters.
-    COM-72: agrega tamanos_clusters y aviso_clusters_pequenos (singletons auditados).
-    COM-76: persiste en parametros el n_init efectivo y 'best_of' (sklearn conserva el
-    mejor run por inercia), y el criterio de etiquetado de negocio.
+    COM-72: tamanos_clusters y aviso_clusters_pequenos (singletons auditados).
+    COM-76: n_init efectivo y 'best_of' en parametros; costeo acotado; dataset reusado.
     Retorna el resumen del entrenamiento (dict). El caller gestiona el commit.
     """
     k, bajo_max, medio_max, n_init = _parametros_kmeans(cur)
@@ -965,14 +1264,32 @@ def entrenar_y_persistir(cur):
             f"excluidas por nutrición incompleta). Complete los 6 nutrientes o amplíe "
             f"el recetario. (Las recetas sin precio NO se excluyen: quedan costeable=False.)")
 
-    # COM-72: log1p antes de RobustScaler (trazabilidad: antes solo RobustScaler)
-    X = _transformar_features(np.array([[f[c] for c in FEATURES] for f in filas], dtype=float))
-    scaler = RobustScaler()
-    Xs = scaler.fit_transform(X)
-    # COM-60 (trazabilidad): línea anterior sin log1p:
-    # Xs = scaler.fit_transform(np.array([[f[c] for c in FEATURES] for f in filas], dtype=float))
+    # ---- COM-100 (R5): caps de plausibilidad nutricional + auditoría ----
+    topes = _cargar_topes(cur)
+    filas, caps_nutricionales = _aplicar_topes_nutricionales(filas, topes)
 
-    # COM-60 + COM-76 (D4c): diagnóstico de k óptimo REUSANDO el dataset ya construido
+    # ---- COM-100: búsqueda del mejor espacio de features ----
+    spec, mejor, tabla_espacios = _buscar_mejor_espacio(filas, k, n_init)
+    if mejor is None:
+        # Degradación controlada: si ningún espacio cumple la restricción de tamaños,
+        # se usa el espacio base con su partición (mejor inercia) y se audita el aviso.
+        spec = ESPACIOS_CANDIDATOS[0]
+        Xs, scaler = construir_matriz_espacio(filas, spec)
+        km = KMeans(n_clusters=k, random_state=RANDOM_STATE, n_init=n_init)
+        labels = km.fit_predict(Xs)
+        mejor = {'silhouette': float(silhouette_score(Xs, labels)) if len(set(labels)) > 1
+                 and Xs.shape[0] > len(set(labels)) else 0.0,
+                 'inercia': float(km.inertia_), 'labels': labels, 'Xs': Xs,
+                 'scaler': scaler, 'km': km,
+                 'tamanos': {int(l): int((labels == l).sum()) for l in set(labels)}}
+    labels = mejor['labels']
+    Xs = mejor['Xs']
+    scaler = mejor['scaler']
+    km = mejor['km']
+    inercia = mejor['inercia']
+    silhouette = mejor['silhouette']
+
+    # COM-60 + COM-76 (D4c): diagnóstico de k óptimo REUSANDO el dataset ya capado
     curva_k = []
     k_recomendado = k
     try:
@@ -982,32 +1299,28 @@ def entrenar_y_persistir(cur):
     except Exception as e:
         print(f"[COM-60] No se pudo calcular el diagnóstico de k: {e}")
 
-    # COM-76 (D6): n_init parametrizado (default 25); sklearn conserva el mejor run.
-    km = KMeans(n_clusters=k, random_state=RANDOM_STATE, n_init=n_init)
-    labels = km.fit_predict(Xs)
-    inercia = float(km.inertia_)
-    n_clusters_obtenidos = len(set(labels))
-    if n_clusters_obtenidos > 1 and Xs.shape[0] > n_clusters_obtenidos:
-        silhouette = float(silhouette_score(Xs, labels))
-    else:
-        silhouette = 0.0
-
     medianas_idx = _medianas_por_indice(filas, labels)
-    # COM-76 (D2): etiquetado de NEGOCIO por medianas de las 6 variables
+    # COM-76 (D2): etiquetado de NEGOCIO por medianas de las 6 variables (INTACTO)
     asignacion = _etiquetar_por_medianas(medianas_idx)
     post_hoc_idx = _post_hoc_por_indice(filas, labels)
 
-    # COM-72: centroides log-espacio -> unidades reales con expm1
-    centros_log = scaler.inverse_transform(km.cluster_centers_)
-    centros_crudos = _inv_transformar_features(centros_log)
+    # COM-100: centroides en unidades reales según invertibilidad del espacio elegido.
+    # COM-72 (trazabilidad): antes se invertía siempre log1p+RobustScaler del espacio único.
+    miembros_por_indice = {}
+    for f, lab in zip(filas, labels):
+        miembros_por_indice.setdefault(lab, []).append(f)
+    centros_Xs = km.cluster_centers_
+    centroides_reales_idx = _centroides_reales_de(spec, scaler, centros_Xs, miembros_por_indice)
     centroides = {}
     centroides_robustos = {}
     for i, codigo in asignacion.items():
         centroides[str(codigo)] = {
-            FEATURES[j]: round(float(centros_crudos[i][j]), 2) for j in range(len(FEATURES))
+            FEATURES[j]: round(float(centroides_reales_idx.get(i, {}).get(FEATURES[j], 0.0)), 2)
+            for j in range(len(FEATURES))
         }
+        # COM-100: centroides en el espacio ESCALADO+PONDERADO (los proyecta el panel ML)
         centroides_robustos[str(codigo)] = {
-            FEATURES[j]: round(float(km.cluster_centers_[i][j]), 4) for j in range(len(FEATURES))
+            spec['labels'][j]: round(float(centros_Xs[i][j]), 4) for j in range(len(spec['labels']))
         }
     etiquetas = {str(c): CODIGO_ETIQUETA[c] for c in asignacion.values()}
     medianas_por_codigo = {}
@@ -1035,7 +1348,8 @@ def entrenar_y_persistir(cur):
         # COM-71: R3 informativa y R4 como flag (antes excluían del dataset)
         'reglas': ['R0_seis_nutrientes_completos_COM60v2.1', 'R1_proteina_permitida',
                    'R2_veto_configurable', 'R3_nivel_precio_informativo_COM71',
-                   'R4_flag_costeable_COM71'],
+                   'R4_flag_costeable_COM71',
+                   'R5_topes_plausibilidad_nutricional_COM100'],
         # COM-60: auditoría del modelo v2
         'scaler': 'RobustScaler',
         'transform': TRANSFORM,  # COM-72
@@ -1056,14 +1370,17 @@ def entrenar_y_persistir(cur):
                       'restante -> All-Rounder)',
         'costeo_acotado_insumos': True,
         'dataset_reusado_para_curva_k': True,
-        'criterio': ('COM-76: clustering SOLO nutricional en espacio log1p+RobustScaler con '
-                     'etiquetas de negocio (Anti-Anemia Premium, Fortalecimiento Balanceado, '
-                     'Ligero y Saludable, All-Rounder); el precio no es feature ni etiqueta: '
-                     'solo alimenta el flag costeable (R4), nivel_precio informativo y el '
-                     'post-hoc Fe/S/; prioridad Anemia Cero y desempate Fe/S/ en el greedy '
-                     '(COM-60); holgura semanal y stock remanente del subsidio en el greedy '
-                     '(COM-71); costeo del dataset acotado a insumos del recetario y dataset '
-                     'reutilizado para la curva de k (COM-76 D4, fix del 504).'),
+        # COM-100: auditoría del espacio elegido, candidatos y caps R5
+        'espacio_elegido': spec,
+        'espacios_evaluados': tabla_espacios,
+        'caps_nutricionales': caps_nutricionales,
+        'topes_nutricionales': {kk: list(vv) for kk, vv in topes.items()},
+        'criterio': ('COM-100: clustering SOLO nutricional con ESPACIO ELEGIDO por mejor '
+                     'silhouette entre 5 candidatos (k=4 fijo por negocio, sin clusters '
+                     '< 2 miembros); R5 acota nutrientes implausibles (auditoría '
+                     'caps_nutricionales) sin borrar recetas; etiquetas de negocio COM-76 '
+                     'intactas; el precio no es feature: solo flag costeable (R4), '
+                     'nivel_precio informativo y post-hoc Fe/S/.'),
     }
     cur.execute("""
         INSERT INTO kmeans_modelos
@@ -1118,6 +1435,11 @@ def entrenar_y_persistir(cur):
         'scaler': 'RobustScaler',
         'transform': TRANSFORM,
         'features': FEATURES,
+        # COM-100: espacio elegido y candidatos (transparencia de la búsqueda)
+        'espacio_elegido': spec['nombre'],
+        'features_espacio': spec['labels'],
+        'espacios_evaluados': tabla_espacios,
+        'caps_nutricionales': caps_nutricionales,
         'k_recomendado': k_recomendado,
         'k_evaluados': curva_k,
         'n_imputadas': 0,
@@ -1183,9 +1505,12 @@ def listar_candidatas(cur):
     COM-71: agrega n_costeables / n_no_costeables y el detalle de ingredientes sin
     precio en cada fila apta no costeable.
     COM-76: heredará el costeo acotado de construir_dataset (misma función).
+    COM-100: aplica también los caps R5 para que la vista refleje lo que ve el modelo.
     """
     k, bajo_max, medio_max, n_init = _parametros_kmeans(cur)
     filas, excluidas = construir_dataset(cur, bajo_max, medio_max)
+    topes = _cargar_topes(cur)
+    filas, _caps = _aplicar_topes_nutricionales(filas, topes)
     return {
         'k': k,
         'n_init': n_init,
