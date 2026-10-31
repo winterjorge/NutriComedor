@@ -521,41 +521,29 @@ async def carga_masiva_historica(
     db=Depends(get_db)
 ):
     """
-    COM-63: carga masiva de atenciones históricas desde CSV.
-    Estructura del CSV: fecha;afiliados;publico;sociales;cocineras
-    - fecha: YYYY-MM-DD o DD/MM/YYYY
-    - afiliados: int >= 0
-    - publico: int >= 0 (mapeado a 'Normal')
-    - sociales: int >= 0 (mapeado a 'Social')
-    - cocineras: int >= 0 (nuevo tipo, precio 0.00, comensal genérico CO000000)
-    Las filas históricas de Social/Afiliado/Normal se insertan con comensal_id NULL
-    (no existen fichas individuales para atenciones pasadas); las de Cocinera se
-    vinculan al comensal genérico. Retorna resumen con procesadas/omitidas/creadas.
+    COM-63 + COM-63 v2 (este bloque): carga masiva IDEMPOTENTE por fecha.
+    v2: antes de insertar, ELIMINA las filas históricas (observacion='Carga
+    histórica COM-63') de las fechas presentes en el archivo, de modo que
+    re-ejecutar la carga NO duplica atenciones (el ON CONFLICT DO NOTHING
+    anterior nunca disparaba porque padron_diario no tiene unique (fecha,tipo)).
+    Agrega múltiples filas CSV de una misma fecha SUMÁNDOLAS (si el archivo
+    tuviera filas duplicadas erróneas, deben limpiarse antes: el motor no puede
+    adivinar cuál es la buena).
+    Estructura CSV: fecha;afiliados;publico;sociales;cocineras
     """
     if not file.filename.endswith('.csv'):
         raise HTTPException(status_code=400, detail="El archivo debe ser CSV")
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
-        # Leer contenido del CSV
         contenido = await file.read()
-        texto = contenido.decode('utf-8-sig')  # utf-8-sig maneja BOM de Excel
-        # Parsear CSV con separador ;
+        texto = contenido.decode('utf-8-sig')
         reader = csv.DictReader(io.StringIO(texto), delimiter=';')
-        filas_procesadas = 0
+        agregado = {}          # fecha -> {tipo: cantidad acumulada}
         filas_omitidas = 0
-        ventas_creadas = 0
         detalle_omitidas = []
-        fechas = []
-        # Obtener comensal genérico "Cocinera"
-        cur.execute("SELECT id FROM comensales WHERE documento_identidad = 'CO000000';")
-        comensal_cocinera = cur.fetchone()
-        if not comensal_cocinera:
-            raise HTTPException(status_code=500, detail="Comensal genérico 'Cocinera' no existe")
-        cocinera_id = comensal_cocinera['id']
-        for idx, fila in enumerate(reader, start=2):  # start=2 porque fila 1 es header
+        for idx, fila in enumerate(reader, start=2):
             try:
-                # Parsear fecha (aceptar YYYY-MM-DD o DD/MM/YYYY)
-                fecha_str = fila.get('fecha', '').strip()
+                fecha_str = (fila.get('fecha') or '').strip()
                 if not fecha_str:
                     detalle_omitidas.append({"fila": idx, "razon": "fecha vacía"})
                     filas_omitidas += 1
@@ -569,58 +557,60 @@ async def carga_masiva_historica(
                         detalle_omitidas.append({"fila": idx, "razon": f"fecha inválida: {fecha_str}"})
                         filas_omitidas += 1
                         continue
-                # Parsear cantidades
-                afiliados = int(fila.get('afiliados', 0) or 0)
-                publico = int(fila.get('publico', 0) or 0)
-                sociales = int(fila.get('sociales', 0) or 0)
-                cocineras = int(fila.get('cocineras', 0) or 0)
-                if afiliados + publico + sociales + cocineras == 0:
+                afi = int(fila.get('afiliados', 0) or 0)
+                pub = int(fila.get('publico', 0) or 0)
+                soc = int(fila.get('sociales', 0) or 0)
+                coc = int(fila.get('cocineras', 0) or 0)
+                if afi + pub + soc + coc == 0:
                     detalle_omitidas.append({"fila": idx, "razon": "todos los tipos en 0"})
                     filas_omitidas += 1
                     continue
-                # Insertar ventas para cada tipo
-                tipos_venta = [
-                    ('Afiliado', afiliados),
-                    ('Normal', publico),
-                    ('Social', sociales),
-                    ('Cocinera', cocineras),
-                ]
-                for tipo, cantidad in tipos_venta:
-                    if cantidad > 0:
-                        # Determinar comensal_id y precio
-                        if tipo == 'Cocinera':
-                            comensal_id = cocinera_id
-                            precio = 0.00
-                        else:
-                            # Históricos sin ficha individual: comensal_id NULL
-                            comensal_id = None
-                            precio = {'Afiliado': 3.00, 'Normal': 5.00, 'Social': 0.00}[tipo]
-                        monto = precio * cantidad
-                        cur.execute("""
-                            INSERT INTO padron_diario
-                            (comensal_id, fecha, tipo_comensal_venta, raciones, monto_pagado, tipo_menu, observacion)
-                            VALUES (%s, %s, %s, %s, %s, 'Almuerzo regular', 'Carga histórica COM-63')
-                            ON CONFLICT DO NOTHING
-                            RETURNING id;
-                        """, (comensal_id, fecha, tipo, cantidad, monto))
-                        if cur.fetchone():
-                            ventas_creadas += 1
-                filas_procesadas += 1
-                fechas.append(fecha)
+                dia = agregado.setdefault(fecha, {'Afiliado': 0, 'Normal': 0, 'Social': 0, 'Cocinera': 0})
+                dia['Afiliado'] += afi
+                dia['Normal'] += pub
+                dia['Social'] += soc
+                dia['Cocinera'] += coc
             except Exception as e:
                 detalle_omitidas.append({"fila": idx, "razon": str(e)})
                 filas_omitidas += 1
+        if not agregado:
+            raise HTTPException(status_code=400, detail="El CSV no contiene filas válidas.")
+        cur.execute("SELECT id FROM comensales WHERE documento_identidad = 'CO000000';")
+        row_coc = cur.fetchone()
+        if not row_coc:
+            raise HTTPException(status_code=500, detail="Comensal genérico 'Cocinera' no existe")
+        cocinera_id = row_coc['id']
+        fechas = sorted(agregado.keys())
+        # COM-63 v2: idempotencia — reemplaza la carga histórica previa de estas fechas
+        cur.execute("""
+            DELETE FROM padron_diario
+            WHERE fecha = ANY(%s) AND observacion = 'Carga histórica COM-63';
+        """, (fechas,))
+        filas_reemplazadas = cur.rowcount
+        precios = {'Afiliado': 3.00, 'Normal': 5.00, 'Social': 0.00, 'Cocinera': 0.00}
+        ventas_creadas = 0
+        for fecha in fechas:
+            for tipo, cantidad in agregado[fecha].items():
+                if cantidad <= 0:
+                    continue
+                comensal_id = cocinera_id if tipo == 'Cocinera' else None
+                monto = precios[tipo] * cantidad
+                cur.execute("""
+                    INSERT INTO padron_diario
+                    (comensal_id, fecha, tipo_comensal_venta, raciones, monto_pagado, tipo_menu, observacion)
+                    VALUES (%s, %s, %s, %s, %s, 'Almuerzo regular', 'Carga histórica COM-63')
+                    RETURNING id;
+                """, (comensal_id, fecha, tipo, cantidad, monto))
+                if cur.fetchone():
+                    ventas_creadas += 1
         db.commit()
-        rango = {
-            "desde": min(fechas).isoformat() if fechas else None,
-            "hasta": max(fechas).isoformat() if fechas else None
-        }
         return {
-            "filas_procesadas": filas_procesadas,
+            "filas_procesadas": len(fechas),
             "filas_omitidas": filas_omitidas,
             "ventas_creadas": ventas_creadas,
+            "filas_historicas_reemplazadas": filas_reemplazadas,
             "detalle_omitidas": detalle_omitidas[:10],
-            "rango_fechas": rango
+            "rango_fechas": {"desde": fechas[0].isoformat(), "hasta": fechas[-1].isoformat()},
         }
     except HTTPException:
         raise
