@@ -477,13 +477,24 @@ def _prediccion_ensemble(X_train, X_test, y_train, naive_test) -> list:
 # COM-97/98: SELECCIÓN AUTOMÁTICA DE ESTRATEGIA POR TIPO
 # ==========================================
 def _candidates_for(modelo_key: str) -> list:
-    """Candidatos a evaluar en el holdout según el modelo elegido en UI."""
+    """
+    COM-98 v3: candidatos LIMITADOS a la familia del modelo activo, para que el
+    Random Forest (o GBM) SIEMPRE participe en la predicción de toda serie con
+    variabilidad (planteamiento de tesis: "predicción con Random Forest").
+    Se RETIRA 'med3' puro como candidato: en series casi constantes (social) el
+    holdout lo elegía y dejaba al RF fuera del pipeline, mostrando importancias
+    en 0.0% y confundiendo la lectura del panel. Con ['rf', 'rf_blend'] el RF
+    participa siempre: puro si gana el holdout, o corregido por persistencia
+    robusta (blend 50/50) en semanas de quiebre de régimen — que es justo el
+    mecanismo que baja el MAPE de normal de 20.83% a ~7%.
+    'constante' se conserva SOLO para cocinera (std < 0.5): no es una demanda
+    predicha, es una constante de política (20 raciones de personal por día).
+    """
     if modelo_key == 'rf':
-        return ['rf', 'rf_blend', 'med3']
+        return ['rf', 'rf_blend']
     if modelo_key == 'gbm':
-        return ['gbm', 'gbm_blend', 'med3']
-    return ['ensemble', 'med3']
-
+        return ['gbm', 'gbm_blend']
+    return ['ensemble']
 
 def _prediccion_candidato(cand: str, X_tr, y_tr, X_te, med3_te, naive_te) -> list:
     """
