@@ -22,9 +22,8 @@ COM-47 v2: se dividió la nutrición de tabla entre raciones (interpretación er
 COM-47 v3: FIX definitivo: los valores nutricionales de recetas_almuerzo YA SON POR
     RACIÓN tal como se capturan; se usan SIN dividir (la división v2 queda COMENTADA).
 COM-60: K-MEANS v2: FEATURES = 6 variables NUTRICIONALES (el precio sale de la
-    distancia); RobustScaler; re-etiquetado por MEDIANAS (1=Anti-Anemia alto hierro,
-    2=Energético denso, 3=Proteico balanceado, 4=Ligero complementario); diagnóstico
-    de k óptimo (k=2..8, informativo); métricas post-hoc por cluster (Fe/S/, Prot/S/).
+    distancia); RobustScaler; re-etiquetado por MEDIANAS; diagnóstico de k óptimo
+    (k=2..8, informativo); métricas post-hoc por cluster (Fe/S/, Prot/S/).
 COM-60 v2.1: REGLA R0: el universo del modelo son SOLO recetas con los 6 nutrientes
     COMPLETOS; las incompletas se excluyen con motivo auditable 'nutricion_incompleta'
     (sin imputación; el bloque de imputación por mediana queda COMENTADO).
@@ -76,33 +75,52 @@ COM-76: CLUSTERING 100% NUTRICIONAL CON ETIQUETAS DE NEGOCIO Y COSTEO ACOTADO
       recetas_clusters.cluster_etiqueta (varchar 60); las nuevas caben.
     * El precio SOLO alimenta el flag `costeable` (R4), nivel_precio informativo y el
       post-hoc Fe/S/ (auditoría backend); NO es feature de distancia ni de etiquetado.
-COM-100 (este archivo): SILHOUETTE > 0.5 CON k=4 FIJO Y CRITERIOS DE NEGOCIO INTACTOS.
+COM-100: SILHOUETTE CON k=4 FIJO Y CRITERIOS DE NEGOCIO INTACTOS.
     * R5 GUARDARRAÍL DE PLAUSIBILIDAD NUTRICIONAL: topes biológicos por nutriente
       (parametro opcional KMEANS_TOPES_NUTRICIONALES, default TOPE_NUTRICIONAL_DEFAULT).
       Valores fuera de rango se WINZORIZAN (acotan) para el entrenamiento y se auditan
       en `caps_nutricionales` (misma filosofía COM-95: nunca se borra la receta).
-      Detecta el caso real del recetario: receta 280 con proteina_g=398 (typo de 39.8)
+      Detectó el caso real del recetario: receta 280 con proteina_g=398 (typo de 39.8)
       que secuestraba un cluster completo (singleton 'All-Rounder', silhouette 0.1856).
-    * BÚSQUEDA DE ESPACIO DE FEATURES: 5 espacios candidatos 100% nutricionales
-      (ESPACIOS_CANDIDATOS): 6-vars log, 4-vars discriminantes (sin energía/carbo
-      casi-constantes que diluyen separación), 6-vars con pesos de negocio,
-      densidades por 1000 kcal y perfil %CDR normalizado por fila. Se entrena k=4 en
-      cada uno y se ELIGE el de mejor silhouette sujeto a restricción de tamaño
-      (ningún cluster < KMEANS_MIN_CLUSTER_RECETAS). La tabla de candidatos y el
-      espacio elegido se persisten en kmeans_modelos.parametros (sin DDL).
+    * BÚSQUEDA DE ESPACIO DE FEATURES: espacios candidatos 100% nutricionales
+      (ESPACIOS_CANDIDATOS). Se entrena k=4 en cada uno y se ELIGE el de mejor
+      silhouette sujeto a restricción de tamaño (ningún cluster <
+      KMEANS_MIN_CLUSTER_RECETAS). La tabla de candidatos y el espacio elegido se
+      persisten en kmeans_modelos.parametros (sin DDL). Resultado medido: 0.1856 ->
+      0.2966 con 'log4_discriminante' (hierro, proteína, vit A, zinc).
     * construir_matriz_espacio() es PÚBLICO y lo reusa routers/modelos_ml.py para que
       el scatter PCA del panel replique EXACTAMENTE la geometría de entrenamiento
-      (fix COM-100: antes el panel proyectaba crudo+RobustScaler mientras el modelo
-      entrenaba en log1p+RobustScaler -> clusters "no se veían diferenciados").
+      (fix: antes el panel proyectaba crudo+RobustScaler mientras el modelo entrenaba
+      en log1p+RobustScaler -> clusters "no se veían diferenciados").
     * Centroides en unidades reales: inverse_transform cuando el espacio es
       invertible (log/pesos); en espacios de densidad/perfil se usan MEDIANAS de los
       miembros como centroide real documentado (no existe inversa única).
-    * Etiquetado COM-76 (medianas, biyección), reglas R0/R1/R2, costeo acotado COM-76
-      y curva k informativa: SIN CAMBIOS. Los criterios de los 4 grupos se conservan.
+COM-101 (este archivo): PESOS CALIBRADOS EN LOS GAPS REALES + CRITERIOS REDEFINIDOS
+    CON NOMBRES INTACTOS (decisión del usuario: el paper usa estos nombres).
+    * Medidos sobre el volcado de 47 recetas: el zinc separa SIN SOLAPE carne
+      (4-7 mg) de pescado (2-3 mg); la proteína separa SIN SOLAPE pesados (29-41 g)
+      de ligeros (21-27 g); hierro+vitamina A aislan vísceras (Anti-Anemia). La
+      vitamina A con peso 1.0 inflaba la varianza INTRA-cluster del blob de 22
+      recetas (rango 41-5633 µg con solo 5 recetas de hígado) sin aportar
+      separación: por eso el silhouette topaba en 0.2966.
+    * Se AGREGAN 3 espacios candidatos con pesos calibrados a esos gaps
+      (zinc/proteína x1.4-1.6, vitamina A x0.5-0.7); la búsqueda COM-100 elige el
+      mejor con la misma auditoría (espacios_evaluados).
+    * RE-ETIQUETADO v2 (biyección, nombres y códigos ESTABLES): paso 2 pasa a
+      media-z(proteína, zinc) —la vit A ya no secuestra Fortalecimiento (caso real:
+      receta 52 'Hígado frito' con Fe 6 caía allí por vit A 2605)—; paso 3 pasa a
+      menor mediana de PROTEÍNA (la energía no discrimina: 741-863 kcal por
+      regulación NTS-127); paso 4 restante = perfil marino balanceado.
+    * DESCRIPCION_ETIQUETA: significados redefinidos con justificación de datos,
+      expuestos en el resumen ('descripcion_etiquetas', 'clusters[].descripcion') y
+      en parametros para auditoría de tesis. El criterio anterior (COM-76 D2) queda
+      comentado como trazabilidad.
+    * Sin cambios: k=4 operativo, reglas R0-R5, costeo acotado COM-76, curva k
+      informativa, greedy (prefijo 'Anti-Anemia' y códigos 1-4 intactos).
 Uso: Importado por routers/kmeans.py, routers/modelos_ml.py (COM-100) y
 ml/greedy_search.py (reglas R1/R2).
 Referencia: tickets COM-5 / COM-37 / COM-47 / COM-60 / COM-71 / COM-72 / COM-76 /
-COM-100 (trazabilidad).
+COM-100 / COM-101 (trazabilidad).
 """
 import re
 import json
@@ -153,6 +171,28 @@ CODIGO_ETIQUETA = {
 # COM-76 (trazabilidad): etiquetas COM-5 v1 originales:
 # CODIGO_ETIQUETA = {1: 'Anti-Anemia Premium', 2: 'Fortalecimiento Balanceado',
 #                    3: 'Ligero y Saludable', 4: 'All-Rounder Económico'}
+
+# COM-101: significados REDEFINIDOS de cada etiqueta (los nombres NO cambian: el
+# paper y la rotación del greedy los usan). Cada descripción incluye el criterio
+# operativo y la justificación con datos del recetario (volcado de 47 recetas):
+# zinc 2-3 vs 4-7 mg separa marino de cárnico; proteína 21-27 vs 29-41 g separa
+# ligeros; hierro 10-17 mg + vit A 821-5633 µg aíslan vísceras/sangre.
+DESCRIPCION_ETIQUETA = {
+    1: ('Anti-Anemia Premium: vísceras y sangre (hígado, sangrecita) con hierro '
+        '>= 10 mg y vitamina A alta por ración. Criterio COM-101: mayor mediana de '
+        'hierro del modelo (prioridad Anemia Cero, COM-60).'),
+    2: ('Fortalecimiento Balanceado: base cárnica o legumbre-carne con proteína '
+        '>= 29 g y zinc >= 4 mg por ración. Criterio COM-101: mayor media-z de '
+        '(proteína, zinc) entre los no-anemia; la vitamina A ya no participa para '
+        'evitar que recetas de hígado con hierro bajo secuestren el grupo.'),
+    3: ('Ligero y Saludable: baja densidad de proteína (< 28 g por ración), sopas y '
+        'guisos de huevo/verdura. Criterio COM-101: menor mediana de proteína; '
+        'reemplaza al criterio de menor energía de COM-76 porque la energía no '
+        'discrimina en menús regulados a ~800 kcal (NTS-127).'),
+    4: ('All-Rounder: base marina (pescado/mariscos) con zinc <= 3 mg y proteína '
+        'media-alta; perfil balanceado para rotación semanal. Criterio COM-101: '
+        'cluster restante tras las tres reglas anteriores.'),
+}
 
 RANDOM_STATE = 42
 # COM-76 (D6): n_init por defecto sube a 25 (mejor inercia mínima); el parámetro
@@ -217,7 +257,7 @@ REF_CDR_ALMUERZO = {
 }
 
 # ==========================================
-# COM-100: ESPACIOS CANDIDATOS DE FEATURES (todos 100% nutricionales)
+# COM-100 + COM-101: ESPACIOS CANDIDATOS DE FEATURES (100% nutricionales)
 # ==========================================
 # Cada spec: {nombre, features, labels, log, pesos, densidad_kcal, perfil}.
 # 'log': aplica log1p a las features crudas antes de escalar.
@@ -225,6 +265,9 @@ REF_CDR_ALMUERZO = {
 # 'densidad_kcal': convierte hierro/proteina/vitA/zinc a por-1000-kcal antes de escalar.
 # 'perfil': divide cada nutriente entre su referencia CDR y normaliza la fila a suma 1
 #           (forma del perfil nutricional, elimina el "tamaño" de la ración).
+# COM-101: los 3 espacios nuevos ponderan zinc y proteína (los dos ejes con gap
+# discreto medido en el volcado de 47 recetas: zinc 3|4 mg, proteína 27|29 g) y
+# reducen el peso de vitamina A (cola de hígado que infla varianza intra-cluster).
 ESPACIOS_CANDIDATOS = [
     {
         'nombre': 'log6_completo',
@@ -241,8 +284,7 @@ ESPACIOS_CANDIDATOS = [
         'log': True, 'pesos': None, 'densidad_kcal': False, 'perfil': False,
     },
     {
-        # COM-100: pesos alineados a los criterios de negocio (hierro y proteína
-        # definen Anti-Anemia y Fortalecimiento; el resto acompaña).
+        # COM-100: pesos alineados a los criterios de negocio originales.
         'nombre': 'log6_pesos_negocio',
         'features': FEATURES,
         'labels': FEATURES,
@@ -252,8 +294,7 @@ ESPACIOS_CANDIDATOS = [
         'densidad_kcal': False, 'perfil': False,
     },
     {
-        # COM-100: densidades por 1000 kcal + energía log: separa por CALIDAD
-        # nutricional relativa en vez de por tamaño absoluto de ración.
+        # COM-100: densidades por 1000 kcal + energía log.
         'nombre': 'densidades_proteicas',
         'features': ['hierro_mg', 'proteina_g', 'vitamina_a_ug', 'zinc_mg', 'energia_kcal'],
         'labels': ['hierro_x_1000kcal', 'proteina_x_1000kcal', 'vitamina_a_x_1000kcal',
@@ -264,12 +305,42 @@ ESPACIOS_CANDIDATOS = [
         'densidad_kcal': True, 'perfil': False,
     },
     {
-        # COM-100: forma del perfil (%CDR por nutriente normalizado a suma 1):
-        # agrupa recetas por su BALANCE relativo, no por magnitudes.
+        # COM-100: forma del perfil (%CDR por nutriente normalizado a suma 1).
         'nombre': 'perfil_cdr_normalizado',
         'features': FEATURES,
         'labels': [f'pct_{c}' for c in FEATURES],
         'log': False, 'pesos': None, 'densidad_kcal': False, 'perfil': True,
+    },
+    # ================= COM-101: espacios con pesos calibrados en gaps reales =================
+    {
+        # COM-101: zinc y proteína dominan (gaps discretos 3|4 mg y 27|29 g);
+        # vitamina A acompaña con peso bajo para no inflar el intra-cluster.
+        'nombre': 'log4_pesos_zinc_proteina',
+        'features': ['hierro_mg', 'proteina_g', 'vitamina_a_ug', 'zinc_mg'],
+        'labels': ['hierro_mg', 'proteina_g', 'vitamina_a_ug', 'zinc_mg'],
+        'log': True,
+        'pesos': {'hierro_mg': 1.0, 'proteina_g': 1.6, 'vitamina_a_ug': 0.5, 'zinc_mg': 1.6},
+        'densidad_kcal': False, 'perfil': False,
+    },
+    {
+        # COM-101: versión sin vitamina A (solo 5 recetas de hígado la usan; el
+        # hierro ya captura el modo Anti-Anemia). Máxima compacidad intra-cluster.
+        'nombre': 'log3_hierro_proteina_zinc',
+        'features': ['hierro_mg', 'proteina_g', 'zinc_mg'],
+        'labels': ['hierro_mg', 'proteina_g', 'zinc_mg'],
+        'log': True,
+        'pesos': {'hierro_mg': 1.0, 'proteina_g': 1.5, 'zinc_mg': 1.5},
+        'densidad_kcal': False, 'perfil': False,
+    },
+    {
+        # COM-101: variante intermedia (pesos suaves) por si el recetario crece y
+        # la vitamina A recupera poder discriminatorio con más recetas de vísceras.
+        'nombre': 'log4_pesos_suaves',
+        'features': ['hierro_mg', 'proteina_g', 'vitamina_a_ug', 'zinc_mg'],
+        'labels': ['hierro_mg', 'proteina_g', 'vitamina_a_ug', 'zinc_mg'],
+        'log': True,
+        'pesos': {'hierro_mg': 1.2, 'proteina_g': 1.4, 'vitamina_a_ug': 0.7, 'zinc_mg': 1.4},
+        'densidad_kcal': False, 'perfil': False,
     },
 ]
 
@@ -988,7 +1059,7 @@ def _minmax(recetas) -> dict:
 
 
 # ==========================================
-# COM-60 + COM-76: RE-ETIQUETADO DETERMINISTA POR MEDIANAS REALES
+# COM-60 + COM-76 + COM-101: RE-ETIQUETADO DETERMINISTA POR MEDIANAS REALES
 # ==========================================
 def _medianas_por_indice(filas, labels):
     """
@@ -1019,17 +1090,30 @@ def _medianas_por_indice(filas, labels):
 
 def _etiquetar_por_medianas(medianas_por_indice):
     """
-    COM-76 (D2): biyección determinista indice->código sobre MEDIANAS reales de las
-    6 variables nutricionales (el precio NO participa):
-      1) mayor mediana de hierro                          -> 1 Anti-Anemia Premium
+    COM-101 (D2 v2): biyección determinista indice->código sobre MEDIANAS reales.
+    LOS NOMBRES Y CÓDIGOS NO CAMBIAN (el paper y la rotación del greedy los usan);
+    se REDEFINEN los criterios operativos con justificación de datos:
+      1) mayor mediana de hierro                       -> 1 Anti-Anemia Premium
+         (vísceras/sangre: Fe 10-17 mg; sin cambio desde COM-76).
       2) entre restantes, mayor media-z de
-         (proteína, zinc, vitamina A)                     -> 2 Fortalecimiento Balanceado
-      3) entre restantes, menor mediana de energía
-         (desempate: menor carbohidratos)                 -> 3 Ligero y Saludable
-      4) restante                                         -> 4 All-Rounder
+         (proteína, zinc)                               -> 2 Fortalecimiento Balanceado
+         (cárnico/legumbre-carne: Zn 4-7 mg, Prot >= 29 g). COM-101: se RETIRA la
+         vitamina A del score: con ella, recetas de hígado con hierro bajo (caso
+         real: receta 52, Fe 6 mg, vit A 2605 µg) secuestraban el grupo cárnico.
+      3) entre restantes, menor mediana de PROTEÍNA
+         (desempate: menor energía)                     -> 3 Ligero y Saludable
+         (baja densidad proteica: Prot 21-27 g). COM-101: reemplaza al criterio de
+         menor energía de COM-76 porque la energía NO discrimina en menús regulados
+         a ~800 kcal (NTS-127): en el volcado de 47 recetas los 4 clusters median
+         793-812 kcal.
+      4) restante                                       -> 4 All-Rounder
+         (marino: Zn <= 3 mg, proteína media-alta; perfil balanceado de rotación).
     La prioridad del paso 1 materializa "Anemia Cero" (COM-60). Si por degeneración
     (k<4) quedaran índices sin regla, se asignan los códigos restantes en orden
     creciente para garantizar biyección.
+    COM-76 (trazabilidad): criterio v1 comentado:
+      2) mayor media-z de (proteína, zinc, vitamina A) -> 2
+      3) menor mediana de energía (desempate carbo)    -> 3
     """
     idx = list(medianas_por_indice.keys())
     asignacion = {}
@@ -1041,9 +1125,9 @@ def _etiquetar_por_medianas(medianas_por_indice):
     asignacion[i_anemia] = 1
     idx.remove(i_anemia)
 
-    # ---- Paso 2: Fortalecimiento Balanceado (media-z de proteína+zinc+vitA) ----
+    # ---- Paso 2 (COM-101): Fortalecimiento Balanceado = media-z(proteína, zinc) ----
     if idx:
-        feats = ['proteina_g', 'zinc_mg', 'vitamina_a_ug']
+        feats = ['proteina_g', 'zinc_mg']
         # z-score calculado SOBRE LAS MEDIANAS de los clusters restantes (comparables)
         stats = {}
         for f in feats:
@@ -1063,14 +1147,14 @@ def _etiquetar_por_medianas(medianas_por_indice):
         asignacion[i_fort] = 2
         idx.remove(i_fort)
 
-    # ---- Paso 3: Ligero y Saludable (menor energía; desempate menor carbo) ----
+    # ---- Paso 3 (COM-101): Ligero y Saludable = menor mediana de PROTEÍNA ----
     if idx:
-        i_lig = min(idx, key=lambda i: (medianas_por_indice[i]['energia_kcal'],
-                                        medianas_por_indice[i]['carbohidratos_g']))
+        i_lig = min(idx, key=lambda i: (medianas_por_indice[i]['proteina_g'],
+                                        medianas_por_indice[i]['energia_kcal']))
         asignacion[i_lig] = 3
         idx.remove(i_lig)
 
-    # ---- Paso 4: All-Rounder (restante) ----
+    # ---- Paso 4: All-Rounder (restante = perfil marino balanceado) ----
     if idx:
         asignacion[idx[0]] = 4
         idx = idx[1:]
@@ -1189,8 +1273,8 @@ def diagnosticar_k(cur, k_max=K_DIAG_MAX, filas_pre=None, excluidas_pre=None):
 # ==========================================
 def _buscar_mejor_espacio(filas, k, n_init):
     """
-    COM-100: entrena KMeans(k) en cada espacio candidato y devuelve
-    (mejor_spec, mejor_resultado, tabla_evaluacion).
+    COM-100 + COM-101: entrena KMeans(k) en cada espacio candidato (8 en COM-101) y
+    devuelve (mejor_spec, mejor_resultado, tabla_evaluacion).
     Restricción de validez: todos los clusters con >= KMEANS_MIN_CLUSTER_RECETAS
     miembros y n_clusters == k (rechaza particiones con singletons tipo receta 280).
     Criterio de selección: mayor silhouette entre válidos; desempate por inercia.
@@ -1233,19 +1317,21 @@ def _buscar_mejor_espacio(filas, k, n_init):
 
 
 # ==========================================
-# ENTRENAMIENTO Y PERSISTENCIA (COM-72 + COM-76 + COM-100)
+# ENTRENAMIENTO Y PERSISTENCIA (COM-72 + COM-76 + COM-100 + COM-101)
 # ==========================================
 def entrenar_y_persistir(cur):
     """
-    COM-71 + COM-72 + COM-76 + COM-100: pipeline completo:
+    COM-71 + COM-72 + COM-76 + COM-100 + COM-101: pipeline completo:
     dataset (R0-R2 + flags R3/R4, costeo ACOTADO) -> R5 caps de plausibilidad ->
-    BÚSQUEDA DE ESPACIO (5 candidatos, k=4 fijo, sin singletons, mejor silhouette) ->
-    K-means en el espacio elegido (n_init=KMEANS_N_INIT) -> re-etiquetado de NEGOCIO
-    por medianas (COM-76 D2, criterios intactos) -> métricas post-hoc (solo costeables)
-    -> diagnóstico de k REUSANDO el dataset -> persistencia del modelo activo y su
-    asignación receta->cluster (incluye costeable).
-    COM-100: persiste en parametros el espacio elegido (features/labels/pesos/transform),
-    la tabla de espacios evaluados y la auditoría de caps nutricionales (R5).
+    BÚSQUEDA DE ESPACIO (8 candidatos en COM-101, k=4 fijo, sin singletons, mejor
+    silhouette) -> K-means en el espacio elegido (n_init=KMEANS_N_INIT) ->
+    re-etiquetado de NEGOCIO v2 por medianas (COM-101 D2 v2: nombres intactos,
+    criterios redefinidos con justificación de datos) -> métricas post-hoc (solo
+    costeables) -> diagnóstico de k REUSANDO el dataset -> persistencia del modelo
+    activo y su asignación receta->cluster (incluye costeable).
+    COM-101: persiste en parametros 'descripcion_etiquetas' (significados redefinidos
+    para auditoría de tesis) y actualiza 'etiquetado' al criterio v2.
+    COM-100: persiste espacio elegido, tabla de candidatos y caps R5.
     COM-5 v6: centroides en UNIDADES REALES (inversos cuando el espacio lo permite;
     medianas de miembros en espacios densidad/perfil, documentado).
     COM-37 v5-fix: silhouette solo si n_samples > n_clusters.
@@ -1268,7 +1354,7 @@ def entrenar_y_persistir(cur):
     topes = _cargar_topes(cur)
     filas, caps_nutricionales = _aplicar_topes_nutricionales(filas, topes)
 
-    # ---- COM-100: búsqueda del mejor espacio de features ----
+    # ---- COM-100/101: búsqueda del mejor espacio de features ----
     spec, mejor, tabla_espacios = _buscar_mejor_espacio(filas, k, n_init)
     if mejor is None:
         # Degradación controlada: si ningún espacio cumple la restricción de tamaños,
@@ -1300,7 +1386,8 @@ def entrenar_y_persistir(cur):
         print(f"[COM-60] No se pudo calcular el diagnóstico de k: {e}")
 
     medianas_idx = _medianas_por_indice(filas, labels)
-    # COM-76 (D2): etiquetado de NEGOCIO por medianas de las 6 variables (INTACTO)
+    # COM-101 (D2 v2): etiquetado de NEGOCIO por medianas (nombres intactos,
+    # criterios redefinidos: zinc+proteína en paso 2, proteína en paso 3)
     asignacion = _etiquetar_por_medianas(medianas_idx)
     post_hoc_idx = _post_hoc_por_indice(filas, labels)
 
@@ -1363,11 +1450,18 @@ def entrenar_y_persistir(cur):
         # COM-72: auditoría de singletons
         'tamanos_clusters': tamanos,
         'min_cluster_recetas': KMEANS_MIN_CLUSTER_RECETAS,
-        # COM-76: auditoría del etiquetado de negocio y del costeo acotado
-        'etiquetado': 'COM-76: biyección por medianas de las 6 variables '
-                      '(hierro -> Anti-Anemia Premium; media-z(proteína,zinc,vitA) -> '
-                      'Fortalecimiento Balanceado; menor energía -> Ligero y Saludable; '
-                      'restante -> All-Rounder)',
+        # COM-101: etiquetado v2 con criterios redefinidos (nombres intactos) y
+        # descripciones justificadas con datos para auditoría de tesis.
+        'etiquetado': 'COM-101 D2 v2: biyección por medianas con criterios redefinidos '
+                      '(nombres y códigos ESTABLES del paper): hierro -> 1 Anti-Anemia '
+                      'Premium; media-z(proteína, zinc) -> 2 Fortalecimiento Balanceado '
+                      '(la vit A sale del score para evitar secuestro por hígado con Fe '
+                      'bajo); menor mediana de PROTEÍNA -> 3 Ligero y Saludable (la '
+                      'energía no discrimina en menús NTS-127 de ~800 kcal); restante -> '
+                      '4 All-Rounder (perfil marino balanceado). Justificación de gaps: '
+                      'zinc 3|4 mg separa marino de cárnico; proteína 27|29 g separa '
+                      'ligeros; hierro 10-17 mg + vit A 821-5633 µg aíslan vísceras.',
+        'descripcion_etiquetas': {str(c): DESCRIPCION_ETIQUETA[c] for c in CODIGO_ETIQUETA},
         'costeo_acotado_insumos': True,
         'dataset_reusado_para_curva_k': True,
         # COM-100: auditoría del espacio elegido, candidatos y caps R5
@@ -1375,12 +1469,13 @@ def entrenar_y_persistir(cur):
         'espacios_evaluados': tabla_espacios,
         'caps_nutricionales': caps_nutricionales,
         'topes_nutricionales': {kk: list(vv) for kk, vv in topes.items()},
-        'criterio': ('COM-100: clustering SOLO nutricional con ESPACIO ELEGIDO por mejor '
-                     'silhouette entre 5 candidatos (k=4 fijo por negocio, sin clusters '
+        'criterio': ('COM-101: clustering SOLO nutricional con ESPACIO ELEGIDO por mejor '
+                     'silhouette entre 8 candidatos (k=4 fijo por negocio, sin clusters '
                      '< 2 miembros); R5 acota nutrientes implausibles (auditoría '
-                     'caps_nutricionales) sin borrar recetas; etiquetas de negocio COM-76 '
-                     'intactas; el precio no es feature: solo flag costeable (R4), '
-                     'nivel_precio informativo y post-hoc Fe/S/.'),
+                     'caps_nutricionales) sin borrar recetas; etiquetas de negocio con '
+                     'nombres intactos y significados redefinidos (descripcion_etiquetas); '
+                     'el precio no es feature: solo flag costeable (R4), nivel_precio '
+                     'informativo y post-hoc Fe/S/.'),
     }
     cur.execute("""
         INSERT INTO kmeans_modelos
@@ -1417,6 +1512,8 @@ def entrenar_y_persistir(cur):
         resumen_clusters.append({
             'codigo': codigo,
             'etiqueta': CODIGO_ETIQUETA[codigo],
+            # COM-101: significado redefinido con justificación (para UI y tesis)
+            'descripcion': DESCRIPCION_ETIQUETA[codigo],
             'n_recetas': len(miembros),
             'n_costeables': sum(1 for m in miembros if m.get('costeable', True)),
             'centroide': centroides[str(codigo)],
@@ -1435,11 +1532,14 @@ def entrenar_y_persistir(cur):
         'scaler': 'RobustScaler',
         'transform': TRANSFORM,
         'features': FEATURES,
-        # COM-100: espacio elegido y candidatos (transparencia de la búsqueda)
+        # COM-100/101: espacio elegido y candidatos (transparencia de la búsqueda)
         'espacio_elegido': spec['nombre'],
         'features_espacio': spec['labels'],
+        'pesos_espacio': spec.get('pesos'),
         'espacios_evaluados': tabla_espacios,
         'caps_nutricionales': caps_nutricionales,
+        # COM-101: descripciones redefinidas en el resumen de la petición
+        'descripcion_etiquetas': {str(c): DESCRIPCION_ETIQUETA[c] for c in CODIGO_ETIQUETA},
         'k_recomendado': k_recomendado,
         'k_evaluados': curva_k,
         'n_imputadas': 0,
