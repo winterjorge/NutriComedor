@@ -21,17 +21,29 @@ COM-71: exposición ADITIVA del flag de elegibilidad económica:
     * /candidatas ya devolvía n_costeables / n_no_costeables vía listar_candidatas
       (Drop 1); se documenta en el docstring.
     Ninguna clave existente se elimina ni se renombra.
-COM-76 (este archivo): sin cambios funcionales de payload (el backend CONSERVA
-    precio_prom/min/max y post-hoc Fe/S/ por cluster como auditoría para tesis y
-    para el flag costeable del greedy); los cambios de COM-76 viven en
-    ml/kmeans_recetas.py (etiquetas de negocio, n_init=25, dataset único y costeo
-    acotado que eliminan el 504 de /entrenar). Aquí solo se actualizan docstrings
-    para documentar: (a) /entrenar ahora reusa un único dataset y acota la RF
-    (fix 504), (b) /resumen y /clusters conservan campos de precio como auditoría
-    pero la UI de clusters ya no los exhibe (COM-76 D3), (c) /diagnostico-k acepta
-    filas pre-construidas internamente (no cambia su contrato HTTP).
+COM-76: sin cambios funcionales de payload (el backend CONSERVA precio_prom/min/max
+    y post-hoc Fe/S/ por cluster como auditoría para tesis y para el flag costeable
+    del greedy); los cambios de COM-76 viven en ml/kmeans_recetas.py (etiquetas de
+    negocio, n_init=25, dataset único y costeo acotado que eliminan el 504 de
+    /entrenar). Aquí solo se actualizan docstrings para documentar: (a) /entrenar
+    ahora reusa un único dataset y acota la RF (fix 504), (b) /resumen y /clusters
+    conservan campos de precio como auditoría pero la UI de clusters ya no los
+    exhibe (COM-76 D3), (c) /diagnostico-k acepta filas pre-construidas internamente
+    (no cambia su contrato HTTP).
+COM-101 v2 (este archivo): /resumen expone los campos que la UI COM-101 v2 de
+    ClusterRecetasView necesita para mostrar los significados REDEFINIDOS de las
+    etiquetas y la auditoría del entrenamiento, leídos de kmeans_modelos.parametros
+    (sin re-entrenar y sin DDL):
+    * clusters[].descripcion  <- parametros.descripcion_etiquetas[codigo]
+      (fallback None: la UI usa su texto COM-76 histórico).
+    * espacio_elegido / features_espacio <- parametros.espacio_elegido (nombre y
+      labels del espacio ganador de la búsqueda COM-100/101/102).
+    * caps_nutricionales <- parametros.caps_nutricionales (auditoría R5).
+    * descripcion_etiquetas <- parametros.descripcion_etiquetas (mapa completo).
+    Todas las claves históricas del payload se conservan (cambios aditivos).
 Uso: Registrado en main.py con prefijo /api/v1.
-Referencia: tickets COM-5 / COM-5 v4 / COM-60 / COM-71 / COM-76 (solo trazabilidad).
+Referencia: tickets COM-5 / COM-5 v4 / COM-60 / COM-71 / COM-76 / COM-101 v2
+(solo trazabilidad).
 """
 import json
 import unicodedata
@@ -243,17 +255,20 @@ def diagnostico_k(usuario_solicitante_id: int, db=Depends(get_db)):
 @router.post("/entrenar")
 def entrenar_modelo(usuario_solicitante_id: int, db=Depends(get_db)):
     """
-    COM-60 + COM-71 + COM-76: entrena el modelo K-means (k=KMEANS_K, default 4) con
-    las 6 variables nutricionales por ración en espacio log1p+RobustScaler, tras
-    aplicar R0-R2; el precio YA NO excluye (R3 informativa) y la completitud de
-    precios es un flag `costeable` (R4) que consume el greedy.
-    COM-76: etiqueta los 4 clusters con las etiquetas de NEGOCIO (Anti-Anemia
-    Premium, Fortalecimiento Balanceado, Ligero y Saludable, All-Rounder) mediante
-    biyección determinista por medianas de las 6 variables; usa n_init=KMEANS_N_INIT
-    (default 25) para mejorar la inercia mínima; construye el dataset UNA sola vez
-    (reusado para la curva de k) y acota la predicción RF a los insumos del recetario,
-    eliminando el HTTP 504 que producían las dos pasadas RF completas del catálogo.
-    Persiste el modelo activo y su asignación receta->cluster. Exclusivo Admin.
+    COM-60 + COM-71 + COM-76 + COM-100/101/102: entrena el modelo K-means
+    (k=KMEANS_K, default 4) con las 6 variables nutricionales por ración tras
+    aplicar R0-R2 y R5 (caps de plausibilidad); el precio YA NO excluye (R3
+    informativa) y la completitud de precios es un flag `costeable` (R4) que
+    consume el greedy.
+    COM-100/101/102: el espacio de features se ELIGE por búsqueda auditada
+    (espacios_evaluados) con restricción de tamaños y, desde COM-102, restricción
+    semántica R6 (vísceras en el cluster Anti-Anemia); las etiquetas de NEGOCIO
+    conservan nombres y códigos estables con criterios redefinidos (COM-101 v2).
+    COM-76: usa n_init=KMEANS_N_INIT (default 25); construye el dataset UNA sola
+    vez (reusado para la curva de k) y acota la predicción RF a los insumos del
+    recetario, eliminando el HTTP 504 que producían las dos pasadas RF completas
+    del catálogo. Persiste el modelo activo y su asignación receta->cluster.
+    Exclusivo Admin.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -287,6 +302,11 @@ def resumen_modelo(usuario_solicitante_id: int, db=Depends(get_db)):
     COM-76 (nota): los campos precio_prom/precio_min/precio_max y post_hoc (Fe/S/)
     se CONSERVAN en el payload como auditoría de backend (tesis + flag del greedy);
     la UI de clusters (ClusterRecetasView) ya no los exhibe por cluster (D3).
+    COM-101 v2 (aditivo): clusters[].descripcion (significados redefinidos desde
+    parametros.descripcion_etiquetas), espacio_elegido / features_espacio (nombre y
+    labels del espacio ganador de la búsqueda COM-100/101/102), caps_nutricionales
+    (auditoría R5) y descripcion_etiquetas (mapa completo). La UI usa fallbacks si
+    un modelo antiguo no los trae.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -299,7 +319,7 @@ def resumen_modelo(usuario_solicitante_id: int, db=Depends(get_db)):
         cur.execute("""
             SELECT cluster_codigo,
                    cluster_etiqueta,
-                   COUNT(*)                    AS n_recetas,
+                   COUNT(*)                                    AS n_recetas,
                    SUM(CASE WHEN costeable THEN 1 ELSE 0 END)      AS n_costeables,
                    SUM(CASE WHEN NOT costeable THEN 1 ELSE 0 END)  AS n_no_costeables,
                    ROUND(AVG(energia_kcal), 2) AS energia_prom,
@@ -327,10 +347,17 @@ def resumen_modelo(usuario_solicitante_id: int, db=Depends(get_db)):
         params = modelo['parametros'] or {}
         medianas = params.get('medianas_por_cluster', {}) or {}
         post_hoc = params.get('post_hoc_por_cluster', {}) or {}
+        # COM-101 v2: significados redefinidos y auditoría del espacio/caps
+        desc_map = params.get('descripcion_etiquetas', {}) or {}
+        espacio = params.get('espacio_elegido') or {}
+        if not isinstance(espacio, dict):
+            espacio = {}
         for c in clusters:
             codigo_str = str(c['cluster_codigo'])
             c['medianas'] = medianas.get(codigo_str)
             c['post_hoc'] = post_hoc.get(codigo_str)
+            # COM-101 v2: descripción redefinida (None => la UI usa su fallback COM-76)
+            c['descripcion'] = desc_map.get(codigo_str)
         return {
             'modelo_id': modelo['id'],
             'fecha_entrenamiento': modelo['fecha_entrenamiento'],
@@ -356,6 +383,14 @@ def resumen_modelo(usuario_solicitante_id: int, db=Depends(get_db)):
             # COM-71: elegibilidad económica del modelo (aditivo)
             'n_costeables': int(tot_cost['n_costeables'] or 0),
             'n_no_costeables': int(tot_cost['n_no_costeables'] or 0),
+            # COM-101 v2: transparencia del espacio de entrenamiento y auditoría R5
+            'espacio_elegido': espacio.get('nombre'),
+            'features_espacio': espacio.get('labels'),
+            'caps_nutricionales': params.get('caps_nutricionales', []),
+            'descripcion_etiquetas': desc_map,
+            # COM-102: estado de la restricción semántica R6 (auditoría)
+            'restriccion_semantica_relajada': bool(
+                (params.get('restriccion_semantica') or {}).get('relajada', False)),
         }
     except HTTPException:
         raise
@@ -409,6 +444,7 @@ def recetas_candidatas(usuario_solicitante_id: int, db=Depends(get_db)):
     COM-71: incluye n_costeables / n_no_costeables y, en cada fila apta, el flag
     `costeable` con sus ingredientes_sin_precio para dirigir la carga de precios.
     COM-76: heredará el costeo acotado a insumos del recetario (más rápido).
+    COM-100: aplica los caps R5 para reflejar exactamente lo que ve el modelo.
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
