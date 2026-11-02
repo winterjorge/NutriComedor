@@ -78,7 +78,7 @@ elimina el timeout 504 por entrenar RF para todo el catálogo.
 * El stock de subsidio aplicado al costeo es el remanente del MES DE LA COMPRA.
 * Auditoría aditiva: cada día del menú y el resumen exponen
 fecha_precios_compra / fecha_compra_insumos.
-COM-103 (este archivo): RENDIMIENTO + VARIEDAD ENTRE VARIANTES:
+COM-103: RENDIMIENTO + VARIEDAD ENTRE VARIANTES:
 * RENDIMIENTO: _comensales_por_dia usa ai_engine.predecir_demanda_lote (1 solo
   entrenamiento cacheado + 1 predict vectorizado por planificación, en lugar de
   1 entrenamiento+CV por día de cocina). Con la caché de RF de precios de
@@ -94,14 +94,33 @@ COM-103 (este archivo): RENDIMIENTO + VARIEDAD ENTRE VARIANTES:
 * Jitter del seed ampliado de ±0.05 a ±0.15 para que "Regenerar" produzca
   ponderaciones realmente distintas.
 * Ningún helper, clave de payload ni bloque de trazabilidad anterior se elimina.
+COM-104 (este archivo): REGENERACIÓN QUE SIEMPRE EXPLORA (fix de la variante
+"congelada"): con los pesos NUTRI (hierro+proteína = 0.70) los márgenes de score
+entre candidatas del cluster Anti-Anemia son tan amplios que el jitter ±0.15 NUNCA
+volteaba el argmax y NutriMax reproducía el menú anterior al regenerar (EconoMax/
+BalanceMax sí cambian porque sus scores de precio tienen márgenes de céntimos).
+* EXPLORACIÓN ESTOCÁSTICA TOP-K (Pase 1 del día): se listan las candidatas que
+  cumplen holgura+límite EN ORDEN DE SCORE y se elige entre las top K_AZAR=3 con
+  probabilidad decreciente PESOS_AZAR=[0.6,0.25,0.15], vía random.Random con semilla
+  determinista (seed, variante, día, azar_offset). Solo se barajan las mejores del
+  día: la calidad se mantiene y cada regeneración explora combinaciones distintas.
+  Con K=1 o una sola candidata que cumple, el comportamiento es idéntico a COM-103.
+* REINTENTO GARANTIZADO VS SESIÓN PREVIA: generar_tres_propuestas lee los menús de
+  la ÚLTIMA sesión persistida del comedor (planificaciones_candidatas, sesion_id
+  distinto al actual) y, si una variante reproduce EXACTAMENTE ese menú, re-ejecuta
+  su generación con azar_offset+1 (hasta 3 intentos). Auditoría aditiva en el
+  resumen: 'reintentos_variedad'.
+* Pases 2 (holgura) y 3 (fallback barato) SIN CAMBIOS; exclusión entre variantes
+  (COM-103), frescura COM-61, cuota COM-60 y FLEX COM-71 intactos.
 Uso: Importado por routers/propuestas_menu.py (generar_tres_propuestas,
 obtener_candidatas_sesion, obtener_candidata). Todas las funciones reciben un cursor
 psycopg2 (RealDictCursor); el caller gestiona la transacción.
 Referencia: tickets COM-8 / COM-37 / COM-47 / COM-50 / COM-59 / COM-60 / COM-71 /
-COM-72 / COM-61 / COM-74 / COM-75 / COM-75 v2 / COM-103 (solo trazabilidad).
+COM-72 / COM-61 / COM-74 / COM-75 / COM-75 v2 / COM-103 / COM-104 (solo trazabilidad).
 """
 import json
 import hashlib
+import random
 from datetime import date, timedelta
 from collections import Counter
 
@@ -176,6 +195,11 @@ FLEX_DIA_MIN = 1.0
 FLEX_DIA_DEFAULT = 2.0
 # COM-74: default de cocineras si el parámetro no existe (coherente con POS)
 COCINERAS_DEFAULT = 20
+# COM-104: exploración estocástica del Pase 1 (top-K y probabilidades decrecientes)
+K_AZAR = 3
+PESOS_AZAR = [0.6, 0.25, 0.15]
+# COM-104: intentos máximos por variante para no repetir el menú de la sesión previa
+MAX_REINTENTOS_VARIEDAD = 3
 
 
 # ==========================================
@@ -202,6 +226,9 @@ def _jitter_weights(base: dict, seed: int, idx_variante: int) -> dict:
     pesos de parámetros NUTRI/BALANCE tan parecidos, el jitter anterior no lograba
     diferenciar las variantes; la exclusión dura de recetas (recetas_excluidas_sesion)
     hace el resto.
+    COM-104 (nota): el jitter por sí solo NO garantiza menús distintos cuando los
+    márgenes de score son amplios (caso NUTRI); la exploración top-K del Pase 1 y el
+    reintento vs sesión previa son ahora el mecanismo principal de regeneración.
     """
     if not isinstance(base, dict):
         base = {}
@@ -517,6 +544,37 @@ def _recetas_semana_anterior(cur, comedor_id: int, fecha_inicio: date):
 
 
 # ==========================================
+# COM-104: MENÚS DE LA ÚLTIMA SESIÓN GENERADA (para el reintento de variedad)
+# ==========================================
+def _menus_sesion_previa(cur, comedor_id: int, sesion_id_actual: str) -> dict:
+    """
+    COM-104: lee la ÚLTIMA sesión persistida del comedor (distinta a la que se está
+    generando ahora) y devuelve {variante: [receta_id por día]}. Sirve para detectar
+    que una variante reprodujo EXACTAMENTE el menú anterior al regenerar y forzar un
+    reintento con otro azar_offset. Si no hay sesión previa, devuelve {} (sin efecto).
+    """
+    cur.execute("""
+        SELECT sesion_id FROM planificaciones_candidatas
+        WHERE comedor_id = %s AND sesion_id <> %s
+        ORDER BY fecha DESC, id DESC
+        LIMIT 1;
+    """, (comedor_id, sesion_id_actual))
+    fila = cur.fetchone()
+    if not fila:
+        return {}
+    cur.execute("""
+        SELECT variante, menu FROM planificaciones_candidatas
+        WHERE sesion_id = %s
+        ORDER BY id;
+    """, (fila['sesion_id'],))
+    out = {}
+    for r in cur.fetchall():
+        menu = r['menu'] if isinstance(r['menu'], list) else (r['menu'] or [])
+        out[r['variante']] = [d.get('receta_id') for d in menu]
+    return out
+
+
+# ==========================================
 # COM-71 (D3/D5) + COM-75 v2: MAPEO DE COSTOS CON STOCK REMANENTE
 # ==========================================
 def _mapa_costos_dia(cur, recetas, fecha: date, comedor_id=None, stock_override=None,
@@ -732,10 +790,11 @@ def _score(rec, pesos, mm, usada: bool) -> float:
 def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
                            presupuesto_semanal, fecha_inicio, dias,
                            costos_por_dia, comensales_por_dia, permitir_repetidos=False,
-                           recetas_excluidas_sesion=None):
+                           recetas_excluidas_sesion=None,
+                           seed=0, idx_variante=0, azar_offset=0):
     """
-    COM-8 v2 + COM-60 + COM-71 + COM-72 + COM-61 + COM-74 + COM-75 + COM-103:
-    Greedy por DÍA.
+    COM-8 v2 + COM-60 + COM-71 + COM-72 + COM-61 + COM-74 + COM-75 + COM-103 +
+    COM-104: Greedy por DÍA.
     * COM-60: cuota anti-anemia por deadline y desempate Fe/S/.
     * COM-71 (D2): solo candidatas costeables y con precio completo ese día.
     * COM-71 (D3): scoring y presupuesto con el costo del día (costos_por_dia[d]).
@@ -754,8 +813,14 @@ def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
     * COM-103: `recetas_excluidas_sesion` (receta_ids elegidos por variantes HERMANAS
       de la misma sesión) se excluyen del pool diario; si el pool quedara vacío se
       RELAJA la exclusión y el día se audita con 'repeticion_entre_variantes'=True.
+    * COM-104: `seed`, `idx_variante` y `azar_offset` alimentan el RNG determinista de
+      la EXPLORACIÓN TOP-K del Pase 1: entre las candidatas que cumplen holgura y
+      límite (en orden de score) se elige top-1 con p=0.6, top-2 con p=0.25 y top-3
+      con p=0.15. Con una sola candidata que cumple, o K=1, el comportamiento es
+      idéntico a COM-103 (determinista).
     Retorna (menu, sobrepaso, conteo_anemia).
-    Trazabilidad: firma anterior sin costos_por_dia/comensales_por_dia comentada abajo.
+    Trazabilidad: firma anterior sin costos_por_dia/comensales_por_dia comentada abajo;
+    COM-103 sin seed/idx_variante/azar_offset.
     """
     comensales_por_dia = comensales_por_dia or {}
     recetas_excluidas_sesion = set(recetas_excluidas_sesion or [])  # COM-103
@@ -865,14 +930,33 @@ def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
 
         elegida = None
         flex_excedido_dia = False
-        # Pase 1: dentro del tope diario FLEX y del límite semanal
+        # ==================================================================
+        # COM-104: Pase 1 con EXPLORACIÓN ESTOCÁSTICA TOP-K.
+        # Se listan (en orden de score) las candidatas que cumplen guardia,
+        # holgura diaria y límite semanal; entre las top K_AZAR se elige con
+        # probabilidad decreciente (60/25/15) vía RNG determinista por
+        # (seed, variante, día, azar_offset). Así "Regenerar" explora
+        # combinaciones distintas sin sacrificar calidad (solo se barajan las
+        # mejores del día). COM-103 (trazabilidad): antes se tomaba SIEMPRE la
+        # primera que cumplía (bucle con break), lo que con márgenes amplios de
+        # score (NUTRI) reproducía el menú anterior pese a cambiar el seed.
+        # ==================================================================
+        aptas_dia = []
         for r in candidatas:
             if not _guardia_repeticion(r):
                 continue
-            costo_dia = r['costo_racion'] * total_dia          # COM-74: total con cocineras
+            costo_dia = r['costo_racion'] * total_dia
             if acumulado + costo_dia <= limite and costo_dia <= cap_dia:
-                elegida = r
-                break
+                aptas_dia.append(r)
+        if aptas_dia:
+            if len(aptas_dia) == 1:
+                elegida = aptas_dia[0]
+            else:
+                rng = random.Random(
+                    (seed * 1000003) + (idx_variante * 97) + (i * 7) + (azar_offset * 7919))
+                k = min(K_AZAR, len(aptas_dia))
+                pesos_azar = PESOS_AZAR[:k]
+                elegida = rng.choices(aptas_dia[:k], weights=pesos_azar, k=1)[0]
         # Pase 2: holgura: no cabe en el tope diario pero sí en el semanal
         if elegida is None:
             for r in candidatas:
@@ -945,8 +1029,9 @@ def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
 # def _generar_menu_variante(recetas_por_cluster, todas, pesos, params,
 #                            presupuesto_semanal, fecha_inicio, dias,
 #                            costos_por_dia): ...
-# COM-103 (trazabilidad): firma anterior sin recetas_excluidas_sesion:
-# def _generar_menu_variante(..., permitir_repetidos=False): ...
+# COM-103 (trazabilidad): firma intermedia sin seed/idx_variante/azar_offset:
+# def _generar_menu_variante(..., permitir_repetidos=False,
+#                            recetas_excluidas_sesion=None): ...
 
 
 def _top_ingredientes(menu, ingredientes_por_id, n=3):
@@ -978,8 +1063,13 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
                             permitir_repetidos: bool = False):
     """
     COM-8 v2/v3 + COM-37 + COM-47 v3 + COM-50 v3 + COM-59A + COM-60 + COM-71 +
-    COM-72 + COM-61 + COM-74 + COM-75 + COM-75 v2 + COM-103: Genera y persiste las 3
-    propuestas de menú semanal para los DÍAS DE COCINA indicados.
+    COM-72 + COM-61 + COM-74 + COM-75 + COM-75 v2 + COM-103 + COM-104: Genera y
+    persiste las 3 propuestas de menú semanal para los DÍAS DE COCINA indicados.
+    COM-104 (VARIEDAD AL REGENERAR): cada variante se genera con exploración
+    estocástica top-K y, si su menú coincide EXACTAMENTE con el de la última sesión
+    persistida del comedor, se reintenta con otro azar_offset (máx.
+    MAX_REINTENTOS_VARIEDAD); los reintentos usados se auditan en el resumen con
+    'reintentos_variedad'.
     COM-103 (VARIEDAD): las recetas elegidas por una variante se excluyen de las
     siguientes (recetas_excluidas_sesion); la relajación se audita por día
     ('repeticion_entre_variantes') y por variante ('repeticiones_entre_variantes').
@@ -1125,6 +1215,8 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
     recetas_por_id = {r['receta_id']: r for r in seleccionables}
     marca = f"{comedor_id}|{fecha_inicio.isoformat()}|{creado_por_id}|{seed}|{'-'.join(map(str, dias))}"
     sesion_id = hashlib.sha256(marca.encode()).hexdigest()[:32]
+    # COM-104: menús de la última sesión persistida del comedor (para el reintento)
+    menus_previos = _menus_sesion_previa(cur, comedor_id, sesion_id)
     margen_objetivo = margen_semanal_objetivo(cur)
     propuestas = []
     # COM-103: acumula las recetas elegidas por variantes ya generadas de ESTA sesión
@@ -1132,13 +1224,22 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
 
     for idx, (codigo, meta) in enumerate(VARIANTES.items()):
         pesos = _jitter_weights(params['ponderaciones'].get(codigo, {}), seed, idx)
-        menu, sobrepaso, conteo_anemia = _generar_menu_variante(
-            recetas_por_cluster, seleccionables, pesos, params,
-            presupuesto_semanal, fecha_inicio, dias, costos_por_dia,
-            comensales_por_dia=comensales_por_dia,
-            permitir_repetidos=permitir_repetidos,
-            # COM-103: exclusión dura entre variantes hermanas de la misma sesión
-            recetas_excluidas_sesion=usadas_sesion)
+        # ---- COM-104: reintento garantizado si el menú repite la sesión previa ----
+        menu, sobrepaso, conteo_anemia = None, False, 0
+        reintentos = 0
+        ids_previos = menus_previos.get(codigo)
+        for intento in range(MAX_REINTENTOS_VARIEDAD):
+            menu, sobrepaso, conteo_anemia = _generar_menu_variante(
+                recetas_por_cluster, seleccionables, pesos, params,
+                presupuesto_semanal, fecha_inicio, dias, costos_por_dia,
+                comensales_por_dia=comensales_por_dia,
+                permitir_repetidos=permitir_repetidos,
+                recetas_excluidas_sesion=usadas_sesion,
+                seed=seed, idx_variante=idx, azar_offset=intento)
+            reintentos = intento
+            ids_menu = [d['receta_id'] for d in menu]
+            if ids_previos is None or ids_menu != ids_previos:
+                break
         # COM-103: lo elegido por esta variante queda vetado para las siguientes
         usadas_sesion.update(d['receta_id'] for d in menu)
 
@@ -1238,6 +1339,8 @@ def generar_tres_propuestas(cur, comedor_id: int, presupuesto_semanal: float,
             # COM-103: auditoría de variedad ENTRE variantes de la misma sesión
             'repeticiones_entre_variantes': sum(
                 1 for d in menu if d.get('repeticion_entre_variantes')),
+            # COM-104: reintentos usados para no repetir el menú de la sesión previa
+            'reintentos_variedad': reintentos,
         }
         cur.execute("""
             INSERT INTO planificaciones_candidatas
