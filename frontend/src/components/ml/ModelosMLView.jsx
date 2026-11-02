@@ -38,6 +38,7 @@ const COLOR_CLUSTER = { 1: '#dc2626', 2: '#2563eb', 3: '#16a34a', 4: '#d97706' }
 const COLOR_VARIANTE = { NUTRI: '#dc2626', ECONO: '#d97706', BALANCE: '#059669' };
 const COLOR_INDICADOR = { costo: '#64748b', recoleccion: '#059669', margen: '#2563eb' };
 const PALETA_PRECIOS = ['#2563eb', '#dc2626', '#059669', '#d97706', '#7c3aed', '#0891b2', '#be185d', '#65a30d'];
+const [topInsumosMostrar, setTopInsumosMostrar] = useState(5); // COM-105 v4: top dinámico
 
 const METRICAS_SERIE = [
   { clave: 'costo_total_dia', label: 'Costo del día (S/)' },
@@ -861,15 +862,51 @@ export const ModelosMLView = () => {
                         <p className="text-[11px] text-slate-500 mb-3">
                           Línea azul: precio real del scraper en S/ por kg · Rombos rojos: predicción del modelo en cada corte evaluado.
                         </p>
+                        {/* COM-105 v4: Selector dinámico de cantidad de insumos top */}
+                        <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 mb-3">
+                            <div className="flex flex-wrap items-center gap-3">
+                                <label className="text-xs font-bold text-slate-700">
+                                    Mostrar top:
+                                </label>
+                                <input
+                                    type="number"
+                                    min="1"
+                                    max={precio.series?.length || 12}
+                                    defaultValue={5}
+                                    id="topInsumosInput"
+                                    className="w-16 px-2 py-1 border border-slate-300 rounded text-xs font-bold text-center"
+                                />
+                                <button
+                                    onClick={() => {
+                                        const input = document.getElementById('topInsumosInput');
+                                        const top = Math.min(Math.max(parseInt(input.value) || 5, 1), precio.series?.length || 12);
+                                        setTopInsumosMostrar(top);
+                                        // Seleccionar automáticamente el primer insumo del nuevo top
+                                        if (precio.series?.[0]) {
+                                            setPrecioSel(precio.series[0].insumo_id);
+                                        }
+                                    }}
+                                    className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded text-xs font-bold transition-colors"
+                                >
+                                    Mostrar
+                                </button>
+                                <span className="text-[10px] text-slate-500">
+                                    (máximo {precio.series?.length || 12} insumos disponibles)
+                                </span>
+                            </div>
+                        </div>
+
                         <div className="flex flex-wrap gap-1.5 mb-2">
-                          {(precio.series || []).map(s => (
-                            <button key={s.insumo_id} onClick={() => setPrecioSel(s.insumo_id)}
-                              className={`px-2.5 py-1 rounded-full text-[11px] font-bold transition-colors ${
-                                serieSel?.insumo_id === s.insumo_id ? 'bg-amber-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                              }`}>
-                              {s.nombre}
-                            </button>
-                          ))}
+                            {(precio.series || []).slice(0, topInsumosMostrar).map(s => (
+                                <button key={s.insumo_id} onClick={() => setPrecioSel(s.insumo_id)}
+                                    className={`px-2.5 py-1 rounded-full text-[11px] font-bold transition-colors ${
+                                        serieSel?.insumo_id === s.insumo_id
+                                            ? 'bg-amber-600 text-white'
+                                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                    }`}>
+                                    {s.nombre}
+                                </button>
+                            ))}
                         </div>
                         <LineasPrecios serie={serieSel} />
                       </div>
