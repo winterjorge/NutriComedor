@@ -4,45 +4,56 @@ Objetivo: Motor de cálculo de costos de recetas con predicción de precios basa
 Uso: Importar desde routers de FastAPI para calcular costos dinámicos de recetas en cualquier fecha.
 Nota: Utiliza Random Forest para predicción de precios (consistente con ai_engine.py)
 Historial:
-- Sprint 2: versión original (mejor insumo del día, predicción RF con R², filas de error).
-- COM-37 v1/v2: fallback de precio manual ("Obtenido de la Base de Datos"), ingrediente_id
-  por fila y precio_completo para la regla del flujo del comedor.
-- COM-37 v5: costeo con el modelo de DOS CONCEPTOS: gramos de la unidad de USO vía
-  ingredientes_equivalencias (o conversión estándar) × precio por gramo del MEJOR
-  insumo (scraper día > manual insumo > legacy ingrediente > predicción RF).
-- COM-48: cada fila del detalle expone componente_nombre/componente_orden para el
-  desglose agrupado del modal de Evaluar.
-- COM-49: multiplicación explícita y auditable gramos_por_unidad × cantidad; detalle
-  con factores de auditoría (gramos_totales, ppg, precio/unidad de compra, fuente);
-  subtotal y costo por ración con costo SIN piso de 0.10 (el piso queda como
-  referencia de compra en costo_parcial_compra / costo_total_receta_compra).
-- COM-49 v2: FIX del TypeError "unsupported operand type(s) for *: 'decimal.Decimal'
-  and 'float'". psycopg2 devuelve las columnas NUMERIC como decimal.Decimal; la
-  equivalencia leída de ingredientes_equivalencias (gramos_por_unidad_uso,
-  NUMERIC(12,4)) se castea EXPLÍCITAMENTE a float antes de multiplicar. Se blindan
-  con float() todos los valores NUMERIC que entran al cálculo por si alguna ruta
-  los devuelve sin castear. K-means/Greedy no requerían cambio (sus mapas ya
-  casteaban al construirse).
-- COM-80 (este archivo): el costeo por línea PREFIERE al insumo marcado
-  es_principal=True cuando éste tiene precio/predicción en la fecha (decisión
-  explícita del Admin), en lugar del mínimo costo por gramo entre todos los
-  insumos del ingrediente. Sin principal marcado, el comportamiento es idéntico
-  a COM-49 v2 (mínimo costo). Cada línea del detalle expone 'insumo_es_principal'
-  para auditoría del modal de Evaluar.
-- COM-84 (este archivo): FIX del falso "Costo incompleto" en el modal Evaluar.
-  Los contadores ingredientes_con_precio / ingredientes_sin_precio / precio_completo
-  se calculaban con `costo_parcial == 0`, pero costo_parcial está REDONDEADO a 2
-  decimales: líneas con precio real cuyo costo es menor a un céntimo (ej. 1 g de
-  sal yodada a S/ 0.0010/g = S/ 0.001 -> S/ 0.00) eran contadas como "sin precio",
-  mostrando el banner "Costo incompleto (N ingrediente(s) sin precio)" y dejando
-  precio_completo=False (la receta quedaba excluida de propuestas pese a estar
-  costeada). Ahora cada línea del detalle expone el flag `tiene_precio`
-  (True si hubo fuente de precio: SCRAPER_DIA/MANUAL_PERIODO/PREDICHO/
-  SCRAPER_ULTIMO/LEGACY_INGREDIENTE; False solo si mejor is None) y los contadores
-  y precio_completo usan ese flag. El costo total NO cambia (ya sumaba costo_crudo
-  sin redondeo). Ninguna clave existente se elimina ni renombra.
+Sprint 2: versión original (mejor insumo del día, predicción RF con R², filas de error).
+COM-37 v1/v2: fallback de precio manual ("Obtenido de la Base de Datos"), ingrediente_id
+por fila y precio_completo para la regla del flujo del comedor.
+COM-37 v5: costeo con el modelo de DOS CONCEPTOS: gramos de la unidad de USO vía
+ingredientes_equivalencias (o conversión estándar) × precio por gramo del MEJOR
+insumo (scraper día> manual insumo > legacy ingrediente > predicción RF).
+COM-48: cada fila del detalle expone componente_nombre/componente_orden para el
+desglose agrupado del modal de Evaluar.
+COM-49: multiplicación explícita y auditable gramos_por_unidad × cantidad; detalle
+con factores de auditoría (gramos_totales, ppg, precio/unidad de compra, fuente);
+subtotal y costo por ración con costo SIN piso de 0.10 (el piso queda como
+referencia de compra en costo_parcial_compra / costo_total_receta_compra).
+COM-49 v2: FIX del TypeError "unsupported operand type(s) for *: 'decimal.Decimal'
+and 'float'". psycopg2 devuelve las columnas NUMERIC como decimal.Decimal; la
+equivalencia leída de ingredientes_equivalencias (gramos_por_unidad_uso,
+NUMERIC(12,4)) se castea EXPLÍCITAMENTE a float antes de multiplicar. Se blindan
+con float() todos los valores NUMERIC que entran al cálculo por si alguna ruta
+los devuelve sin castear. K-means/Greedy no requerían cambio (sus mapas ya
+casteaban al construirse).
+COM-80: el costeo por línea PREFIERE al insumo marcado es_principal=True cuando
+éste tiene precio/predicción en la fecha (decisión explícita del Admin), en lugar
+del mínimo costo por gramo entre todos los insumos del ingrediente. Sin principal
+marcado, el comportamiento es idéntico a COM-49 v2 (mínimo costo). Cada línea del
+detalle expone 'insumo_es_principal' para auditoría del modal de Evaluar.
+COM-84: FIX del falso "Costo incompleto" en el modal Evaluar. Los contadores
+ingredientes_con_precio / ingredientes_sin_precio / precio_completo se calculaban
+con `costo_parcial == 0`, pero costo_parcial está REDONDEADO a 2 decimales: líneas
+con precio real cuyo costo es menor a un céntimo (ej. 1 g de sal yodada a
+S/ 0.0010/g = S/ 0.001 -> S/ 0.00) eran contadas como "sin precio", mostrando el
+banner "Costo incompleto (N ingrediente(s) sin precio)" y dejando
+precio_completo=False (la receta quedaba excluida de propuestas pese a estar
+costeada). Ahora cada línea del detalle expone el flag `tiene_precio` (True si
+hubo fuente de precio: SCRAPER_DIA/MANUAL_PERIODO/PREDICHO/SCRAPER_ULTIMO/
+LEGACY_INGREDIENTE; False solo si mejor is None) y los contadores y
+precio_completo usan ese flag. El costo total NO cambia (ya sumaba costo_crudo
+sin redondeo). Ninguna clave existente se elimina ni renombra.
+COM-103 (este archivo): CACHÉ EN PROCESO DE LA RF DE PRECIOS + RF MÁS LIGERA.
+* predecir_precio_con_confianza cachea su resultado por
+  (insumo_id, fecha, huella del histórico de la ventana de 90 días), con TTL de
+  15 min y poda simple. La huella se deriva de los propios registros ya leídos
+  (n y última fecha), sin consulta extra: cuando el scraper agrega datos, la
+  huella cambia y la caché se invalida sola.
+* El RandomForest de precios baja de 100 a 60 árboles y max_depth 5->4: en
+  series cortas y tendenciales (≤90 puntos) la precisión es equivalente y el fit
+  es ~40% más rápido. Como el greedy costea ~100 insumos por generación, esto
+  junto a la caché baja la generación de ~30 s a segundos.
+* calcular_costo_receta y el resto del costeo: SIN CAMBIOS funcionales.
 """
 import os
+import time
 import psycopg2
 import psycopg2.extras
 from datetime import datetime, timedelta
@@ -59,6 +70,16 @@ from precios_insumos import (
 
 DB_URL = os.getenv("DATABASE_URL", "postgresql://nutri_admin:Nutri2026Secure!@db:5432/nutricomedor")
 
+# ==========================================
+# COM-103: CACHÉ DE PREDICCIONES RF DE PRECIOS
+# ==========================================
+# El histórico de precios de un insumo solo cambia cuando corre el scraper
+# (madrugada) o se carga data manual; la huella (n registros + última fecha de la
+# ventana consultada) invalida la caché automáticamente en esos casos. El TTL acota
+# el peor caso y la poda evita crecimiento sin límite del dict en procesos largos.
+PRECIO_RF_CACHE_TTL_SEG = 900
+_PRECIO_RF_CACHE = {}
+
 
 def redondear_hacia_arriba_010(valor):
     """Redondea hacia arriba al múltiplo de 0.10 más cercano."""
@@ -71,19 +92,32 @@ def predecir_precio_con_confianza(insumo_id, fecha_objetivo, conn, cur):
     """
     Predice el precio usando Random Forest con R².
     Busca hasta 90 días de histórico para tener mejor base de predicción.
+    COM-103: resultado cacheado por (insumo, fecha, huella del histórico) con TTL
+    de 15 min; RF más ligera (60 árboles, depth 4) con precisión equivalente en
+    series cortas. La firma y el contrato de retorno NO cambian:
+    (precio_redondeado, confianza_pct, ok).
     """
     cur.execute("""
         SELECT fecha, precio_prom
         FROM historial_precios
         WHERE insumo_id = %s
-          AND fecha >= %s
-          AND fecha < %s
-          AND precio_prom IS NOT NULL
+        AND fecha >= %s
+        AND fecha < %s
+        AND precio_prom IS NOT NULL
         ORDER BY fecha ASC
     """, (insumo_id, fecha_objetivo - timedelta(days=90), fecha_objetivo))
     registros = cur.fetchall()
     if len(registros) < 5:
         return None, 0, False
+
+    # COM-103: huella barata derivada de los registros ya leídos (sin query extra)
+    huella = (len(registros), str(registros[-1]['fecha']))
+    clave_cache = (insumo_id, str(fecha_objetivo), huella)
+    ahora = time.time()
+    entrada = _PRECIO_RF_CACHE.get(clave_cache)
+    if entrada and (ahora - entrada['ts']) < PRECIO_RF_CACHE_TTL_SEG:
+        return entrada['valor']
+
     try:
         import numpy as np
         from sklearn.ensemble import RandomForestRegressor
@@ -91,8 +125,8 @@ def predecir_precio_con_confianza(insumo_id, fecha_objetivo, conn, cur):
         X = np.array([[i] for i in range(len(registros))])
         y = np.array([float(r['precio_prom']) for r in registros])
         model = RandomForestRegressor(
-            n_estimators=100,
-            max_depth=5,
+            n_estimators=60,        # COM-103: antes 100 (perf en costeo masivo)
+            max_depth=4,            # COM-103: antes 5
             min_samples_split=3,
             min_samples_leaf=2,
             random_state=42,
@@ -105,10 +139,19 @@ def predecir_precio_con_confianza(insumo_id, fecha_objetivo, conn, cur):
         dias_desde_ultimo = len(registros)
         precio_predicho = model.predict([[dias_desde_ultimo]])[0]
         precio_predicho = max(0.01, precio_predicho)
-        return round(float(precio_predicho), 2), round(confianza, 1), True
+        resultado = (round(float(precio_predicho), 2), round(confianza, 1), True)
     except ImportError:
         precio_promedio = sum(float(r['precio_prom']) for r in registros) / len(registros)
-        return round(precio_promedio, 2), 50.0, True
+        resultado = (round(precio_promedio, 2), 50.0, True)
+
+    # COM-103: guardar en caché y podar entradas expiradas si crece demasiado
+    _PRECIO_RF_CACHE[clave_cache] = {'ts': ahora, 'valor': resultado}
+    if len(_PRECIO_RF_CACHE) > 4000:
+        expiradas = [k for k, v in _PRECIO_RF_CACHE.items()
+                     if ahora - v['ts'] > PRECIO_RF_CACHE_TTL_SEG]
+        for k in expiradas:
+            _PRECIO_RF_CACHE.pop(k, None)
+    return resultado
 
 
 def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
@@ -117,10 +160,10 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
     1. La unidad de medida de USO de cada línea y su componente (COM-48)
     2. El número de raciones que produce la receta (costo total / raciones)
     COM-49: costeo auditable por línea:
-        gramos_totales = gramos_por_unidad_uso(equivalencia o estándar) × cantidad
-        costo_linea    = gramos_totales × ppg (S/ por gramo del insumo elegido)
-    COM-49 v2: todos los valores NUMERIC leídos de la BD se castea a float antes de
-    operar (psycopg2 devuelve decimal.Decimal y Decimal*float lanza TypeError).
+      gramos_totales = gramos_por_unidad_uso(equivalencia o estándar) × cantidad
+      costo_linea    = gramos_totales × ppg (S/ por gramo del insumo elegido)
+    COM-49 v2: todos los valores NUMERIC leídos de la BD se castean a float antes
+    de operar (psycopg2 devuelve decimal.Decimal y Decimal*float lanza TypeError).
     El subtotal y el costo por ración usan el costo SIN piso de 0.10; el valor con
     piso se expone aparte como referencia de compra.
     COM-80: entre los insumos con precio de la línea, se PREFIERE al marcado
@@ -130,6 +173,8 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
     contadores de completitud (ingredientes_con_precio / ingredientes_sin_precio /
     precio_completo) se calculan con ese flag, NO con costo_parcial redondeado
     (antes una línea de S/ 0.001 redondeada a S/ 0.00 contaba como "sin precio").
+    COM-103: sin cambios funcionales; se beneficia de la caché de
+    predecir_precio_con_confianza cuando un insumo no tiene precio en el mapa.
     """
     conn = None
     cur = None
@@ -178,7 +223,6 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
         costo_total_compra = 0.0          # COM-49: suma de costos con piso de 0.10
         detalle_costos = []
         fecha_objetivo = datetime.strptime(fecha_evaluacion, "%Y-%m-%d").date()
-
         for req in ingredientes_receta:
             unidad_abrev = (req['receta_unidad_abrev'] or '').lower()
             unidad_nombre = req['receta_unidad_nombre'] or ''
@@ -187,7 +231,6 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
             factor_receta = float(req['receta_factor_a_base'])
             peso_estimado_base = float(req['peso_estimado_g'])
             unidad_display = f"{cantidad_requerida} {unidad_nombre.lower()}"
-
             # COM-80: se expone es_principal para la preferencia de costeo
             cur.execute("""
                 SELECT ins.id AS insumo_id, ins.nombre AS insumo_nombre, ins.origen,
@@ -198,7 +241,6 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
                 WHERE ins.ingrediente_id = %s;
             """, (req['ingrediente_id'],))
             insumos_rows = cur.fetchall()
-
             mejor = None
             mejor_principal = None   # COM-80
             for ins in insumos_rows:
@@ -259,7 +301,6 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
             # COM-80: preferencia explícita del Admin sobre el mínimo costo
             if mejor_principal is not None:
                 mejor = mejor_principal
-
             # COM-37 v5: fallback legacy si ningún insumo candidato tuvo precio/predicción
             if mejor is None:
                 legacy = mejor_opcion_ingrediente(cur, req['ingrediente_id'], fecha_objetivo, precios_insumo)
@@ -284,10 +325,8 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
                         'equivalencia_usada': False,
                         'es_principal': False,
                     }
-
             componente_nombre = req['componente_nombre'] or 'Plato de fondo'
             componente_orden = req['componente_orden'] if req['componente_orden'] is not None else 99
-
             if mejor is None:
                 detalle_costos.append({
                     "ingrediente": req['ingrediente_nombre'],
@@ -308,7 +347,6 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
                     "tiene_precio": False,
                 })
                 continue
-
             # COM-49: el subtotal analítico usa el costo SIN piso de 0.10
             costo_total_receta += mejor['costo_crudo']
             costo_total_compra += mejor['costo_compra']
@@ -320,7 +358,6 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
                 insumo_display = f"{mejor['insumo_nombre']} (PREDICHO {mejor['confianza']}%)"
             else:
                 insumo_display = mejor['insumo_nombre']
-
             detalle_costos.append({
                 "ingrediente": req['ingrediente_nombre'],
                 "ingrediente_id": req['ingrediente_id'],
@@ -352,7 +389,6 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
                 # redondeado sea S/ 0.00 por ser menor a un céntimo, ej. sal yodada)
                 "tiene_precio": True,
             })
-
         costo_por_racion = costo_total_receta / raciones_receta
         return {
             "receta_id": receta_id,

@@ -1,43 +1,52 @@
 /**
 components/budget/GenerarPropuestasView.jsx
 Objetivo: Vista COM-8 "Propuestas de Menú": genera y muestra 3 propuestas de menú
-      semanal (NutriMax, EconoMax, BalanceMax) del motor greedy, cada una con
-      costo total, calorías promedio/día, recolección proyectada y margen
-      (ventas - compras), top 3 de ingredientes (solo vegetales/frutas/proteínas)
-      y el listado de platos por día. El personal Directivo fija una propuesta
-      ("Seleccionar esta opción"). Incluye historial de menús seleccionados.
+semanal (NutriMax, EconoMax, BalanceMax) del motor greedy, cada una con
+costo total, calorías promedio/día, recolección proyectada y margen
+(ventas - compras), top 3 de ingredientes (solo vegetales/frutas/proteínas)
+y el listado de platos por día. El personal Directivo fija una propuesta
+("Seleccionar esta opción"). Incluye historial de menús seleccionados.
 Historial:
 COM-8 v1: 3 tarjetas, selección solo Directivo, historial.
 COM-8 v2: selector de días de cocina (chips Lun-Dom) y tarjetas de recolección/margen.
 COM-8 v4: se retira el botón independiente "Regenerar"; al pulsar "Generar 3
-         propuestas" con una sesión activa se abre un modal de confirmación.
+propuestas" con una sesión activa se abre un modal de confirmación.
 COM-8 v5: trazabilidad recuperada. Todas las líneas reemplazadas en
-         versiones anteriores se conservan COMENTADAS (no borradas).
+versiones anteriores se conservan COMENTADAS (no borradas).
 COM-61 / HU-11: VARIEDAD ENTRE SEMANAS en la UI:
-         * Checkbox "Permitir platos repetidos" (opt-in explícito, default OFF).
-           Al marcarlo se exige confirmación con el mensaje del criterio:
-           "¿Está seguro de permitir platos repetidos en la generación de nuevas
-           sugerencias semanales?" (ModalConfirmacion; cancelar => queda OFF).
-         * El payload de api.generarPropuestas viaja con permitir_repetidos.
-         * Badge de VARIEDAD por propuesta (variedad_pct = % platos nuevos vs la
-           semana VIGENTE anterior) + fecha de la semana de referencia.
-         * Advertencia listada cuando el motor repitió platos por falta de
-           alternativas (repeticiones_semana_anterior con flag inevitable).
-         * Tag "Repetido de la semana anterior" en la línea de cada día del menú
-           resumido cuando d.repite_semana_anterior = true.
-         * Chips de contexto en el encabezado de sesión: semana anterior detectada
-           y aviso de "repetición permitida" si la generación usó el opt-in.
-         Nada existente de COM-8 v1-v5 se elimina; los bloques comentados se conservan.
+* Checkbox "Permitir platos repetidos" (opt-in explícito, default OFF).
+  Al marcarlo se exige confirmación con el mensaje del criterio:
+  "¿Está seguro de permitir platos repetidos en la generación de nuevas
+  sugerencias semanales?" (ModalConfirmacion; cancelar => queda OFF).
+* El payload de api.generarPropuestas viaja con permitir_repetidos.
+* Badge de VARIEDAD por propuesta (variedad_pct = % platos nuevos vs la
+  semana VIGENTE anterior) + fecha de la semana de referencia.
+* Advertencia listada cuando el motor repitió platos por falta de
+  alternativas (repeticiones_semana_anterior con flag inevitable).
+* Tag "Repetido de la semana anterior" en la línea de cada día del menú
+  resumido cuando d.repite_semana_anterior = true.
+* Chips de contexto en el encabezado de sesión: semana anterior detectada
+  y aviso de "repetición permitida" si la generación usó el opt-in.
+Nada existente de COM-8 v1-v5 se elimina; los bloques comentados se conservan.
 COM-74: muestra por día los comensales proyectados (IA + cocineras) con badge de
-         fuente (IA/parámetro) en cada tarjeta de propuesta.
-COM-75 (este archivo): banner de aviso cuando la generación detecta ingredientes
-         cuyos insumos son NUEVOS y no se pueden predecir (sin histórico de scraper):
-         promptea al usuario a asignar un precio manual temporal en Gestión de
-         Ingredientes hasta juntar datos suficientes para predecir.
+fuente (IA/parámetro) en cada tarjeta de propuesta.
+COM-75: banner de aviso cuando la generación detecta ingredientes cuyos insumos
+son NUEVOS y no se pueden predecir (sin histórico de scraper): promptea al
+usuario a asignar un precio manual temporal en Gestión de Ingredientes hasta
+juntar datos suficientes para predecir.
+COM-103 (este archivo): ajustes de UX pedidos por la administradora:
+* (3) La Semana de referencia inicia con la FECHA DE HOY (antes vacía, lo que
+  obligaba a dejar null o elegir a mano); se conserva editable.
+* (4) La caja "Comensales proyectados por día" muestra SOLO el total por día:
+  se retiran el desglose social/afiliado/normal+cocineras, el rótulo "Total:" y
+  el badge de fuente IA/Par. (badgeFuente queda COMENTADO por trazabilidad; el
+  payload conserva el detalle para auditoría y para planificacion_dia.)
+* (5) Se RETIRA el bloque "Top 3 ingredientes" de las tarjetas (comentado por
+  trazabilidad; el backend conserva r.top_ingredientes en el resumen).
 Permisos: vista para Directivo y Operativo (módulo 'propuestas', COM-25). El botón de
-      selección solo aparece si el backend responde puede_seleccionar=true.
+selección solo aparece si el backend responde puede_seleccionar=true.
 Uso: Montada por App.jsx en la pestaña "Propuestas de Menú".
-Referencia: ticket COM-8 / HU-08 / COM-61 / COM-74 / COM-75 (solo trazabilidad).
+Referencia: ticket COM-8 / HU-08 / COM-61 / COM-74 / COM-75 / COM-103 (solo trazabilidad).
 */
 import React, { useState, useEffect, useCallback } from 'react';
 import {
@@ -73,20 +82,31 @@ const DIAS_OPCIONES = [
 // COM-8 v2: por defecto se cocina de lunes a viernes
 const DIAS_DEFAULT = [1, 2, 3, 4, 5];
 
-// COM-74: badge de fuente de comensales (IA vs parámetro)
-const badgeFuente = (fuente) => {
-    if (fuente === 'prediccion_ia') {
-        return <span className="ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-100 text-emerald-700">IA</span>;
-    }
-    return <span className="ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold bg-slate-100 text-slate-600">Par.</span>;
+// COM-103: fecha local de hoy en YYYY-MM-DD para el default de Semana de referencia
+const fechaHoyLocal = () => {
+    const h = new Date();
+    const mm = String(h.getMonth() + 1).padStart(2, '0');
+    const dd = String(h.getDate()).padStart(2, '0');
+    return `${h.getFullYear()}-${mm}-${dd}`;
 };
+
+// COM-74 (trazabilidad COM-103): badge de fuente de comensales (IA vs parámetro).
+// Retirado de la caja de comensales por pedido de la administradora (punto 4);
+// se conserva comentado porque el payload aún trae fuente_comensales por día.
+// const badgeFuente = (fuente) => {
+//     if (fuente === 'prediccion_ia') {
+//         return <span className="ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-100 text-emerald-700">IA</span>;
+//     }
+//     return <span className="ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold bg-slate-100 text-slate-600">Par.</span>;
+// };
 
 export const GenerarPropuestasView = () => {
     const { usuario, seleccion } = useAuth();
     const comedorId = seleccion?.comedor_id;
     // Parámetros de generación
     const [presupuesto, setPresupuesto] = useState('2500');
-    const [fechaRef, setFechaRef] = useState('');
+    // COM-103 (punto 3): default = hoy (antes: cadena vacía)
+    const [fechaRef, setFechaRef] = useState(fechaHoyLocal());
     const [seed, setSeed] = useState(0);
     // COM-8 v2: días de cocina seleccionados
     const [diasSel, setDiasSel] = useState(DIAS_DEFAULT);
@@ -107,6 +127,7 @@ export const GenerarPropuestasView = () => {
     const [mostrarHistorial, setMostrarHistorial] = useState(false);
     const [expandidos, setExpandidos] = useState({});
     const [diasHistorial, setDiasHistorial] = useState({});
+
     const puedeSeleccionar = !!sesion?.puede_seleccionar;
 
     const cargarHistorial = useCallback(async () => {
@@ -244,6 +265,7 @@ export const GenerarPropuestasView = () => {
                     )}
                 */}
             </div>
+
             {/* Formulario de generación */}
             <div className="flex flex-wrap gap-3 mb-4 items-end">
                 <div>
@@ -258,6 +280,7 @@ export const GenerarPropuestasView = () => {
                     <label className="flex items-center gap-1 text-xs font-semibold text-slate-600 mb-1">
                         <CalendarDays size={12} /> Semana de referencia
                     </label>
+                    {/* COM-103 (punto 3): value inicial = hoy vía estado; input sin cambios */}
                     <input type="date" value={fechaRef}
                         onChange={(e) => setFechaRef(e.target.value)}
                         className="px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
@@ -269,6 +292,7 @@ export const GenerarPropuestasView = () => {
                     Generar 3 propuestas
                 </button>
             </div>
+
             {/* COM-8 v2: selector de días de cocina (chips) */}
             <div className="mb-5">
                 <label className="flex items-center gap-1 text-xs font-semibold text-slate-600 mb-1">
@@ -291,6 +315,7 @@ export const GenerarPropuestasView = () => {
                     })}
                 </div>
             </div>
+
             {/* COM-61 (HU-11): opt-in explícito de repetición de platos de la semana anterior.
                 Por defecto OFF: el motor evita los platos del menú VIGENTE anterior y solo
                 los repite si no hay alternativas (marcados como inevitables en cada tarjeta). */}
@@ -310,11 +335,13 @@ export const GenerarPropuestasView = () => {
                         : 'Por defecto el motor evita los platos del menú vigente de la semana anterior.'}
                 </span>
             </div>
+
             {error && (
                 <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-center gap-2 text-sm">
                     <AlertCircle size={16} /> {error}
                 </div>
             )}
+
             {/* COM-75: prompt de precio manual temporal para insumos nuevos sin histórico */}
             {sesion && (sesion.ingredientes_requieren_precio_manual || []).length > 0 && (
                 <div className="mb-4 p-3 bg-amber-50 border border-amber-300 rounded-lg text-amber-800 text-sm">
@@ -336,6 +363,7 @@ export const GenerarPropuestasView = () => {
                     </ul>
                 </div>
             )}
+
             {/* Tarjetas de propuestas */}
             {cargando && !sesion ? (
                 <div className="p-12 text-center text-emerald-600">
@@ -437,24 +465,31 @@ export const GenerarPropuestasView = () => {
                                             </ul>
                                         </div>
                                     )}
-                                    <div className="mb-3">
-                                        <p className="flex items-center gap-1 text-[11px] font-semibold text-slate-600 mb-1">
-                                            <ShoppingBasket size={11} /> Top 3 ingredientes
-                                        </p>
-                                        <div className="flex flex-wrap gap-1">
-                                            {(r.top_ingredientes || []).map(ing => (
-                                                <span key={ing} className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded-full text-[10px] font-medium">
-                                                    {ing}
-                                                </span>
-                                            ))}
+                                    {/* COM-103 (punto 5, trazabilidad): bloque "Top 3 ingredientes" RETIRADO
+                                        de las tarjetas por pedido de la administradora. El backend conserva
+                                        r.top_ingredientes en el resumen para auditoría/tesis.
+                                        <div className="mb-3">
+                                            <p className="flex items-center gap-1 text-[11px] font-semibold text-slate-600 mb-1">
+                                                <ShoppingBasket size={11} /> Top 3 ingredientes
+                                            </p>
+                                            <div className="flex flex-wrap gap-1">
+                                                {(r.top_ingredientes || []).map(ing => (
+                                                    <span key={ing} className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded-full text-[10px] font-medium">
+                                                        {ing}
+                                                    </span>
+                                                ))}
+                                            </div>
                                         </div>
-                                    </div>
+                                    */}
                                     <p className={`text-[11px] font-semibold mb-3 ${r.dentro_de_presupuesto ? 'text-emerald-700' : 'text-red-600'}`}>
                                         {r.dentro_de_presupuesto
                                             ? `Dentro del presupuesto de S/ ${r.presupuesto_semanal}`
                                             : `Excede el presupuesto de S/ ${r.presupuesto_semanal}`}
                                     </p>
-                                    {/* COM-74: comensales proyectados por día */}
+                                    {/* COM-74 + COM-103 (punto 4): comensales proyectados por día,
+                                        SOLO el total por día (sin desglose por tipo, sin "Total:",
+                                        sin badge de fuente). El detalle completo sigue en el payload
+                                        (sesion.comensales_por_dia) y en planificacion_dia al seleccionar. */}
                                     {sesion.comensales_por_dia && (
                                         <div className="mb-3 p-2 bg-blue-50 border border-blue-200 rounded-lg">
                                             <p className="text-[11px] font-bold text-blue-800 mb-1 flex items-center gap-1">
@@ -464,9 +499,7 @@ export const GenerarPropuestasView = () => {
                                                 {Object.entries(sesion.comensales_por_dia).map(([dia, cd]) => (
                                                     <div key={dia} className="text-center">
                                                         <p className="font-bold text-slate-700">{DIAS_OPCIONES[dia - 1]?.label}</p>
-                                                        <p className="text-slate-600">{cd.social}/{cd.afiliado}/{cd.normal}+{cd.cocineras}</p>
-                                                        <p className="font-bold text-blue-700">Total: {cd.total}</p>
-                                                        {badgeFuente(cd.fuente)}
+                                                        <p className="font-bold text-blue-700">{cd.total}</p>
                                                     </div>
                                                 ))}
                                             </div>
@@ -514,6 +547,7 @@ export const GenerarPropuestasView = () => {
                     </p>
                 </div>
             )}
+
             {/* Historial de menús seleccionados */}
             <button onClick={() => setMostrarHistorial(!mostrarHistorial)}
                 className="flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-slate-800 transition-colors mb-2">
@@ -586,6 +620,7 @@ export const GenerarPropuestasView = () => {
                     </table>
                 </div>
             )}
+
             {/* Confirmación de selección */}
             <ModalConfirmacion
                 isOpen={!!confSeleccion}
