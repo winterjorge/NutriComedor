@@ -46,7 +46,7 @@ N_CORTES_DEFAULT = 3             # Reducido de 4 a 3
 PASO_DIAS_DEFAULT = 7
 TOP_INSUMOS_RECETARIO = 12       # Reducido de 20 a 12 (suficiente para tesis/UI)
 DIAS_SERIE = 60                
-TOP_INSUMOS_SERIES = 3           # Reducido de 4 a 3 gráficos de línea
+TOP_INSUMOS_SERIES = TOP_INSUMOS_RECETARIO  # Ahora será 12
 TOP_INSUMOS_METRICAS = 5         # Reducido de 8 a 5 (Solicitud explícita del usuario)
 
 
