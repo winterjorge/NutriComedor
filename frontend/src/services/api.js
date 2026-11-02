@@ -736,14 +736,15 @@ export const api = {
         return response.json();
     },
     // ==========================================
-    // PANEL DE GRÁFICOS DE MACHINE LEARNING (COM-5 v4 / COM-8 v7)
+    // MODELOS ML (panel de gráficos, COM-5 v4 / COM-8 v7)
     // ==========================================
     getEstadoModelosML: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/modelos-ml/estado?usuario_solicitante_id=${usuarioSolicitanteId}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al consultar el estado de los modelos'));
         return response.json();
     },
-// COM-92: getScatterRandomForest ahora acepta parámetro modelo ('rf' o 'gbm')
+    // COM-92: getScatterRandomForest acepta parámetro modelo ('rf' o 'gbm').
+    // COM-105 v2: la UI ya no expone el selector; se llama siempre con 'rf'.
     getScatterRandomForest: async (usuarioSolicitanteId, modelo = 'rf') => {
         const response = await fetch(`${API_BASE}/modelos-ml/random-forest?usuario_solicitante_id=${usuarioSolicitanteId}&modelo=${modelo}`);
         if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar el gráfico'));
@@ -756,7 +757,15 @@ export const api = {
     },
     getGreedyML: async (usuarioSolicitanteId) => {
         const response = await fetch(`${API_BASE}/modelos-ml/greedy?usuario_solicitante_id=${usuarioSolicitanteId}`);
-        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar el gráfico del Greedy Search'));
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar el gráfico del greedy'));
+        return response.json();
+    },
+    // COM-105 v2: gráfico 4 del panel: dispersión REAL vs PREDICHO de la RF de
+    // precios en S/ por kg, métricas out-of-sample, detalle por insumo y series
+    // históricas con marcadores de predicción en los cortes evaluados.
+    getScatterRFPrecios: async (usuarioSolicitanteId) => {
+        const response = await fetch(`${API_BASE}/modelos-ml/random-forest-precios?usuario_solicitante_id=${usuarioSolicitanteId}`);
+        if (!response.ok) throw new Error(await leerErrorSeguro(response, 'Error al generar el gráfico de precios'));
         return response.json();
     },
     // ==========================================
