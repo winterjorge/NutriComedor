@@ -8,7 +8,7 @@ exclusivo del Administrador de Sistemas (módulo 'modelos_ml'):
   relevancia (feature importances) de cada variable del modelo.
 - GET /modelos-ml/kmeans-scatter: dispersión PCA-2D de las recetas del modelo
   K-means activo, coloreada por cluster, con centroides proyectados, varianza
-  explicada por componente y las cargas de cada variable en PC1/PC2.
+  explicada por componente y las cargas de cada variable en ambos ejes.
 - GET /modelos-ml/greedy: serie diaria y totales por variante de la última
   sesión del motor Greedy Search (costo, recolección, margen, kcal, hierro).
 Todos los payloads incluyen explícitamente las VARIABLES/INDICADORES que el
@@ -16,20 +16,30 @@ frontend debe rotular en ejes y leyendas (requerimiento del ticket).
 Historial:
 COM-5 v4 / COM-8 v7: versión original del panel (4 endpoints, PCA de 4 variables
     con precio_soles incluido en el espacio proyectado).
-COM-60 (este archivo): el scatter de K-means pasa a PCA sobre las 6 VARIABLES
-    NUTRICIONALES de COM-60 (FEATURES de ml.kmeans_recetas); el precio SALE del
-    espacio proyectado (coherente con "clustering solo nutricional") pero se
-    conserva en cada punto como campo informativo de tooltip. Escalado del PCA
-    con RobustScaler (consistente con el espacio del modelo v2); el
-    StandardScaler anterior queda comentado. Centroides se proyectan con
-    .get(feat, 0.0) para tolerar modelos antiguos de 4 claves. Se CONSERVA el
-    reuse de ml.random_forest_demanda (entrenar_y_evaluar_rf / _cargar_historia_demanda):
-    el RF del panel es el MISMO módulo del flujo de demanda, no un modelo inline.
+COM-60: el scatter de K-means pasa a PCA sobre las 6 VARIABLES NUTRICIONALES de
+    COM-60 (FEATURES de ml.kmeans_recetas); el precio SALE del espacio proyectado
+    (coherente con "clustering solo nutricional") pero se conserva en cada punto
+    como campo informativo de tooltip. Escalado del PCA con RobustScaler
+    (consistente con el espacio del modelo v2); el StandardScaler anterior queda
+    comentado. Centroides se proyectan con .get(feat, 0.0) para tolerar modelos
+    antiguos de 4 claves. Se CONSERVA el reuse de ml.random_forest_demanda
+    (entrenar_y_evaluar_rf / _cargar_historia_demanda): el RF del panel es el
+    MISMO módulo del flujo de demanda, no un modelo inline.
     Ninguna clave de payload existente se elimina (cambios aditivos).
+COM-100 (este archivo): el scatter de K-means REPLICA LA GEOMETRÍA DE ENTRENAMIENTO.
+    Antes proyectaba PCA sobre RobustScaler(crudo) mientras el modelo entrenaba en
+    log1p+RobustScaler (+pesos del espacio elegido): el panel mostraba clusters
+    "no diferenciados" aunque el modelo trabajara en otro espacio. Ahora se lee
+    parametros.espacio_elegido del modelo activo y se construye la matriz con
+    ml.kmeans_recetas.construir_matriz_espacio (misma función del entrenamiento);
+    los centroides persistidos en `centroides_robustos` (espacio escalado+ponderado)
+    se proyectan con el MISMO PCA. Modelos legacy sin espacio_elegido caen al
+    comportamiento COM-60 (crudo+RobustScaler) para no romper historial.
+    Payload aditivo: espacio_nombre, pesos_espacio, caps_nutricionales.
 Uso: Registrado en main.py con prefijo /api/v1.
 Permisos: TODOS los endpoints exigen es_admin_sistema (módulo 'modelos_ml' sembrado
 en esquema_modelos_ml.py únicamente para el rol Administrador de Sistemas).
-Referencia: tickets COM-5 v4 / COM-8 v7 / COM-60 (solo trazabilidad).
+Referencia: tickets COM-5 v4 / COM-8 v7 / COM-60 / COM-100 (solo trazabilidad).
 """
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException
@@ -41,7 +51,13 @@ from sklearn.preprocessing import RobustScaler
 # from sklearn.preprocessing import StandardScaler
 from database import get_db
 from permisos import es_admin_sistema
-from ml.kmeans_recetas import obtener_modelo_activo, FEATURES
+from ml.kmeans_recetas import (
+    obtener_modelo_activo,
+    FEATURES,
+    # COM-100: misma función de espacio que usa el entrenamiento (geometría idéntica)
+    construir_matriz_espacio,
+    ESPACIOS_CANDIDATOS,
+)
 # COM-60: se CONSERVA el reuse del módulo RF compartido (no se entrena RF inline)
 from ml.random_forest_demanda import entrenar_y_evaluar_rf, _cargar_historia_demanda
 
@@ -139,20 +155,23 @@ def grafico_random_forest(usuario_solicitante_id: int, db=Depends(get_db)):
 
 
 # ==========================================
-# GRÁFICO 2: DISPERSIÓN PCA-2D DEL K-MEANS (COM-60: 6 variables nutricionales)
+# GRÁFICO 2: DISPERSIÓN PCA-2D DEL K-MEANS (COM-60 + COM-100: geometría de entrenamiento)
 # ==========================================
 @router.get("/kmeans-scatter")
 def grafico_kmeans(usuario_solicitante_id: int, db=Depends(get_db)):
     """
-    COM-60: proyecta las 6 VARIABLES NUTRICIONALES del modelo K-means activo
-    (FEATURES = energia_kcal, hierro_mg, proteina_g, vitamina_a_ug, zinc_mg,
-    carbohidratos_g) a 2 componentes principales y devuelve:
-    - puntos por receta con su cluster (para colorear la dispersión) y el precio
-      como campo informativo de tooltip (fuera del espacio proyectado),
-    - centroides de cada cluster proyectados en el mismo espacio,
-    - varianza explicada por PC1/PC2 y cargas de cada variable en ambos ejes.
-    Trazabilidad: el PCA anterior usaba 4 columnas incluyendo precio_soles; ese
-    bloque queda comentado al final de la función.
+    COM-60 + COM-100: proyecta a 2 componentes principales el MISMO espacio en el que
+    entrenó el modelo activo:
+    - Modelos COM-100: parametros.espacio_elegido (features/labels/pesos/log/densidad/
+      perfil) -> matriz vía ml.kmeans_recetas.construir_matriz_espacio (idéntica al
+      entrenamiento) -> PCA. Los centroides persistidos en `centroides_robustos`
+      (espacio escalado+ponderado) se proyectan con ese PCA: los rombos caen donde
+      realmente está el centro de cada cluster.
+    - Modelos legacy (sin espacio_elegido): comportamiento COM-60 (6 features crudas +
+      RobustScaler, centroides con .get(feat, 0.0)) para no romper el historial.
+    Devuelve además cargas por componente, varianza explicada, y campos aditivos
+    COM-100: espacio_nombre, pesos_espacio y caps_nutricionales (auditoría R5).
+    El precio se conserva SOLO como tooltip informativo (fuera del espacio proyectado).
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -176,15 +195,67 @@ def grafico_kmeans(usuario_solicitante_id: int, db=Depends(get_db)):
         if len(filas) < 3:
             raise HTTPException(status_code=400,
                             detail="Muy pocas recetas en el modelo activo para proyectar (mínimo 3).")
-        # COM-60: X con las 6 nutricionales (el precio queda fuera del espacio PCA).
-        # Trazabilidad: PCA anterior de 4 columnas comentado:
-        # X = np.array([[float(f['energia_kcal']), float(f['hierro_mg']),
-        #                float(f['proteina_g']), float(f['precio_soles'])] for f in filas])
-        X = np.array([[float(f[c] or 0.0) for c in FEATURES] for f in filas])
-        scaler = RobustScaler()
-        Xs = scaler.fit_transform(X)
-        pca = PCA(n_components=2, random_state=42)
-        P = pca.fit_transform(Xs)
+
+        parametros = modelo['parametros'] if isinstance(modelo['parametros'], dict) else {}
+        spec = parametros.get('espacio_elegido') or None
+        caps = parametros.get('caps_nutricionales') or []
+
+        if spec:
+            # ---- COM-100: geometría idéntica al entrenamiento ----
+            filas_dict = [dict(f) for f in filas]
+            Xs, _scaler = construir_matriz_espacio(filas_dict, spec)
+            labels_order = spec.get('labels', FEATURES)
+            pca = PCA(n_components=2, random_state=42)
+            P = pca.fit_transform(Xs)
+            # Centroides persistidos en el mismo espacio escalado+ponderado
+            centroides_proy = []
+            centros = modelo['centroides'] if isinstance(modelo['centroides'], dict) else {}
+            robustos = parametros.get('centroides_robustos') or centros
+            for codigo, c in (robustos or {}).items():
+                v = [[float(c.get(lbl, 0.0) or 0.0) for lbl in labels_order]]
+                xy = pca.transform(np.array(v, dtype=float))[0]
+                centroides_proy.append({
+                    'cluster_codigo': int(codigo),
+                    'cluster_etiqueta': (modelo['etiquetas'] or {}).get(str(codigo)),
+                    'x': round(float(xy[0]), 4),
+                    'y': round(float(xy[1]), 4),
+                })
+            cargas = [
+                {'variable': labels_order[j],
+                 'pc1': round(float(pca.components_[0][j]), 4),
+                 'pc2': round(float(pca.components_[1][j]), 4)}
+                for j in range(len(labels_order))
+            ]
+            variables_payload = labels_order
+            espacio_nombre = spec.get('nombre', 'personalizado')
+            pesos_espacio = spec.get('pesos')
+        else:
+            # ---- COM-60 legacy: 6 features crudas + RobustScaler (trazabilidad) ----
+            X = np.array([[float(f[c] or 0.0) for c in FEATURES] for f in filas])
+            scaler = RobustScaler()
+            Xs = scaler.fit_transform(X)
+            pca = PCA(n_components=2, random_state=42)
+            P = pca.fit_transform(Xs)
+            centroides_proy = []
+            for codigo, c in (modelo['centroides'] or {}).items():
+                v = [[float(c.get(feat, 0.0) or 0.0) for feat in FEATURES]]
+                xy = pca.transform(scaler.transform(v))[0]
+                centroides_proy.append({
+                    'cluster_codigo': int(codigo),
+                    'cluster_etiqueta': (modelo['etiquetas'] or {}).get(str(codigo)),
+                    'x': round(float(xy[0]), 4),
+                    'y': round(float(xy[1]), 4),
+                })
+            cargas = [
+                {'variable': FEATURES[j],
+                 'pc1': round(float(pca.components_[0][j]), 4),
+                 'pc2': round(float(pca.components_[1][j]), 4)}
+                for j in range(len(FEATURES))
+            ]
+            variables_payload = FEATURES
+            espacio_nombre = 'legacy_crudo_robust'
+            pesos_espacio = None
+
         puntos = []
         for f, xy in zip(filas, P):
             puntos.append({
@@ -204,38 +275,25 @@ def grafico_kmeans(usuario_solicitante_id: int, db=Depends(get_db)):
                 # COM-60: precio conservado SOLO como tooltip informativo
                 'precio_soles': float(f['precio_soles']),
             })
-        # Centroides crudos guardados en el modelo -> mismo espacio PCA.
-        # COM-60: .get(feat, 0.0) tolera modelos antiguos cuyo JSON tiene 4 claves.
-        centroides = []
-        for codigo, c in (modelo['centroides'] or {}).items():
-            v = [[float(c.get(feat, 0.0) or 0.0) for feat in FEATURES]]
-            xy = pca.transform(scaler.transform(v))[0]
-            centroides.append({
-                'cluster_codigo': int(codigo),
-                'cluster_etiqueta': (modelo['etiquetas'] or {}).get(str(codigo)),
-                'x': round(float(xy[0]), 4),
-                'y': round(float(xy[1]), 4),
-            })
-        cargas = [
-            {'variable': FEATURES[j],
-             'pc1': round(float(pca.components_[0][j]), 4),
-             'pc2': round(float(pca.components_[1][j]), 4)}
-            for j in range(len(FEATURES))
-        ]
+
         return {
             'modelo_id': modelo['id'],
             'fecha_entrenamiento': modelo['fecha_entrenamiento'],
             'silhouette': modelo['silhouette'],
             'inercia': modelo['inercia'],
-            'variables': FEATURES,
+            'variables': variables_payload,
             'varianza_explicada': {
                 'pc1': round(float(pca.explained_variance_ratio_[0]), 4),
                 'pc2': round(float(pca.explained_variance_ratio_[1]), 4),
             },
             'cargas': cargas,
             'puntos': puntos,
-            'centroides': centroides,
+            'centroides': centroides_proy,
             'etiquetas_clusters': modelo['etiquetas'],
+            # COM-100 (aditivos): transparencia del espacio proyectado y auditoría R5
+            'espacio_nombre': espacio_nombre,
+            'pesos_espacio': pesos_espacio,
+            'caps_nutricionales': caps,
         }
         # COM-60 (trazabilidad): bloque anterior de centroides con 4 columnas, comentado:
         # for codigo, c in (modelo['centroides'] or {}).items():

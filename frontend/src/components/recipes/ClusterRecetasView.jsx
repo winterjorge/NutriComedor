@@ -1,32 +1,43 @@
 /**
 components/recipes/ClusterRecetasView.jsx
 Objetivo: Vista COM-5 del modelo K-means del recetario: métricas del modelo activo
-      (silhouette, inercia, recetas aptas/excluidas), tarjetas de los 4 clusters
-      con su centroide por ración, listado de recetas por cluster, auditoría de
-      exclusiones (reglas R0-R2) y re-entrenamiento.
-      COM-5 v4: agrega el panel de CONFIGURACIÓN de proteínas permitidas (R1) e
-      ingredientes vetados (R2) con chips editables, guardado en parametros_sistema
-      vía PUT /kmeans/proteinas y aviso de re-entrenamiento pendiente.
+(silhouette, inercia, recetas aptas/excluidas), tarjetas de los 4 clusters
+con su centroide por ración, listado de recetas por cluster, auditoría de
+exclusiones (reglas R0-R2) y re-entrenamiento.
+COM-5 v4: agrega el panel de CONFIGURACIÓN de proteínas permitidas (R1) e
+ingredientes vetados (R2) con chips editables, guardado en parametros_sistema
+vía PUT /kmeans/proteinas y aviso de re-entrenamiento pendiente.
 Historial:
 COM-5 v1/v4: versión original + panel de configuración de proteínas.
 COM-60/COM-71: tarjetas con centroide de 6 variables y flag costeable en backend.
-COM-76 (este archivo): el PRECIO sale de la UI de clusters (D3):
-      * Subtítulo del encabezado: clasificación 100% nutricional (6 variables).
-      * CONFIG_CLUSTER: descripciones de negocio sin referencia a precio; el ícono
-        del cluster 4 pasa de Coins a Scale (equilibrio, no costo).
-      * Tarjeta de cluster: la 4ª mini-tarjeta deja de ser "S/" y pasa a ser
-        "Carbo g" (centroide); se elimina la línea "Rango de precio S/ min–max" y
-        en su lugar se muestran zinc / vitamina A / carbohidratos del centroide.
-      * Tabla de recetas del cluster: se eliminan las columnas "Precio" y "Nivel"
-        (y sus celdas); el badge badgeNivel queda COMENTADO por trazabilidad.
-      * El texto de "sin modelo" menciona las 4 etiquetas de negocio COM-76.
-      El backend CONSERVA precio_soles / nivel_precio / post-hoc Fe/S/ en el payload
-      como auditoría (tesis + flag costeable del greedy); aquí simplemente no se
-      exhiben por cluster.
+COM-76: el PRECIO sale de la UI de clusters (D3):
+* Subtítulo del encabezado: clasificación 100% nutricional (6 variables).
+* CONFIG_CLUSTER: descripciones de negocio sin referencia a precio; el ícono
+  del cluster 4 pasa de Coins a Scale (equilibrio, no costo).
+* Tarjeta de cluster: la 4ª mini-tarjeta deja de ser "S/" y pasa a ser
+  "Carbo g" (centroide); se elimina la línea "Rango de precio S/ min–max" y
+  en su lugar se muestran zinc / vitamina A / carbohidratos del centroide.
+* Tabla de recetas del cluster: se eliminan las columnas "Precio" y "Nivel"
+  (y sus celdas); el badge badgeNivel queda COMENTADO por trazabilidad.
+* El texto de "sin modelo" menciona las 4 etiquetas de negocio COM-76.
+El backend CONSERVA precio_soles / nivel_precio / post-hoc Fe/S/ en el payload
+como auditoría (tesis + flag costeable del greedy); aquí simplemente no se
+exhiben por cluster.
+COM-101 v2 (este archivo): significados REDEFINIDOS visibles en la UI:
+* La descripción de cada tarjeta se lee del payload (`clusters[].descripcion`,
+  generada por DESCRIPCION_ETIQUETA en COM-101) con FALLBACK a CONFIG_CLUSTER
+  para modelos/payloads antiguos que no la traen.
+* Línea de transparencia: espacio de entrenamiento elegido
+  (`resumen.espacio_elegido` + `features_espacio`) bajo las métricas del modelo.
+* Banner ámbar de auditoría R5 (COM-100): lista los valores nutricionales
+  implausibles acotados para entrenar (`resumen.caps_nutricionales`, caso real
+  receta 280 proteina 398 -> 60) para que el Admin corrija la ficha.
+* Sin cambios: permisos, configuración de proteínas, tabla de recetas,
+  auditoría de excluidas, modales y trazabilidad COM-76.
 Permisos: COM-5 v4: vista EXCLUSIVA del Administrador de Sistemas (módulo 'clusters',
-      sembrado en esquema_modelos_ml.py). El backend también valida (403).
+sembrado en esquema_modelos_ml.py). El backend también valida (403).
 Uso: Montada por App.jsx en la pestaña "Clusters K-Means".
-Referencia: tickets COM-5 / COM-5 v4 / COM-60 / COM-71 / COM-76 (solo trazabilidad).
+Referencia: tickets COM-5 / COM-5 v4 / COM-60 / COM-71 / COM-76 / COM-101 v2 (trazabilidad).
 */
 import React, { useState, useEffect, useCallback } from 'react';
 import {
@@ -42,6 +53,8 @@ import { ModalExito } from '../common/ModalExito';
 // Configuración visual de cada cluster (clases literales para Tailwind)
 // COM-76: descripciones de negocio alineadas a las etiquetas COM-76; el cluster 4
 // usa Scale (equilibrio nutricional) en lugar de Coins (precio).
+// COM-101 v2: `desc` queda SOLO como fallback: la descripción operativa viene del
+// payload (clusters[].descripcion) con los criterios redefinidos y justificados.
 // COM-76 (trazabilidad): config COM-5 anterior comentada:
 // const CONFIG_CLUSTER = {
 //     1: { icon: Droplets, chip: 'bg-red-100 text-red-700', borde: 'border-red-200', desc: 'Prioritario por salud: máximo aporte de hierro.' },
@@ -290,6 +303,9 @@ export const ClusterRecetasView = () => {
         </div>
     );
 
+    // COM-101 v2: auditoría R5 visible (vals implausibles acotados al entrenar)
+    const caps = resumen?.caps_nutricionales || [];
+
     return (
         <div className="animate-in fade-in duration-300">
             {/* Encabezado */}
@@ -374,7 +390,7 @@ export const ClusterRecetasView = () => {
                                 'vetadas',
                                 'Ingredientes vetados (regla R2)',
                                 'Toda receta con alguno de estos ingredientes se excluye del modelo.',
-                                'bg-red-100 text-red-700'
+                                'bg-red-100 text-red-600'
                             )}
                         </div>
                     )}
@@ -430,6 +446,33 @@ export const ClusterRecetasView = () => {
                         ))}
                     </div>
 
+                    {/* COM-101 v2: transparencia del espacio de entrenamiento + auditoría R5 */}
+                    {(resumen.espacio_elegido || caps.length > 0) && (
+                        <div className="mb-4 space-y-2">
+                            {resumen.espacio_elegido && (
+                                <p className="text-[11px] text-slate-500">
+                                    Espacio de entrenamiento elegido por la búsqueda COM-100/101:{' '}
+                                    <span className="font-bold text-slate-700">{resumen.espacio_elegido}</span>
+                                    {Array.isArray(resumen.features_espacio) && resumen.features_espacio.length > 0
+                                        ? ` (${resumen.features_espacio.join(', ')})`
+                                        : ''}.
+                                </p>
+                            )}
+                            {caps.length > 0 && (
+                                <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-xs flex items-start gap-2">
+                                    <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                                    <span>
+                                        <b>R5 (COM-100):</b> {caps.length} valor(es) nutricional(es) implausible(s)
+                                        acotado(s) para el entrenamiento:{' '}
+                                        {caps.slice(0, 5).map(c => `${c.nombre} (${c.campo}: ${c.valor_original} → ${c.valor_aplicado})`).join('; ')}
+                                        {caps.length > 5 ? '…' : ''}. Corrija la ficha en el recetario para que el
+                                        valor real vuelva al modelo.
+                                    </span>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
                     {/* Tarjetas de clusters (COM-76: sin precio) */}
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
                         {(resumen.clusters || []).map(c => {
@@ -437,6 +480,8 @@ export const ClusterRecetasView = () => {
                             const Icon = cfg.icon;
                             const centroide = resumen.centroides?.[String(c.cluster_codigo)] || {};
                             const activo = clusterSel === c.cluster_codigo;
+                            // COM-101 v2: significado redefinido desde el payload; fallback COM-76
+                            const desc = c.descripcion || cfg.desc;
                             return (
                                 <div key={c.cluster_codigo}
                                     className={`bg-white border rounded-xl p-4 ${activo ? cfg.borde + ' ring-2 ring-emerald-300' : 'border-slate-200'}`}>
@@ -444,7 +489,7 @@ export const ClusterRecetasView = () => {
                                         <span className={`p-2 rounded-lg ${cfg.chip}`}><Icon size={16} /></span>
                                         <div>
                                             <p className="font-bold text-slate-800 text-sm">{c.cluster_etiqueta}</p>
-                                            <p className="text-[11px] text-slate-500">{cfg.desc}</p>
+                                            <p className="text-[11px] text-slate-500">{desc}</p>
                                         </div>
                                         <span className="ml-auto text-xs font-bold text-slate-600">{c.n_recetas} recetas</span>
                                     </div>
@@ -548,7 +593,6 @@ export const ClusterRecetasView = () => {
                     )}
                 </>
             )}
-
             <ModalConfirmacion
                 isOpen={confEntrenar}
                 onClose={() => setConfEntrenar(false)}
