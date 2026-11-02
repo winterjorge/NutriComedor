@@ -22,22 +22,28 @@ COM-98 v2:
   '->med3' (persistencia robusta, sin árboles), se muestra una nota explicativa en
   lugar de barras en 0.0% (caso real observado en 'social').
 * Badge con la estrategia activa por tipo junto al título de importancias.
-COM-99 (este archivo): sistema de PESTAÑAS para alternar entre los gráficos de los
-  modelos en lugar de apilarlos de arriba a abajo: Demanda, Recetas, Menús y,
-  desde COM-105 v2, Precios. Cada pestaña conserva su contenido completo.
-COM-105 v2 (este archivo):
+COM-99: sistema de PESTAÑAS para alternar entre los gráficos de los modelos en
+  lugar de apilarlos de arriba a abajo: Demanda, Recetas, Menús y Precios.
+COM-105 v2:
 * Nueva pestaña PRECIOS: dispersión REAL vs PREDICHO de la RF de precios en
   S/ POR KG con línea y=x, pills por insumo con su MAPE out-of-sample, tarjeta de
-  métricas globales (MAPE, MAPE mediano, MAE en S/ por kg, puntos, insumos, cortes
-  y confianza promedio dentro de muestra con su nota declarativa) y gráfico de
-  línea con el histórico real de 60 días del insumo seleccionado más los rombos de
-  predicción en los cortes evaluados.
+  métricas globales y gráfico de línea con el histórico real de 60 días del
+  insumo seleccionado más los rombos de predicción en los cortes evaluados.
 * El selector RF/GBM se OCULTA de la UI: Random Forest queda como único modelo
-  visible de demanda; el GBM permanece implementado y seleccionable por API para
-  referencia comparativa (COM-92), pero ya no se expone al usuario.
+  visible de demanda; el GBM permanece implementado y seleccionable por API.
+COM-105 v3 (este archivo): CARGA PEREZOSA DE LA PESTAÑA PRECIOS.
+* Diagnóstico: el payload de precios se pedía en el Promise.all inicial del panel;
+  con el universo sin acotar del backend COM-105 v2 la petición superaba el timeout
+  del gateway (504) y bloqueaba la apertura del panel 30-40 s.
+* Ahora el payload de precios se solicita SOLO al abrir la pestaña Precios por
+  primera vez, con spinner propio, mensaje de error con botón de reintento y sin
+  afectar a las otras tres pestañas. El botón Actualizar lo invalida junto con el
+  resto (setPrecio(null)).
+* Se muestra el criterio del universo evaluado (payload.universo_evaluado) en la
+  tarjeta de métricas, para transparencia de tesis.
 Uso: Montada por App.jsx en la pestaña "Modelos ML" (gate por módulo 'modelos_ml').
 Referencia: tickets COM-5 v4 / COM-8 v7 / COM-60 / COM-76 / COM-91 / COM-92 /
-            COM-95 / COM-98 v2 / COM-99 / COM-105 v2 (solo trazabilidad).
+            COM-95 / COM-98 v2 / COM-99 / COM-105 v2 / COM-105 v3 (trazabilidad).
 */
 import React, { useState, useEffect, useCallback } from 'react';
 import {
@@ -132,7 +138,7 @@ const estrategiaSinArboles = (estr) =>
 // ==========================================
 // GRÁFICO 1: DISPERSIÓN DEL MODELO ACTIVO (DEMANDA)
 // ==========================================
-const ScatterRF = ({ puntos, modeloKey }) => {
+const ScatterRF = ({ puntos }) => {
     const W = 560, H = 360, M = { t: 16, r: 16, b: 48, l: 56 };
     const vals = [...puntos.map(p => p.real), ...puntos.map(p => p.predicho)];
     const [d0, d1] = dominio(vals);
@@ -488,7 +494,7 @@ const LineasPrecios = ({ serie }) => {
 };
 
 // ==========================================
-// VISTA PRINCIPAL (COM-99: pestañas · COM-105 v2: pestaña Precios y GBM oculto)
+// VISTA PRINCIPAL (COM-99 + COM-105 v2 + COM-105 v3)
 // ==========================================
 export const ModelosMLView = () => {
     const { usuario } = useAuth();
@@ -499,6 +505,9 @@ export const ModelosMLView = () => {
     const [precio, setPrecio] = useState(null);
     const [cargando, setCargando] = useState(true);
     const [error, setError] = useState('');
+    // COM-105 v3: estado propio de la carga perezosa de la pestaña Precios
+    const [precioCargando, setPrecioCargando] = useState(false);
+    const [precioError, setPrecioError] = useState('');
 
     // Selectores por modelo
     const [tipoRF, setTipoRF] = useState('social');
@@ -513,20 +522,23 @@ export const ModelosMLView = () => {
     // COM-99: pestaña activa del panel
     const [tabActiva, setTabActiva] = useState('demanda');
 
+    // COM-105 v3: el payload de precios YA NO forma parte de la carga inicial del
+    // panel; se solicita al abrir la pestaña Precios (carga perezosa con caché de
+    // componente). Las otras tres pestañas cargan en paralelo como antes.
     const cargarTodo = useCallback(async () => {
         setCargando(true);
         setError('');
+        setPrecio(null);          // COM-105 v3: invalida también el payload de precios
+        setPrecioError('');
         try {
             const est = await api.getEstadoModelosML(usuario.id);
             setEstado(est);
-            const [r1, r2, r3, r4] = await Promise.all([
+            const [r1, r2, r3] = await Promise.all([
                 est.random_forest?.suficiente ? api.getScatterRandomForest(usuario.id, MODELO_DEMANDA_VISIBLE).catch(() => null) : Promise.resolve(null),
                 est.kmeans ? api.getScatterKmeans(usuario.id).catch(() => null) : Promise.resolve(null),
                 est.greedy ? api.getGreedyML(usuario.id).catch(() => null) : Promise.resolve(null),
-                est.random_forest_precios?.suficiente ? api.getScatterRFPrecios(usuario.id).catch(() => null) : Promise.resolve(null),
             ]);
-            setRf(r1); setKm(r2); setGreedy(r3); setPrecio(r4);
-            if (r4?.series?.length) setPrecioSel(r4.series[0].insumo_id);
+            setRf(r1); setKm(r2); setGreedy(r3);
         } catch (e) {
             setError(e.message);
         } finally {
@@ -534,7 +546,30 @@ export const ModelosMLView = () => {
         }
     }, [usuario.id]);
 
+    // COM-105 v3: carga perezosa y reutilizable del gráfico de precios
+    const cargarPrecios = useCallback(async () => {
+        if (precioCargando) return;
+        setPrecioCargando(true);
+        setPrecioError('');
+        try {
+            const data = await api.getScatterRFPrecios(usuario.id);
+            setPrecio(data);
+            if (data?.series?.length) setPrecioSel(data.series[0].insumo_id);
+        } catch (e) {
+            setPrecioError(e.message);
+        } finally {
+            setPrecioCargando(false);
+        }
+    }, [usuario.id, precioCargando]);
+
     useEffect(() => { cargarTodo(); }, [cargarTodo]);
+
+    // COM-105 v3: al entrar a la pestaña Precios sin payload, se solicita una sola vez
+    useEffect(() => {
+        if (tabActiva === 'precios' && !precio && !precioCargando && !cargando) {
+            cargarPrecios();
+        }
+    }, [tabActiva, precio, precioCargando, cargando, cargarPrecios]);
 
     const tarjetaEstado = (icono, titulo, detalle, ok) => (
         <div className={`bg-white border rounded-xl p-3 text-center ${ok ? 'border-slate-200' : 'border-amber-300 bg-amber-50'}`}>
@@ -683,7 +718,7 @@ export const ModelosMLView = () => {
                                         ) : (
                                             <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
                                                 <div className="lg:col-span-2">
-                                                    <ScatterRF puntos={rf.puntos} modeloKey={modeloSeleccionado} />
+                                                    <ScatterRF puntos={rf.puntos} />
                                                     <div className="flex flex-wrap gap-3 justify-center mt-2">
                                                         {TIPOS_COMENSAL.map(t => {
                                                             const m = metricasDe(rf, t, vistaMetricas);
@@ -864,7 +899,7 @@ export const ModelosMLView = () => {
                                 </div>
                             )}
 
-                            {/* ===== TAB: PRECIOS (RF de insumos, COM-105 v2) ===== */}
+                            {/* ===== TAB: PRECIOS (RF de insumos, COM-105 v2 + v3) ===== */}
                             {tabActiva === 'precios' && (
                                 <div className="space-y-4">
                                     <h3 className="font-bold text-slate-800 text-lg flex items-center gap-2">
@@ -872,7 +907,27 @@ export const ModelosMLView = () => {
                                         Modelo de Precios — Random Forest de Insumos
                                     </h3>
 
-                                    {!precio || !precio.puntos?.length ? (
+                                    {/* COM-105 v3: estados de carga perezosa y de error con reintento */}
+                                    {precioCargando ? (
+                                        <div className="p-10 text-center bg-white border border-slate-200 rounded-xl">
+                                            <Loader2 className="animate-spin mx-auto text-amber-600" size={26} />
+                                            <p className="text-xs text-slate-500 mt-2">
+                                                Evaluando cortes out-of-sample del modelo de precios.
+                                                La primera apertura puede tardar algunos segundos; las siguientes
+                                                usan la caché de 10 minutos.
+                                            </p>
+                                        </div>
+                                    ) : precioError ? (
+                                        <div className="p-6 bg-red-50 border border-red-200 rounded-xl text-center space-y-3">
+                                            <p className="text-sm text-red-700 flex items-center justify-center gap-2">
+                                                <AlertCircle size={16} /> {precioError}
+                                            </p>
+                                            <button onClick={cargarPrecios}
+                                                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold transition-colors">
+                                                Reintentar evaluación
+                                            </button>
+                                        </div>
+                                    ) : !precio || !precio.puntos?.length ? (
                                         <p className="text-xs text-slate-500 p-8 text-center bg-white border border-slate-200 rounded-xl">
                                             Sin histórico de precios suficiente para evaluar el modelo.
                                             Espere nuevas corridas del scraper o cargue precios manuales.
@@ -928,6 +983,15 @@ export const ModelosMLView = () => {
                                                         <span>Confianza promedio (in-sample)</span>
                                                         <span className="font-bold text-slate-800">{precio.metricas.confianza_promedio_insample}%</span>
                                                     </p>
+                                                    {/* COM-105 v3: transparencia del universo evaluado */}
+                                                    {precio.universo_evaluado && (
+                                                        <p className="text-[10px] text-slate-500 leading-relaxed pt-1 border-t border-slate-200">
+                                                            Universo: {precio.universo_evaluado.criterio}. Se evaluaron{' '}
+                                                            {precio.universo_evaluado.n_insumos_evaluados} insumos en{' '}
+                                                            {precio.universo_evaluado.n_cortes} cortes separados{' '}
+                                                            {precio.universo_evaluado.paso_dias} días.
+                                                        </p>
+                                                    )}
                                                     <p className="text-[10px] text-slate-500 leading-relaxed pt-1 border-t border-slate-200">
                                                         Cortes: {(precio.metricas.cortes || []).join(', ')}. {precio.nota}
                                                     </p>
