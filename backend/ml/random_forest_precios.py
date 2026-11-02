@@ -2,7 +2,7 @@
 ml/random_forest_precios.py
 Objetivo: Modelo Random Forest de PRECIOS DE INSUMOS. El modelo nació en
 optimizador.py (COM-37 v7), recibió caché y RF ligera en COM-103, y en COM-105 v2
-se muda a su propio módulo para que el código sea mantenible y tenga gráfico
+se mudó a su propio módulo para que el código sea mantenible y tenga gráfico
 propio en el panel de Modelos ML, con la misma jerarquía de gobierno que los
 otros tres motores (demanda, clustering y menús).
 Responsabilidades:
@@ -24,22 +24,34 @@ Responsabilidades:
   predicho en S/ por kg con línea y=x, métricas globales y por insumo, series
   históricas de los insumos con más puntos evaluados (línea real + marcadores
   predichos) y auditoría de cortes. Caché de evaluación con TTL de 10 min
-  invalidada por huella global del historial de precios, para que abrir el panel
-  no re-entrene cientos de RF en cada clic.
+  invalidada por huella global del historial de precios.
 Historial:
 COM-37 v7: la predicción RF de precios nace en optimizador.py y cuenta como fuente
     válida en la jerarquía scraper día > manual > RF > scraper último.
 COM-103: caché en proceso por (insumo, fecha, huella) con TTL 15 min y poda simple;
     RF ligera (60 árboles, depth 4) con precisión equivalente en series cortas y
     ~40% más rápida; el greedy costea ~100 insumos por generación.
-COM-105 v2 (este archivo): el modelo, su caché y su evaluación viven aquí.
-    optimizador.py conserva un wrapper de re-exportación para no romper los
-    consumidores históricos (precios_insumos, ml/greedy_search, ml/kmeans_recetas,
-    ml/reporte_gestion). Se agrega payload_panel() y el endpoint del panel vive en
-    routers/modelos_ml.py (GET /modelos-ml/random-forest-precios).
+COM-105 v2: el modelo, su caché y su evaluación viven aquí; optimizador.py conserva
+    un wrapper de re-exportación para no romper consumidores (precios_insumos,
+    ml/greedy_search, ml/kmeans_recetas, ml/reporte_gestion). Se agregan
+    payload_panel() y el endpoint GET /modelos-ml/random-forest-precios.
+COM-105 v3 (este archivo): UNIVERSO ACOTADO Y COSTO ACOTADO DEL PANEL.
+    * Diagnóstico del 504 y de los 30-40 s de apertura del panel: payload_panel
+      evaluaba TODOS los insumos con precio real en cada corte (cientos de RF por
+      llamada) y el frontend lo pedía en paralelo al abrir el panel, quedando
+      bloqueado hasta el timeout del gateway.
+    * El universo por defecto de la evaluación pasa a ser el TOP
+      TOP_INSUMOS_RECETARIO insumos por frecuencia de uso en las recetas del
+      modelo K-means activo (el MISMO universo que costea el greedy, coherencia
+      COM-75 v2); los cortes por defecto bajan a 4 separados 7 días.
+    * El payload declara 'universo_evaluado' (criterio, n evaluados, n del
+      catálogo, cortes) para transparencia de tesis y para que el panel lo muestre.
+    * insumo_ids explícito sigue teniendo prioridad sobre el universo por defecto.
+    * El frontend (COM-105 v3) carga este payload de forma perezosa al abrir la
+      pestaña Precios, sin bloquear las otras tres.
 Uso: Importado por optimizador.py (wrapper), routers/modelos_ml.py (panel) y por
     cualquier módulo que necesite las métricas out-of-sample para la tesis.
-Referencia: tickets COM-37 v7 / COM-103 / COM-105 v2 (solo trazabilidad).
+Referencia: tickets COM-37 v7 / COM-103 / COM-105 v2 / COM-105 v3 (trazabilidad).
 """
 import time
 import statistics
@@ -77,12 +89,15 @@ _PRECIO_RF_CACHE = {}
 EVAL_CACHE_TTL_SEG = 600
 _EVAL_CACHE = {'clave': None, 'ts': 0.0, 'payload': None}
 
-# COM-105 v2: parámetros por defecto de la evaluación y del panel
-N_CORTES_DEFAULT = 6
-PASO_DIAS_DEFAULT = 5
-DIAS_SERIE = 60            # días de histórico real dibujados en las series del panel
-TOP_INSUMOS_SERIES = 4     # insumos con serie histórica en el payload del panel
-TOP_INSUMOS_METRICAS = 8   # insumos detallados en metricas_por_insumo
+# COM-105 v3: acotación del universo y de los cortes del panel.
+# Trazabilidad COM-105 v2: N_CORTES_DEFAULT=6 y PASO_DIAS_DEFAULT=5 evaluaban todo
+# el catálogo y disparaban el 504 del gateway.
+N_CORTES_DEFAULT = 4
+PASO_DIAS_DEFAULT = 7
+TOP_INSUMOS_RECETARIO = 20     # insumos más usados por las recetas del modelo activo
+DIAS_SERIE = 60                # días de histórico real dibujados en las series del panel
+TOP_INSUMOS_SERIES = 4         # insumos con serie histórica en el payload del panel
+TOP_INSUMOS_METRICAS = 8       # insumos detallados en metricas_por_insumo
 
 
 # ==========================================
@@ -97,6 +112,45 @@ def _huella_historial_global(cur):
     """)
     r = cur.fetchone()
     return (int(r['n'] or 0), str(r['f']))
+
+
+# ==========================================
+# COM-105 v3: UNIVERSO ACOTADO (top insumos del recetario activo)
+# ==========================================
+def _insumos_top_del_recetario(cur, limite=TOP_INSUMOS_RECETARIO):
+    """
+    COM-105 v3: insumos más usados por las recetas del modelo K-means activo,
+    ordenados por cantidad de líneas de receta en que aparecen. Es el MISMO
+    universo que el greedy acota para su mapa de precios (COM-75 v2), de modo que
+    el panel evalúa exactamente lo que el sistema costea en producción.
+    Degradación controlada: si no hay modelo activo, se usa todo el recetario
+    (receta_ingrediente completo) con el mismo orden por frecuencia.
+    Retorna lista de dicts {insumo_id, nombre, n_lineas}.
+    """
+    cur.execute("""
+        SELECT ins.id AS insumo_id, ins.nombre AS nombre, COUNT(ri.id) AS n_lineas
+        FROM recetas_clusters rc
+        JOIN receta_ingrediente ri ON ri.receta_id = rc.receta_id
+        JOIN insumos ins ON ins.ingrediente_id = ri.ingrediente_id
+        WHERE rc.modelo_id = (
+            SELECT id FROM kmeans_modelos WHERE activo = TRUE
+            ORDER BY id DESC LIMIT 1)
+        GROUP BY ins.id, ins.nombre
+        ORDER BY n_lineas DESC
+        LIMIT %s;
+    """, (limite,))
+    filas = cur.fetchall()
+    if filas:
+        return [dict(f) for f in filas]
+    cur.execute("""
+        SELECT ins.id AS insumo_id, ins.nombre AS nombre, COUNT(ri.id) AS n_lineas
+        FROM receta_ingrediente ri
+        JOIN insumos ins ON ins.ingrediente_id = ri.ingrediente_id
+        GROUP BY ins.id, ins.nombre
+        ORDER BY n_lineas DESC
+        LIMIT %s;
+    """, (limite,))
+    return [dict(f) for f in cur.fetchall()]
 
 
 # ==========================================
@@ -169,21 +223,19 @@ def predecir_precio_con_confianza(insumo_id, fecha_objetivo, conn, cur):
 def evaluar_prediccion_precios(cur, n_cortes=N_CORTES_DEFAULT, paso_dias=PASO_DIAS_DEFAULT,
                                insumo_ids=None):
     """
-    COM-105 v2: validación out-of-sample de la RF de precios con la MISMA lógica de
-    producción (ventana de 90 días, feature índice, predicción en índice n, piso
-    0.01, redondeo a 2 decimales). Para cada fecha de corte con corrida real del
-    scraper, entrena con historial ESTRICTAMENTE anterior y compara el predicho
+    COM-105 v2 + v3: validación out-of-sample de la RF de precios con la MISMA
+    lógica de producción (ventana de 90 días, feature índice, predicción en índice
+    n, piso 0.01, redondeo a 2 decimales). Para cada fecha de corte con corrida real
+    del scraper, entrena con historial ESTRICTAMENTE anterior y compara el predicho
     contra el precio real del día de corte (MIN por insumo, coherente con el paso
     SCRAPER_DIA de precios_insumos).
+    COM-105 v3: si `insumo_ids` es None, el caller (payload_panel) debe pasar el
+    universo acotado; esta función acepta ids explícitos para auditorías puntuales
+    o para la tesis con otro alcance.
     Como las unidades de compra son heterogéneas (kg, und, atado), el MAE se reporta
     en S/ POR KG convirtiendo real y predicho con gramos_por_unidad_compra; el MAPE
     se calcula sobre el precio en la unidad original (adimensional).
-    Retorna {'resumen': {...}, 'por_insumo': [...], 'puntos': [...]}:
-    * resumen: n_cortes, cortes, n_puntos, n_insumos, mape_pct, mape_mediano_pct,
-      mae_soles_por_kg, confianza_promedio_insample.
-    * por_insumo: lista ordenada por MAPE descendente con n, mape y mae_kg.
-    * puntos: auditoría cruda por insumo y fecha (real, predicho, unidad, ape,
-      ae_kg, real_kg, predicho_kg, confianza) para el scatter y las tablas del paper.
+    Retorna {'resumen': {...}, 'por_insumo': [...], 'puntos': [...]}.
     """
     cur.execute("""
         SELECT DISTINCT fecha FROM historial_precios
@@ -317,23 +369,38 @@ def _series_de_insumos(cur, insumo_ids, dias=DIAS_SERIE):
 
 
 # ==========================================
-# COM-105 v2: PAYLOAD DEL GRÁFICO 4 DEL PANEL ML (con caché)
+# COM-105 v2 + v3: PAYLOAD DEL GRÁFICO 4 DEL PANEL ML (con caché y universo acotado)
 # ==========================================
 def payload_panel(cur, n_cortes=N_CORTES_DEFAULT, paso_dias=PASO_DIAS_DEFAULT,
                   insumo_ids=None):
     """
-    COM-105 v2: payload completo del gráfico de precios del panel ML, con caché en
-    proceso (TTL 10 min) invalidada por huella global del historial de precios:
-    * puntos: dispersión real vs predicho EN S/ POR KG (unidades heterogéneas
-      comparables) con fecha, insumo y ape para tooltip y línea y=x.
+    COM-105 v2 + v3: payload completo del gráfico de precios del panel ML, con
+    caché en proceso (TTL 10 min) invalidada por huella global del historial:
+    * COM-105 v3: si `insumo_ids` no se provee, se evalúa SOLO el top
+      TOP_INSUMOS_RECETARIO insumos por frecuencia de uso en las recetas del modelo
+      K-means activo (el universo que costea el greedy), con n_cortes=4 separados
+      7 días. El catálogo completo ya no se evalúa jamás por defecto.
+    * puntos: dispersión real vs predicho EN S/ POR KG con fecha, insumo y ape.
     * metricas: resumen global out-of-sample (MAPE, MAPE mediano, MAE S/ por kg,
-      n puntos, n insumos, cortes) + nota declarando que la confianza de producción
-      es R² dentro de la muestra.
+      n puntos, n insumos, cortes) + confianza promedio dentro de muestra.
     * metricas_por_insumo: top 8 insumos por MAPE descendente (pills del panel).
-    * series: top 4 insumos por cantidad de puntos evaluados, con histórico real de
-      60 días en S/ por kg y marcadores predichos en los cortes evaluados.
-    * modelo y variables para rotular ejes y leyendas (requerimiento COM-5 v4).
+    * series: top 4 insumos por puntos evaluados, con histórico real de 60 días en
+      S/ por kg y marcadores predichos en los cortes.
+    * universo_evaluado: criterio y tamaños, para transparencia de tesis y de UI.
     """
+    universo_info = None
+    if insumo_ids is None:
+        top = _insumos_top_del_recetario(cur, TOP_INSUMOS_RECETARIO)
+        insumo_ids = [t['insumo_id'] for t in top]
+        universo_info = {
+            'criterio': f"top {TOP_INSUMOS_RECETARIO} insumos por frecuencia de uso "
+                        f"en las recetas del modelo K-means activo (universo que "
+                        f"costea el greedy, COM-75 v2)",
+            'n_insumos_evaluados': len(insumo_ids),
+            'n_cortes': n_cortes,
+            'paso_dias': paso_dias,
+            'top': top,
+        }
     clave = (_huella_historial_global(cur), n_cortes, paso_dias,
              tuple(sorted(insumo_ids)) if insumo_ids else None)
     ahora = time.time()
@@ -369,9 +436,12 @@ def payload_panel(cur, n_cortes=N_CORTES_DEFAULT, paso_dias=PASO_DIAS_DEFAULT,
         'series': [
             {'insumo_id': iid, **series[iid]} for iid in ids_series if iid in series
         ],
+        # COM-105 v3: transparencia del universo y del protocolo evaluado
+        'universo_evaluado': universo_info,
         'nota': ('La confianza expuesta en producción es R² dentro de la muestra; '
                  'las métricas de error de este panel son out-of-sample sobre cortes '
-                 'temporales (COM-105 v2).'),
+                 'temporales (COM-105 v2), evaluadas sobre el universo declarado en '
+                 'universo_evaluado (COM-105 v3).'),
     }
     _EVAL_CACHE.update({'clave': clave, 'ts': ahora, 'payload': payload})
     return payload
