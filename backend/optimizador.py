@@ -1,8 +1,9 @@
 """
 optimizador.py
-Objetivo: Motor de cálculo de costos de recetas con predicción de precios basada en histórico.
-Uso: Importar desde routers de FastAPI para calcular costos dinámicos de recetas en cualquier fecha.
-Nota: Utiliza Random Forest para predicción de precios (consistente con ai_engine.py)
+Objetivo: Motor de cálculo de costos de recetas. Su única responsabilidad es
+COSTEAR: gramos de unidad de uso × precio por gramo del insumo elegido, con
+jerarquía de fuentes de precio, preferencia de insumo principal, piso de compra
+y auditoría de completitud por línea.
 Historial:
 Sprint 2: versión original (mejor insumo del día, predicción RF con R², filas de error).
 COM-37 v1/v2: fallback de precio manual ("Obtenido de la Base de Datos"), ingrediente_id
@@ -10,6 +11,7 @@ por fila y precio_completo para la regla del flujo del comedor.
 COM-37 v5: costeo con el modelo de DOS CONCEPTOS: gramos de la unidad de USO vía
 ingredientes_equivalencias (o conversión estándar) × precio por gramo del MEJOR
 insumo (scraper día> manual insumo > legacy ingrediente > predicción RF).
+COM-37 v7: nace aquí la predicción RF de precios por insumo (hoy mudada, ver COM-105 v2).
 COM-48: cada fila del detalle expone componente_nombre/componente_orden para el
 desglose agrupado del modal de Evaluar.
 COM-49: multiplicación explícita y auditable gramos_por_unidad × cantidad; detalle
@@ -40,23 +42,21 @@ hubo fuente de precio: SCRAPER_DIA/MANUAL_PERIODO/PREDICHO/SCRAPER_ULTIMO/
 LEGACY_INGREDIENTE; False solo si mejor is None) y los contadores y
 precio_completo usan ese flag. El costo total NO cambia (ya sumaba costo_crudo
 sin redondeo). Ninguna clave existente se elimina ni renombra.
-COM-103 (este archivo): CACHÉ EN PROCESO DE LA RF DE PRECIOS + RF MÁS LIGERA.
-* predecir_precio_con_confianza cachea su resultado por
-  (insumo_id, fecha, huella del histórico de la ventana de 90 días), con TTL de
-  15 min y poda simple. La huella se deriva de los propios registros ya leídos
-  (n y última fecha), sin consulta extra: cuando el scraper agrega datos, la
-  huella cambia y la caché se invalida sola.
-* El RandomForest de precios baja de 100 a 60 árboles y max_depth 5->4: en
-  series cortas y tendenciales (≤90 puntos) la precisión es equivalente y el fit
-  es ~40% más rápido. Como el greedy costea ~100 insumos por generación, esto
-  junto a la caché baja la generación de ~30 s a segundos.
-* calcular_costo_receta y el resto del costeo: SIN CAMBIOS funcionales.
+COM-103: caché en proceso de la RF de precios + RF más ligera (60 árboles, depth 4).
+COM-105 v2 (este archivo): SEPARACIÓN DE RESPONSABILIDADES. El modelo Random Forest
+de precios, su caché y su evaluación out-of-sample se MUDAN a
+ml/random_forest_precios.py. Este módulo conserva `predecir_precio_con_confianza`
+y `evaluar_prediccion_precios` como WRAPPERS DE RE-EXPORTACIÓN con firma y
+contrato idénticos, para no romper los consumidores históricos detectados con
+grep: routers/recetas.py y routers/presupuesto.py (calcular_costo_receta),
+precios_insumos.py, ml/greedy_search.py, ml/kmeans_recetas.py y
+ml/reporte_gestion.py (predecir_precio_con_confianza). Se elimina de aquí todo el
+cuerpo de la RF y la caché (viven en el módulo nuevo); el costeo NO cambia.
 """
 import os
-import time
 import psycopg2
 import psycopg2.extras
-from datetime import datetime, timedelta
+from datetime import datetime
 import math
 
 # COM-37 v5: resolución unificada de precios, equivalencias y conversión de unidades
@@ -68,17 +68,25 @@ from precios_insumos import (
     obtener_equivalencia,
 )
 
+# COM-105 v2: el modelo RF de precios y su evaluación viven en ml/random_forest_precios.
+# Se re-exportan aquí para NO romper consumidores históricos; el wrapper conserva
+# firma y contrato exactos (precio_redondeado, confianza_pct, ok).
+try:
+    from ml.random_forest_precios import (
+        predecir_precio_con_confianza,
+        evaluar_prediccion_precios,
+    )
+except Exception:  # degradación controlada si el paquete se importa como módulo suelto
+    from random_forest_precios import (
+        predecir_precio_con_confianza,
+        evaluar_prediccion_precios,
+    )
+
 DB_URL = os.getenv("DATABASE_URL", "postgresql://nutri_admin:Nutri2026Secure!@db:5432/nutricomedor")
 
-# ==========================================
-# COM-103: CACHÉ DE PREDICCIONES RF DE PRECIOS
-# ==========================================
-# El histórico de precios de un insumo solo cambia cuando corre el scraper
-# (madrugada) o se carga data manual; la huella (n registros + última fecha de la
-# ventana consultada) invalida la caché automáticamente en esos casos. El TTL acota
-# el peor caso y la poda evita crecimiento sin límite del dict en procesos largos.
-PRECIO_RF_CACHE_TTL_SEG = 900
-_PRECIO_RF_CACHE = {}
+# COM-105 v2 (trazabilidad): la caché _PRECIO_RF_CACHE, el TTL y el cuerpo de
+# predecir_precio_con_confianza que vivían aquí desde COM-103 se mudaron a
+# ml/random_forest_precios.py; este módulo solo re-exporta el símbolo.
 
 
 def redondear_hacia_arriba_010(valor):
@@ -86,72 +94,6 @@ def redondear_hacia_arriba_010(valor):
     if valor <= 0:
         return 0.0
     return math.ceil(valor * 10) / 10
-
-
-def predecir_precio_con_confianza(insumo_id, fecha_objetivo, conn, cur):
-    """
-    Predice el precio usando Random Forest con R².
-    Busca hasta 90 días de histórico para tener mejor base de predicción.
-    COM-103: resultado cacheado por (insumo, fecha, huella del histórico) con TTL
-    de 15 min; RF más ligera (60 árboles, depth 4) con precisión equivalente en
-    series cortas. La firma y el contrato de retorno NO cambian:
-    (precio_redondeado, confianza_pct, ok).
-    """
-    cur.execute("""
-        SELECT fecha, precio_prom
-        FROM historial_precios
-        WHERE insumo_id = %s
-        AND fecha >= %s
-        AND fecha < %s
-        AND precio_prom IS NOT NULL
-        ORDER BY fecha ASC
-    """, (insumo_id, fecha_objetivo - timedelta(days=90), fecha_objetivo))
-    registros = cur.fetchall()
-    if len(registros) < 5:
-        return None, 0, False
-
-    # COM-103: huella barata derivada de los registros ya leídos (sin query extra)
-    huella = (len(registros), str(registros[-1]['fecha']))
-    clave_cache = (insumo_id, str(fecha_objetivo), huella)
-    ahora = time.time()
-    entrada = _PRECIO_RF_CACHE.get(clave_cache)
-    if entrada and (ahora - entrada['ts']) < PRECIO_RF_CACHE_TTL_SEG:
-        return entrada['valor']
-
-    try:
-        import numpy as np
-        from sklearn.ensemble import RandomForestRegressor
-        from sklearn.metrics import r2_score
-        X = np.array([[i] for i in range(len(registros))])
-        y = np.array([float(r['precio_prom']) for r in registros])
-        model = RandomForestRegressor(
-            n_estimators=60,        # COM-103: antes 100 (perf en costeo masivo)
-            max_depth=4,            # COM-103: antes 5
-            min_samples_split=3,
-            min_samples_leaf=2,
-            random_state=42,
-            n_jobs=-1
-        )
-        model.fit(X, y)
-        y_pred = model.predict(X)
-        r2 = r2_score(y, y_pred)
-        confianza = max(0, r2 * 100)
-        dias_desde_ultimo = len(registros)
-        precio_predicho = model.predict([[dias_desde_ultimo]])[0]
-        precio_predicho = max(0.01, precio_predicho)
-        resultado = (round(float(precio_predicho), 2), round(confianza, 1), True)
-    except ImportError:
-        precio_promedio = sum(float(r['precio_prom']) for r in registros) / len(registros)
-        resultado = (round(precio_promedio, 2), 50.0, True)
-
-    # COM-103: guardar en caché y podar entradas expiradas si crece demasiado
-    _PRECIO_RF_CACHE[clave_cache] = {'ts': ahora, 'valor': resultado}
-    if len(_PRECIO_RF_CACHE) > 4000:
-        expiradas = [k for k, v in _PRECIO_RF_CACHE.items()
-                     if ahora - v['ts'] > PRECIO_RF_CACHE_TTL_SEG]
-        for k in expiradas:
-            _PRECIO_RF_CACHE.pop(k, None)
-    return resultado
 
 
 def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
@@ -173,8 +115,8 @@ def calcular_costo_receta(receta_id: int, fecha_evaluacion: str):
     contadores de completitud (ingredientes_con_precio / ingredientes_sin_precio /
     precio_completo) se calculan con ese flag, NO con costo_parcial redondeado
     (antes una línea de S/ 0.001 redondeada a S/ 0.00 contaba como "sin precio").
-    COM-103: sin cambios funcionales; se beneficia de la caché de
-    predecir_precio_con_confianza cuando un insumo no tiene precio en el mapa.
+    COM-105 v2: sin cambios funcionales; la RF de precios que consume este costeo
+    vive ahora en ml/random_forest_precios (misma jerarquía y caché COM-103).
     """
     conn = None
     cur = None
