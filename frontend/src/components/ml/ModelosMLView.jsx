@@ -1,9 +1,10 @@
 /**
 components/ml/ModelosMLView.jsx
-Objetivo: Panel de gráficos de Machine Learning con selector de modelo activo
-(COM-92), MAPE (COM-91), vista de métricas crudas/limpias y auditoría de atípicos
-(COM-95), navegación por pestañas entre modelos (COM-99) y gráfico del modelo
-Random Forest de precios de insumos (COM-105 v2).
+Objetivo: Panel de gráficos de Machine Learning con navegación por pestañas
+(COM-99): Demanda (Random Forest), Recetas (K-means), Menús (Greedy Search) y
+Precios (Random Forest de insumos, COM-105 v2). Incluye selector de modelo activo
+oculto para GBM (COM-105 v2), MAPE (COM-91), vista de métricas crudas/limpias y
+auditoría de atípicos (COM-95).
 Historial:
 COM-5 v4 / COM-8 v7: versión original del panel (3 gráficos SVG propios).
 COM-60: scatter K-means con 6 variables nutricionales.
@@ -11,36 +12,25 @@ COM-76: precio fuera del tooltip y del rótulo del scatter K-means.
 COM-91: MAPE en las métricas por tipo de comensal.
 COM-92: selector de modelo (RF vs GBM) y comparación lado a lado
         (fix: TIPOS_COMENSAL local en lugar de la constante del backend).
-COM-95: conmutador de métricas CRUDAS vs LIMPIAS + panel "Auditoría de atípicos"
-        (lista atipicos_detectados con valor real, acotado, límites y motivo).
-COM-98 v2:
-* Se ELIMINA el cuadro de comparación RF vs GBM (ComparadorMetricas) y la segunda
-  llamada al endpoint /modelos-ml/random-forest: el panel muestra SOLO los
-  indicadores del MODELO ACTIVO. Beneficio colateral: 1 entrenamiento por petición.
-* La tabla de importancias pasa a ser CONSCIENTE DE LA ESTRATEGIA elegida por tipo
-  (info_split.estrategias_usadas): si la estrategia es 'constante' o termina en
-  '->med3' (persistencia robusta, sin árboles), se muestra una nota explicativa en
-  lugar de barras en 0.0% (caso real observado en 'social').
-* Badge con la estrategia activa por tipo junto al título de importancias.
+COM-95: conmutador de métricas CRUDAS vs LIMPIAS + panel "Auditoría de atípicos".
+COM-98 v2: se elimina el cuadro de comparación RF vs GBM y la segunda llamada al
+        endpoint; la tabla de importancias pasa a ser consciente de la estrategia
+        elegida por tipo (nota explicativa cuando no hay árboles); badge de
+        estrategia activa.
 COM-99: sistema de PESTAÑAS para alternar entre los gráficos de los modelos en
-  lugar de apilarlos de arriba a abajo: Demanda, Recetas, Menús y Precios.
-COM-105 v2:
-* Nueva pestaña PRECIOS: dispersión REAL vs PREDICHO de la RF de precios en
-  S/ POR KG con línea y=x, pills por insumo con su MAPE out-of-sample, tarjeta de
-  métricas globales y gráfico de línea con el histórico real de 60 días del
-  insumo seleccionado más los rombos de predicción en los cortes evaluados.
-* El selector RF/GBM se OCULTA de la UI: Random Forest queda como único modelo
-  visible de demanda; el GBM permanece implementado y seleccionable por API.
-COM-105 v3 (este archivo): CARGA PEREZOSA DE LA PESTAÑA PRECIOS.
-* Diagnóstico: el payload de precios se pedía en el Promise.all inicial del panel;
-  con el universo sin acotar del backend COM-105 v2 la petición superaba el timeout
-  del gateway (504) y bloqueaba la apertura del panel 30-40 s.
-* Ahora el payload de precios se solicita SOLO al abrir la pestaña Precios por
-  primera vez, con spinner propio, mensaje de error con botón de reintento y sin
-  afectar a las otras tres pestañas. El botón Actualizar lo invalida junto con el
-  resto (setPrecio(null)).
-* Se muestra el criterio del universo evaluado (payload.universo_evaluado) en la
-  tarjeta de métricas, para transparencia de tesis.
+        lugar de apilarlos verticalmente.
+COM-105 v2: nueva pestaña PRECIOS con dispersión real vs predicho en S/ por kg,
+        pills por insumo con MAPE, tarjeta de métricas out-of-sample y serie
+        histórica con marcadores de predicción; carga perezosa de la pestaña;
+        selector GBM oculto en la UI (Random Forest como modelo visible).
+COM-105 v3 (este archivo):
+* PRECIOS: todas las pills son clickeables (se elimina la guarda que dejaba
+  inertes a los insumos sin serie; el backend COM-105 v3 envía series para todos
+  los insumos de metricas_por_insumo). El resaltado de pill activa deja de
+  depender de la existencia de serie.
+* MENÚS: los gráficos de barras y de líneas pasan de disposición lado a lado a
+  APILADOS verticalmente, cada uno en su propia tarjeta con título, y se agrega
+  un bloque de LEYENDA que explica cómo leer barras, líneas y colores.
 Uso: Montada por App.jsx en la pestaña "Modelos ML" (gate por módulo 'modelos_ml').
 Referencia: tickets COM-5 v4 / COM-8 v7 / COM-60 / COM-76 / COM-91 / COM-92 /
             COM-95 / COM-98 v2 / COM-99 / COM-105 v2 / COM-105 v3 (trazabilidad).
@@ -442,6 +432,9 @@ const ScatterPrecios = ({ puntos }) => {
 const LineasPrecios = ({ serie }) => {
     const W = 560, H = 300, M = { t: 16, r: 16, b: 44, l: 64 };
     const hist = serie?.historia || [];
+    if (!serie) {
+        return <p className="text-xs text-slate-500 p-6 text-center">Seleccione un insumo para ver su serie.</p>;
+    }
     if (!hist.length) {
         return <p className="text-xs text-slate-500 p-6 text-center">Sin histórico reciente para este insumo.</p>;
     }
@@ -505,7 +498,7 @@ export const ModelosMLView = () => {
     const [precio, setPrecio] = useState(null);
     const [cargando, setCargando] = useState(true);
     const [error, setError] = useState('');
-    // COM-105 v3: estado propio de la carga perezosa de la pestaña Precios
+    // COM-105 v2: estado propio de la carga perezosa de la pestaña Precios
     const [precioCargando, setPrecioCargando] = useState(false);
     const [precioError, setPrecioError] = useState('');
 
@@ -522,13 +515,13 @@ export const ModelosMLView = () => {
     // COM-99: pestaña activa del panel
     const [tabActiva, setTabActiva] = useState('demanda');
 
-    // COM-105 v3: el payload de precios YA NO forma parte de la carga inicial del
+    // COM-105 v3: el payload de precios ya NO forma parte de la carga inicial del
     // panel; se solicita al abrir la pestaña Precios (carga perezosa con caché de
     // componente). Las otras tres pestañas cargan en paralelo como antes.
     const cargarTodo = useCallback(async () => {
         setCargando(true);
         setError('');
-        setPrecio(null);          // COM-105 v3: invalida también el payload de precios
+        setPrecio(null);          // COM-105 v2: invalida también el payload de precios
         setPrecioError('');
         try {
             const est = await api.getEstadoModelosML(usuario.id);
@@ -546,7 +539,7 @@ export const ModelosMLView = () => {
         }
     }, [usuario.id]);
 
-    // COM-105 v3: carga perezosa y reutilizable del gráfico de precios
+    // COM-105 v2: carga perezosa y reutilizable del gráfico de precios
     const cargarPrecios = useCallback(async () => {
         if (precioCargando) return;
         setPrecioCargando(true);
@@ -564,7 +557,7 @@ export const ModelosMLView = () => {
 
     useEffect(() => { cargarTodo(); }, [cargarTodo]);
 
-    // COM-105 v3: al entrar a la pestaña Precios sin payload, se solicita una sola vez
+    // COM-105 v2: al entrar a la pestaña Precios sin payload, se solicita una sola vez
     useEffect(() => {
         if (tabActiva === 'precios' && !precio && !precioCargando && !cargando) {
             cargarPrecios();
@@ -847,7 +840,7 @@ export const ModelosMLView = () => {
                                 </div>
                             )}
 
-                            {/* ===== TAB: MENÚS (Greedy Search) ===== */}
+                            {/* ===== TAB: MENÚS (Greedy Search) — COM-105 v3: apilado + leyenda ===== */}
                             {tabActiva === 'menus' && (
                                 <div className="space-y-4">
                                     <h3 className="font-bold text-slate-800 text-lg flex items-center gap-2">
@@ -855,47 +848,77 @@ export const ModelosMLView = () => {
                                         Modelo de Menús — Optimización de Propuestas
                                     </h3>
 
-                                    <div className="bg-white border border-slate-200 rounded-xl p-4">
-                                        <h4 className="font-bold text-slate-800 text-sm mb-1">Comparativa de las 3 propuestas</h4>
-                                        <p className="text-[11px] text-slate-500 mb-3">
-                                            Barras: costo_total_semana, recoleccion_total_semana y margen_proyectado ·
-                                            Líneas: {METRICAS_SERIE.map(m => m.clave).join(', ')}.
+                                    {!greedy || !greedy.variantes?.length ? (
+                                        <p className="text-xs text-slate-500 p-8 text-center bg-white border border-slate-200 rounded-xl">
+                                            Aún no hay sesiones del motor greedy. Genere propuestas desde "Propuestas de Menú".
                                         </p>
-                                        {!greedy || !greedy.variantes?.length ? (
-                                            <p className="text-xs text-slate-500 p-8 text-center">
-                                                Aún no hay sesiones del motor greedy. Genere propuestas desde "Propuestas de Menú".
-                                            </p>
-                                        ) : (
-                                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                                                <div>
-                                                    <BarrasGreedy variantes={greedy.variantes} />
+                                    ) : (
+                                        <div className="space-y-5">
+                                            {/* COM-105 v3: leyenda explicativa de los dos gráficos */}
+                                            <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
+                                                <p className="text-xs font-bold text-slate-700 mb-1">Cómo leer los gráficos de esta pestaña</p>
+                                                <ul className="text-[11px] text-slate-600 space-y-1 ml-4 list-disc">
+                                                    <li>
+                                                        <b>Gráfico de barras:</b> totales de la semana completa por propuesta.
+                                                        Gris = costo total de compras, verde = recolección proyectada por ventas,
+                                                        azul = margen semanal; un margen negativo se dibuja por debajo de la línea cero.
+                                                    </li>
+                                                    <li>
+                                                        <b>Gráfico de líneas:</b> serie diaria del indicador que elija con los botones,
+                                                        para las tres propuestas; cada punto es un día de cocina de la semana evaluada.
+                                                    </li>
+                                                    <li>
+                                                        <b>Colores de propuesta:</b> rojo NutriMax prioriza nutrición, ámbar EconoMax
+                                                        prioriza costo y verde BalanceMax busca el equilibrio entre ambos.
+                                                    </li>
+                                                </ul>
+                                            </div>
+
+                                            {/* COM-105 v3: gráfico de barras en tarjeta propia, apilado */}
+                                            <div className="bg-white border border-slate-200 rounded-xl p-4">
+                                                <h4 className="font-bold text-slate-800 text-sm mb-1">
+                                                    Totales semanales por propuesta
+                                                </h4>
+                                                <p className="text-[11px] text-slate-500 mb-3">
+                                                    Indicadores: costo_total_semana, recoleccion_total_semana y margen_proyectado,
+                                                    todos en soles de la semana completa.
+                                                </p>
+                                                <BarrasGreedy variantes={greedy.variantes} />
+                                            </div>
+
+                                            {/* COM-105 v3: gráfico de líneas en tarjeta propia, debajo del de barras */}
+                                            <div className="bg-white border border-slate-200 rounded-xl p-4">
+                                                <h4 className="font-bold text-slate-800 text-sm mb-1">
+                                                    Serie diaria por propuesta
+                                                </h4>
+                                                <p className="text-[11px] text-slate-500 mb-3">
+                                                    Elija el indicador a graficar; la línea de cada propuesta muestra su valor
+                                                    por día de cocina.
+                                                </p>
+                                                <div className="flex flex-wrap gap-1.5 mb-3">
+                                                    {METRICAS_SERIE.map(m => (
+                                                        <button key={m.clave} onClick={() => setMetricaSerie(m)}
+                                                            className={`px-2.5 py-1 rounded-full text-[11px] font-bold transition-colors ${
+                                                                metricaSerie.clave === m.clave
+                                                                    ? 'bg-emerald-600 text-white'
+                                                                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                                            }`}>
+                                                            {m.label}
+                                                        </button>
+                                                    ))}
                                                 </div>
-                                                <div>
-                                                    <div className="flex flex-wrap gap-1.5 mb-2">
-                                                        {METRICAS_SERIE.map(m => (
-                                                            <button key={m.clave} onClick={() => setMetricaSerie(m)}
-                                                                className={`px-2.5 py-1 rounded-full text-[11px] font-bold transition-colors ${
-                                                                    metricaSerie.clave === m.clave
-                                                                        ? 'bg-emerald-600 text-white'
-                                                                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                                                                }`}>
-                                                                {m.label}
-                                                            </button>
-                                                        ))}
-                                                    </div>
-                                                    <LineasGreedy variantes={greedy.variantes} metrica={metricaSerie} />
-                                                    <div className="flex flex-wrap gap-3 justify-center mt-1">
-                                                        {greedy.variantes.map(v => (
-                                                            <span key={v.variante} className="flex items-center gap-1.5 text-[11px] font-bold text-slate-600">
-                                                                <span className="w-3 h-1 rounded" style={{ backgroundColor: COLOR_VARIANTE[v.variante] }} />
-                                                                {v.etiqueta}
-                                                            </span>
-                                                        ))}
-                                                    </div>
+                                                <LineasGreedy variantes={greedy.variantes} metrica={metricaSerie} />
+                                                <div className="flex flex-wrap gap-3 justify-center mt-2">
+                                                    {greedy.variantes.map(v => (
+                                                        <span key={v.variante} className="flex items-center gap-1.5 text-[11px] font-bold text-slate-600">
+                                                            <span className="w-3 h-1 rounded" style={{ backgroundColor: COLOR_VARIANTE[v.variante] }} />
+                                                            {v.etiqueta}
+                                                        </span>
+                                                    ))}
                                                 </div>
                                             </div>
-                                        )}
-                                    </div>
+                                        </div>
+                                    )}
                                 </div>
                             )}
 
@@ -907,7 +930,7 @@ export const ModelosMLView = () => {
                                         Modelo de Precios — Random Forest de Insumos
                                     </h3>
 
-                                    {/* COM-105 v3: estados de carga perezosa y de error con reintento */}
+                                    {/* COM-105 v2: estados de carga perezosa y de error con reintento */}
                                     {precioCargando ? (
                                         <div className="p-10 text-center bg-white border border-slate-200 rounded-xl">
                                             <Loader2 className="animate-spin mx-auto text-amber-600" size={26} />
@@ -946,17 +969,17 @@ export const ModelosMLView = () => {
                                                     </p>
                                                     <ScatterPrecios puntos={precio.puntos} />
                                                     <div className="flex flex-wrap gap-2 justify-center mt-2">
+                                                        {/* COM-105 v3: TODAS las pills son clickeables; el backend envía
+                                                            serie para cada insumo de metricas_por_insumo. */}
                                                         {(precio.metricas_por_insumo || []).map(m => (
                                                             <button key={m.insumo_id}
-                                                                onClick={() => precio.series?.some(s => s.insumo_id === m.insumo_id) && setPrecioSel(m.insumo_id)}
+                                                                onClick={() => setPrecioSel(m.insumo_id)}
                                                                 className={`px-2.5 py-1 rounded-full text-[11px] font-bold transition-colors ${
-                                                                    precioSel === m.insumo_id && serieSel
+                                                                    precioSel === m.insumo_id
                                                                         ? 'text-white bg-amber-600'
                                                                         : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                                                                 }`}
-                                                                title={precio.series?.some(s => s.insumo_id === m.insumo_id)
-                                                                    ? 'Ver serie histórica de este insumo'
-                                                                    : 'Sin serie histórica disponible en este payload'}>
+                                                                title="Ver serie histórica y predicciones de este insumo">
                                                                 {m.nombre} · MAPE {m.mape_pct}% · n={m.n}
                                                             </button>
                                                         ))}
@@ -983,7 +1006,6 @@ export const ModelosMLView = () => {
                                                         <span>Confianza promedio (in-sample)</span>
                                                         <span className="font-bold text-slate-800">{precio.metricas.confianza_promedio_insample}%</span>
                                                     </p>
-                                                    {/* COM-105 v3: transparencia del universo evaluado */}
                                                     {precio.universo_evaluado && (
                                                         <p className="text-[10px] text-slate-500 leading-relaxed pt-1 border-t border-slate-200">
                                                             Universo: {precio.universo_evaluado.criterio}. Se evaluaron{' '}
